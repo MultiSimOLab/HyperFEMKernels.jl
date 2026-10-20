@@ -24,6 +24,7 @@ struct Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF}
     smu::SU             # slot specs (trial) per field
     trian::Triangulation
     xq::Vector          # reference quadrature points
+    auxcache::Base.RefValue{Any}   # dense auxiliary values when cache_aux = true
 end
 
 function Group(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int, previous=Any[])
@@ -45,15 +46,20 @@ function Group(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int,
     aux = Tuple(a.array for a in pf.aux)
     NF = length(tables)
     Group{pf.test.nslots,pf.trial.nslots,typeof(pf),typeof(tables),typeof(aux),typeof(smv),typeof(smu),D,NF}(
-        pf, NTuple{NF,Int}(locs), tables, geo, aux, smv, smu, trian, collect(xq))
+        pf, NTuple{NF,Int}(locs), tables, geo, aux, smv, smu, trian, collect(xq), Ref{Any}(nothing))
 end
 
 """
-    KernelOperator(res, jac, U, V; nthreads = Threads.nthreads())
+    KernelOperator(res, jac, U, V; nthreads = Threads.nthreads(), cache_aux = false)
 
 Gridap `NonlinearOperator` that assembles `res(u, v)` and `jac(u, du, v)` with fused, threaded
 kernels. `res` and `jac` are written as for Gridap's `FEOperator`. Use [`update`](@ref) to change
 `res`/`jac` (e.g. a new load factor) while keeping tables, sparsity pattern and colouring.
+
+With `cache_aux = true` the auxiliary data (fields that do not depend on the unknown, e.g. a
+previous state) is evaluated once per operator instead of once per assembly. Only safe when that
+data does not change while the operator is used (e.g. it must not be built from the FE function
+that holds the current Newton iterate).
 """
 struct KernelOperator{R,J,US,VS} <: NonlinearOperator
     res::R
@@ -68,6 +74,7 @@ struct KernelOperator{R,J,US,VS} <: NonlinearOperator
     nzpos::Matrix{Int32}
     colors::Vector{Vector{Int32}}
     nthreads::Int
+    cache_aux::Bool
 end
 
 function compile_groups(forms::Vector{Form}, U, locs, ncells::Int, D::Int, previous=Any[])
@@ -90,7 +97,7 @@ function compile_groups(forms::Vector{Form}, U, locs, ncells::Int, D::Int, previ
     groups
 end
 
-function KernelOperator(res, jac, U::FESpace, V::FESpace; nthreads::Int=Threads.nthreads())
+function KernelOperator(res, jac, U::FESpace, V::FESpace; nthreads::Int=Threads.nthreads(), cache_aux::Bool=false)
     Us, Vs = field_spaces(U), field_spaces(V)
     length(Us) == length(Vs) || error("HyperFEMKernels: test and trial spaces have different numbers of fields")
     if U isa MultiFieldFESpace
@@ -116,7 +123,7 @@ function KernelOperator(res, jac, U::FESpace, V::FESpace; nthreads::Int=Threads.
     jgroups = compile_groups(jforms, U, locs, ncells, D)
     A0, nzpos = sparsity(fields, loc, ncells, toff, uoff)
     colors = color_cells(fields, ncells, toff)
-    KernelOperator(res, jac, U, V, fields, loc, rgroups, jgroups, A0, nzpos, colors, nthreads)
+    KernelOperator(res, jac, U, V, fields, loc, rgroups, jgroups, A0, nzpos, colors, nthreads, cache_aux)
 end
 
 """
@@ -132,7 +139,7 @@ function update(op::KernelOperator, res, jac)
     prev = vcat(op.rgroups, op.jgroups)
     rgroups = compile_groups(capture(res, probes(op.U, :unknown), probes(op.V, :test)), op.U, locs, ncells, D, prev)
     jgroups = compile_groups(capture(jac, probes(op.U, :unknown), probes(op.U, :trial), probes(op.V, :test)), op.U, locs, ncells, D, prev)
-    KernelOperator(res, jac, op.U, op.V, op.fields, op.ndl, rgroups, jgroups, op.A0, op.nzpos, op.colors, op.nthreads)
+    KernelOperator(res, jac, op.U, op.V, op.fields, op.ndl, rgroups, jgroups, op.A0, op.nzpos, op.colors, op.nthreads, op.cache_aux)
 end
 
 # ---------------------------------------------------------------------------------------------
@@ -220,87 +227,166 @@ function Algebra.residual_and_jacobian!(b::AbstractVector, A::AbstractMatrix, op
 end
 
 # ---------------------------------------------------------------------------------------------
-# Cell loops
+# Auxiliary data: dense values at the quadrature points
+#
+# Auxiliary data (fields that do not depend on the unknown/test/trial functions: previous states,
+# interpolated fields, functions of x, constants) is evaluated by Gridap once per assembly (or
+# once per operator with `cache_aux = true`) into dense `np × ncells` arrays, so the element
+# kernels only read plain arrays (requirement for GPU execution).
+
+"Dense values (np × ncells) of the auxiliary arrays of a group."
+function materialize_aux(g::Group, nthreads::Int)
+    np, ncells = g.geo.np, size(g.geo.coords, 2)
+    map(g.aux) do a
+        T = eltype(eltype(a))
+        M = Matrix{T}(undef, np, ncells)
+        chunks = Iterators.partition(1:ncells, cld(ncells, max(1, nthreads)))
+        @sync for ch in chunks
+            Threads.@spawn begin
+                cache = array_cache(a)
+                for cell in ch
+                    v = getindex!(cache, a, cell)
+                    @inbounds for q in 1:np
+                        M[q, cell] = v[q]
+                    end
+                end
+            end
+        end
+        M
+    end
+end
+
+function aux_data(op::KernelOperator, g::Group)
+    if op.cache_aux
+        g.auxcache[] === nothing && (g.auxcache[] = materialize_aux(g, op.nthreads))
+        return g.auxcache[]
+    end
+    materialize_aux(g, op.nthreads)
+end
+
+# ---------------------------------------------------------------------------------------------
+# Element computations (no assembly): gather, element residual/Jacobian, scatter.
+# The element functions only read dense arrays; the scatter is the part that changes for MPI
+# (local numbering + communication) and GPU (atomics or colours).
+
+"Local values of the unknowns of `cell` (free values and Dirichlet values)."
+@inline function gather_cell!(xl, fields::Vector{FieldLayout}, x, dvals, cell::Integer)
+    for (f, fl) in enumerate(fields)
+        off = fl.trial_off
+        dv = dvals[f]
+        @inbounds for j in 1:fl.nd
+            id = fl.trial_ids[j, cell]
+            xl[fl.loc+j] = id > 0 ? x[off+id] : dv[-id]
+        end
+    end
+    xl
+end
+
+"Geometry at point `q` of `cell`: (dV, inverse of Jt)."
+@inline function point_geometry(geo::GeoTable{D}, q::Int, cell::Integer) where {D}
+    Jt = zero(TensorValue{D,D,Float64,D * D})
+    @inbounds for n in 1:geo.ng
+        Jt += outer(geo.dM[q, n], geo.coords[n, cell])
+    end
+    (geo.w[q] * meas(Jt), inv(Jt))
+end
+
+"Element residual of `cell` into `re` (local numbering of the element)."
+function element_residual!(re, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF}, xl, auxd, cell::Integer,
+                           dNb) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF}
+    fill!(re, 0.0)
+    tables, locs, pf = g.tables, g.locs, g.pf
+    zsv = zero(SVector{NSV,Float64})
+    for q in 1:g.geo.np
+        dV, iJt = point_geometry(g.geo, q, cell)
+        map((t, buf) -> phys_grads!(buf, t, q, iJt), tables, dNb)
+        FV = map((t, l, buf) -> field_point_values(t, xl, l, q, buf), tables, locs, dNb)
+        Aq = map(a -> @inbounds(a[q, cell]), auxd)
+        R = ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, EMPTY_SLOTS), zsv)
+        map((t, l, sm, buf) -> contract_residual!(re, t, l, sm, R, q, buf, dV), tables, locs, g.smv, dNb)
+    end
+    re
+end
+
+"Element Jacobian of `cell` into `KeT` (transposed: KeT[trial, test], local numbering)."
+function element_jacobian!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF}, xl, auxd, cell::Integer,
+                           dNb) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF}
+    fill!(KeT, 0.0)
+    tables, locs, pf = g.tables, g.locs, g.pf
+    zsv = zero(SVector{NSV,Float64})
+    zsu = zero(SVector{NSU,Float64})
+    for q in 1:g.geo.np
+        dV, iJt = point_geometry(g.geo, q, cell)
+        map((t, buf) -> phys_grads!(buf, t, q, iJt), tables, dNb)
+        FV = map((t, l, buf) -> field_point_values(t, xl, l, q, buf), tables, locs, dNb)
+        Aq = map(a -> @inbounds(a[q, cell]), auxd)
+        T = ForwardDiff.jacobian(s -> ForwardDiff.gradient(r -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsu), zsv)
+        map((tf, lf, smf, bf) -> map((tg, lg, smg, bg) ->
+                contract_jacobian!(KeT, tf, lf, smf, bf, tg, lg, smg, bg, T, q, dV),
+                tables, locs, g.smu, dNb),
+            tables, locs, g.smv, dNb)
+    end
+    KeT
+end
+
+"Add an element residual to the global vector (serial numbering)."
+@inline function scatter_residual!(b, fields::Vector{FieldLayout}, re, cell::Integer)
+    for fl in fields
+        off = fl.test_off
+        @inbounds for j in 1:fl.nd
+            id = fl.test_ids[j, cell]
+            id > 0 && (b[off+id] += re[fl.loc+j])
+        end
+    end
+    b
+end
+
+"Add an element Jacobian to the nonzeros of the global matrix with precomputed positions."
+@inline function scatter_jacobian!(nzv, nzpos::Matrix{Int32}, KeT, ndl::Int, cell::Integer)
+    @inbounds for jj in 1:ndl, ii in 1:ndl
+        p = nzpos[ii+(jj-1)*ndl, cell]
+        p > 0 && (nzv[p] += KeT[jj, ii])
+    end
+    nzv
+end
+
+# ---------------------------------------------------------------------------------------------
+# Threaded CPU driver: colours, then chunks of cells per task.
 
 function run_cells!(kind::Val, b, A, op::KernelOperator, g::Group, x, dvals)
+    auxd = aux_data(op, g)
     for color in op.colors
         nchunks = clamp(length(color) ÷ MIN_CELLS_PER_TASK, 1, op.nthreads)
-        chunks = Iterators.partition(color, cld(length(color), nchunks))
         if nchunks == 1
-            cells!(kind, b, A, op, g, x, dvals, color)
+            cells!(kind, b, A, op, g, x, dvals, auxd, color)
         else
-            @sync for ch in chunks
-                Threads.@spawn cells!(kind, b, A, op, g, x, dvals, ch)
+            @sync for ch in Iterators.partition(color, cld(length(color), nchunks))
+                Threads.@spawn cells!(kind, b, A, op, g, x, dvals, auxd, ch)
             end
         end
     end
     nothing
 end
 
-function cells!(kind::Val{K}, b, A, op::KernelOperator, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF},
-                x, dvals, cells) where {K,NSV,NSU,PF,TT,AUX,SV,SU,D,NF}
+function cells!(::Val{K}, b, A, op::KernelOperator, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF},
+                x, dvals, auxd, cells) where {K,NSV,NSU,PF,TT,AUX,SV,SU,D,NF}
     ndl = op.ndl
-    fields = op.fields
-    tables = g.tables
-    geo = g.geo
-    pf = g.pf
     xl = zeros(ndl)
-    re = K === :res ? zeros(ndl) : Float64[]
-    KeT = K === :jac ? zeros(ndl, ndl) : zeros(0, 0)   # transposed: KeT[trial, test]
-    locs = g.locs
-    dNb = map(t -> Vector{VectorValue{D,Float64}}(undef, t.nn), tables)
-    caches = map(array_cache, g.aux)
-    zsv = zero(SVector{NSV,Float64})
-    zsu = zero(SVector{NSU,Float64})
-    nzv = A === nothing ? Float64[] : nonzeros(A)
-    for cell in cells
-        # gather unknowns (free values and Dirichlet values)
-        for (f, fl) in enumerate(fields)
-            off = fl.trial_off
-            dv = dvals[f]
-            @inbounds for j in 1:fl.nd
-                id = fl.trial_ids[j, cell]
-                xl[fl.loc+j] = id > 0 ? x[off+id] : dv[-id]
-            end
+    dNb = map(t -> Vector{VectorValue{D,Float64}}(undef, t.nn), g.tables)
+    if K === :res
+        re = zeros(ndl)
+        for cell in cells
+            gather_cell!(xl, op.fields, x, dvals, cell)
+            element_residual!(re, g, xl, auxd, cell, dNb)
+            scatter_residual!(b, op.fields, re, cell)
         end
-        K === :res ? fill!(re, 0.0) : fill!(KeT, 0.0)
-        auxcell = map((c, a) -> getindex!(c, a, cell), caches, g.aux)
-        for q in 1:geo.np
-            Jt = zero(TensorValue{D,D,Float64,D * D})
-            @inbounds for n in 1:geo.ng
-                Jt += outer(geo.dM[q, n], geo.coords[n, cell])
-            end
-            dV = geo.w[q] * meas(Jt)
-            iJt = inv(Jt)
-            map((t, buf) -> phys_grads!(buf, t, q, iJt), tables, dNb)
-            FV = map((t, fl, buf) -> field_point_values(t, xl, fl, q, buf), tables, locs, dNb)
-            Aq = map(v -> v[q], auxcell)
-            if K === :res
-                R = ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, EMPTY_SLOTS), zsv)
-                map((t, fl, sm, buf) -> contract_residual!(re, t, fl, sm, R, q, buf, dV),
-                    tables, locs, g.smv, dNb)
-            else
-                T = ForwardDiff.jacobian(s -> ForwardDiff.gradient(r -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsu), zsv)
-                map((tf, flf, smf, bf) -> map((tg, flg, smg, bg) ->
-                        contract_jacobian!(KeT, tf, flf, smf, bf, tg, flg, smg, bg, T, q, dV),
-                        tables, locs, g.smu, dNb),
-                    tables, locs, g.smv, dNb)
-            end
-        end
-        # scatter
-        if K === :res
-            for fl in fields
-                off = fl.test_off
-                @inbounds for j in 1:fl.nd
-                    id = fl.test_ids[j, cell]
-                    id > 0 && (b[off+id] += re[fl.loc+j])
-                end
-            end
-        else
-            @inbounds for jj in 1:ndl, ii in 1:ndl
-                p = op.nzpos[ii+(jj-1)*ndl, cell]
-                p > 0 && (nzv[p] += KeT[jj, ii])
-            end
+    else
+        KeT = zeros(ndl, ndl)
+        nzv = nonzeros(A)
+        for cell in cells
+            gather_cell!(xl, op.fields, x, dvals, cell)
+            element_jacobian!(KeT, g, xl, auxd, cell, dNb)
+            scatter_jacobian!(nzv, op.nzpos, KeT, ndl, cell)
         end
     end
     nothing
