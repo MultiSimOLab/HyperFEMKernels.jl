@@ -50,3 +50,34 @@ let
     x = 0.01 .* randn(num_free_dofs(U))
     report("EM 3D monolithic (README mesh)", check(res, jac, U, V, x))
 end
+
+# 4. hMRE 2D (Adv_Mater_Ultra_Soft_Magnet hMRE_2D.jl): Dirichlet masks, auxiliary fields, Λ * ∫
+let
+    adv = joinpath(@__DIR__, "..", "..", "Adv_Mater_Ultra_Soft_Magnet")
+    model = GmshDiscreteModel(joinpath(adv, "data", "models", "Short_magnet.msh"))
+    params = [10.0, 12480.64495232286, 1.0, 2.0, 5195.545287237134, 0.2602717127043121, 2.0]
+    modelmech = NonlinearMooneyRivlin2D(λ=(params[1] + params[2]) * 1e2, μ1=params[1] * 1e3, μ2=params[2], α1=params[3], α2=params[4]) +
+                TransverseIsotropy2D(μ=params[5], α1=params[6], α2=params[7])
+    μ0 = 4π * 1e-7; Banorm = 80.0E-9; αr = 10e-3 / μ0
+    reffeu = ReferenceFE(lagrangian, VectorValue{2,Float64}, 1)
+    Ωs = Triangulation(model, tags=["Beam"]); dΩs = Measure(Ωs, 2)
+    Du = DirichletBC(["Fixed_Solid", "Fixed_Solid_x"], [[0.0, 0.0], [0.0, 0.0]])
+    V = TestFESpace(Ωs, reffeu, Du, conformity=:H1, dirichlet_masks=[(true, true), (true, false)])
+    U = TrialFESpace(V, Du); U⁻ = TrialFESpace(V, Du)
+    uh⁻ = FEFunction(U⁻, 1e-4 .* randn(num_free_dofs(U⁻)))
+    _, ∂Ψs∂F, ∂Ψs∂FF = modelmech()
+    F, _, _ = get_Kinematics(Kinematics(Mechano, Solid))
+    V_N = TestFESpace(Ωs, reffeu)
+    Nh = interpolate_everywhere(x -> VectorValue(1.0, 0.0), V_N)
+    Bah = interpolate_everywhere(VectorValue([0.0, -Banorm]), V_N)
+    function invU(F; ε=1e-12)
+        C = transpose(F) ⋅ F + ε * I2; s = sqrt(det(C))
+        inv((C + s * I2) / sqrt(tr(C) + 2s))
+    end
+    ∂Ψmag∂F(Fn, N, Ba) = (-αr / μ0) * (Ba ⊗ ((invU(Fn)) * N))
+    Λ = 0.35
+    res(u, v) = ∫((∇(v)' ⊙ (∂Ψs∂F ∘ (F ∘ (∇(u)'), Nh))))dΩs + Λ * ∫((∂Ψmag∂F ∘ (F ∘ (∇(uh⁻)'), Nh, Bah)) ⊙ (∇(v)'))dΩs
+    jac(u, du, v) = ∫(∇(v)' ⊙ ((∂Ψs∂FF ∘ (F ∘ (∇(u)'), Nh)) ⊙ (∇(du)')))dΩs
+    x = 1e-4 .* randn(num_free_dofs(U))
+    report("hMRE 2D (masks, aux fields, Λ*∫)", check(res, jac, U, V, x))
+end
