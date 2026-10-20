@@ -37,11 +37,12 @@ const SparseMap = Vector{Tuple{Int32,Int32,Int32,Float64}}
 const DEBUG_LINEAR = get(ENV, "HFK_DEBUG_LINEAR", "0") == "1"
 _nolin(why) = (DEBUG_LINEAR && println("HyperFEMKernels: linear-map shortcut not used: ", why); nothing)
 
-struct LinearForm{F,O,C,ST}
+struct LinearForm{F,O,C,ST,AP}
     state::F            # (ops, FV, A) -> tuple of all state inputs of the group
     ops::O
     coefs::C            # one coefficient per term
     maps::Vector{SparseMap}
+    apply::AP           # (C, S) -> SVector of slot coefficients (generated from `maps`)
     expr::Expr
 end
 
@@ -152,7 +153,24 @@ function LinearForm(terms0::Vector{Term}, pf::PointForm, tables, aux::Tuple, kin
         end
         push!(maps, m)
     end
-    LinearForm{typeof(state),typeof(ops),typeof(coefs),ST}(state, ops, coefs, maps, ex)
+    apply = generate_apply(maps, ST, kind === :res ? nsv : nsv * nsu)
+    LinearForm{typeof(state),typeof(ops),typeof(coefs),ST,typeof(apply)}(state, ops, coefs, maps, apply, ex)
+end
+
+"Generated function (C, S) -> SVector{N}: static application of the sparse maps."
+function generate_apply(maps::Vector{SparseMap}, ST, N::Int)
+    sums = [Any[] for _ in 1:N]
+    for (i, m) in enumerate(maps), (idx, g, k, v) in m
+        if g == 0
+            push!(sums[idx], :(C[$i] * $v))
+        else
+            sg = ST.parameters[g] <: Real ? :(S[$g]) : :(S[$g].data[$k])
+            push!(sums[idx], :(C[$i] * $v * $sg))
+        end
+    end
+    comps = [isempty(sm) ? 0.0 : Expr(:call, :+, sm...) for sm in sums]
+    ex = :((C, S) -> SVector{$N,Float64}(($(comps...),)))
+    RuntimeGeneratedFunction(@__MODULE__, @__MODULE__, ex)
 end
 
 "Slot coefficients (vector for :res, vec of the matrix for :jac) of a linear part for inputs `S`."
@@ -166,13 +184,4 @@ function slot_coeffs(lin, lops, S, nsv, nsu, kind)
 end
 
 "Apply the linear maps: coefficients (length nsv, or nsv*nsu) for the state inputs at a point."
-@inline function apply_maps(lf::LinearForm, svals::Tuple, ::Val{N}) where {N}
-    out = zero(MVector{N,Float64})
-    @inbounds for i in eachindex(lf.maps)
-        c = lf.coefs[i]
-        for (idx, g, k, v) in lf.maps[i]
-            out[idx] += g == 0 ? c * v : c * v * comp(svals[g], k)
-        end
-    end
-    SVector(out)
-end
+@inline apply_maps(lf::LinearForm, svals::Tuple, ::Val{N}) where {N} = lf.apply(lf.coefs, svals)::SVector{N,Float64}
