@@ -13,7 +13,7 @@
 
 using HyperFEM
 using Gridap, GridapGmsh
-using Gridap.FESpaces: SparseMatrixAssembler, FEOperator, get_algebraic_operator
+using Gridap.FESpaces: SparseMatrixAssembler, FEOperator, get_algebraic_operator, zero_free_values
 using Gridap.Algebra: allocate_residual, allocate_jacobian, residual!, jacobian!
 using GridapSolvers, GridapSolvers.NonlinearSolvers
 using LinearAlgebra, SparseArrays, Printf, Dates
@@ -24,7 +24,7 @@ const MESH = joinpath(HYPERFEM_DIR, "test", "models", "test_static_EM.msh")
 function build_model(args)
     if isempty(args) || args[1] == "msh"
         order = length(args) ≥ 2 ? parse(Int, args[2]) : 1
-        return GmshDiscreteModel(MESH), order, "msh"
+        return GmshDiscreteModel(MESH), order, "msh", 0.1
     end
     nx, ny, nz = parse.(Int, args[2:4])
     order = length(args) ≥ 5 ? parse(Int, args[5]) : 1
@@ -33,7 +33,8 @@ function build_model(args)
     add_tag_from_tags!(labels, "fixedup", CartesianTags.face0YZ⁺)
     add_tag_from_tags!(labels, "topsuf", CartesianTags.faceXY1⁺)
     add_tag_from_vertex_filter!(labels, "midsuf", model, x -> abs(x[3] - 0.001) < 1e-9)
-    return model, order, "cart$(nx)x$(ny)x$(nz)"
+    # same geometry and load as HyperFEM test/SimulationsTests/StaggeredElectroMechanicalSimulation.jl
+    return model, order, "cart$(nx)x$(ny)x$(nz)", 5e-5
 end
 
 function setup(model, order; φtop = 0.1)
@@ -58,7 +59,7 @@ function setup(model, order; φtop = 0.1)
 end
 
 "Newton loop timed by parts. Same steps, tolerances and LU solve as HyperFEM's driver."
-function instrumented!(s; nsteps=5, maxiter=20, atol=1e-10, rtol=1e-8)
+function instrumented!(s; verbose=false, nsteps=5, maxiter=20, atol=1e-10, rtol=1e-8)
     U, V = s.U, s.V
     assem = SparseMatrixAssembler(U, V)
     x = zero_free_values(U)
@@ -79,29 +80,32 @@ function instrumented!(s; nsteps=5, maxiter=20, atol=1e-10, rtol=1e-8)
             x .-= dx
             t[:res] += @elapsed residual!(b, op, x); n[:res] += 1
             r = norm(b)
+            verbose && (@printf("  step %d  |r| = %.3e\n", step, r); flush(stdout))
             (r < atol || r < rtol * r0) && break
         end
     end
     return (; total, t, n, ndofs = length(x))
 end
 
-function hyperfem_solve(model, order)
-    s = setup(model, order)
+function hyperfem_solve(model, order, φtop)
+    s = setup(model, order; φtop)
     nls = NewtonSolver(LUSolver(); maxiter=20, atol=1e-10, rtol=1e-8, verbose=false)
     cm = StaticNonlinearModel(s.res, s.jac, s.U, s.V, s.D; nls=nls)
     return @elapsed solve!(cm; stepping=(nsteps=5, maxbisec=5))
 end
 
 function main(args)
-    model, order, tag = build_model(args)
+    model, order, tag, φtop = build_model(args)
     ncells = num_cells(model)
     println("HyperFEM EM 3D phase-0 profile — case $tag, order $order, $ncells cells")
     println("Julia $(VERSION), threads $(Threads.nthreads()), BLAS threads $(BLAS.get_num_threads())")
 
-    cold = instrumented!(setup(model, order))      # includes compilation
-    warm = instrumented!(setup(model, order))      # steady state
-    hf_cold = hyperfem_solve(model, order)
-    hf_warm = hyperfem_solve(model, order)
+    flush(stdout)
+    cold = instrumented!(setup(model, order; φtop); verbose=true)  # includes compilation
+    println("cold run done"); flush(stdout)
+    warm = instrumented!(setup(model, order; φtop))      # steady state
+    hf_cold = hyperfem_solve(model, order, φtop)
+    hf_warm = hyperfem_solve(model, order, φtop)
 
     rest = warm.total - warm.t[:res] - warm.t[:jac] - warm.t[:solve]
     asm = warm.t[:res] + warm.t[:jac]
