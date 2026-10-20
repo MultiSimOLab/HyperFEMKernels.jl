@@ -44,8 +44,8 @@ include("tree.jl")
 include("codegen.jl")
 include("tables.jl")
 include("kernels.jl")
-include("coloring.jl")
 include("assembly.jl")
+include("coloring.jl")
 include("verify.jl")
 
 end # module
