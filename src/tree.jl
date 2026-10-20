@@ -63,9 +63,10 @@ function capture(f, args...)
     dc = try
         f(args...)
     catch err
-        # the weak form itself failed on the probes (e.g. ∇(u*u)): every contribution to Gridap
-        (err isa ErrorException && startswith(err.msg, "HyperFEMKernels")) || rethrow()
-        push!(fallback, (:all, err.msg))
+        # the weak form itself failed on the probes (e.g. ∇(u*u), jump/mean on a skeleton):
+        # every contribution to Gridap (which raises the same error if the form is wrong)
+        err isa InterruptException && rethrow()
+        push!(fallback, (:all, sprint(showerror, err)))
         return forms, fallback
     end
     dc isa DomainContribution || error("HyperFEMKernels: the weak form did not return integrals (got $(typeof(dc)))")
@@ -73,8 +74,8 @@ function capture(f, args...)
         try
             push!(forms, Form(trian, collect_terms(arr, 1.0)))
         catch err
-            err isa ErrorException || rethrow()
-            push!(fallback, (trian, err.msg))
+            err isa InterruptException && rethrow()
+            push!(fallback, (trian, sprint(showerror, err)))
         end
     end
     forms, fallback

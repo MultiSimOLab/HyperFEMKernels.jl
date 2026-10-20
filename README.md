@@ -25,16 +25,20 @@ matrix as Gridap to 1e-15):
 
 ## Status
 
-Phase 1: engine working and verified against Gridap to machine precision on HyperFEM's
+Phase 1 closed (v0.1.0): engine verified against Gridap to machine precision on HyperFEM's
 electro-mechanical, magneto-mechanical and visco-hyperelastic weak forms. Volume integrals on
-Lagrangian spaces (single/multi-field, Dirichlet masks, subdomains); boundary integrals and
-distributed (MPI) assembly are next.
+Lagrangian spaces (single/multi-field, Dirichlet masks, subdomains), threads, matrix-free.
+
+Phase 2 (in progress): boundary integrals in the engine (Neumann, Robin, surface and follower
+loads with the normal, on any `BoundaryTriangulation`), and a hybrid fallback — contributions the
+engine cannot translate (skeleton terms, differential operators on products with the unknown)
+are assembled by Gridap and added, with a warning, so the engine never blocks a simulation.
 
 ## Roadmap
 
 - **Phase 0** — profile HyperFEM EM 3D and hMRE 2D; continue only if assembly is > 50 % of runtime.
 - **Phase 1** — minimal engine (volume integrals, Lagrange, single/multi-field, masked Dirichlet, threads) and HyperFEM adapter; continue if total speed-up ≥ ×5.
-- **Phase 2** — `@weakform` macro, boundary integrals, subdomain fields, hybrid fallback to Gridap.
+- **Phase 2** — hybrid fallback to Gridap (done), boundary integrals (done), state writes, mixed meshes, iterative solver on the matrix-free Jacobian, KernelAbstractions (GPU).
 - **Phase 3** — GridapDistributed (MPI), DG, Piola spaces.
 
 ## Usage

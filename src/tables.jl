@@ -15,16 +15,29 @@ function uniform_value(a::AbstractArray, what::String)
     error("HyperFEMKernels: $what differs between cells (mixed cell types are not supported yet)")
 end
 
-"Geometry: gradients of the geometric shape functions at the quadrature points, weights, coordinates."
-struct GeoTable{D}
+"""
+Geometry: gradients of the geometric shape functions at the quadrature points, weights,
+coordinates. For a boundary group `Jf` is the (constant) Jacobian of the map from the reference
+face to the reference cell, so that the surface measure is `w * meas(Jf ⋅ Jt)`; `nothing` for
+volume groups.
+"""
+struct GeoTable{D,JF}
     np::Int
     ng::Int
-    dM::Matrix{VectorValue{D,Float64}}      # np × ng, reference gradients
+    dM::Matrix{VectorValue{D,Float64}}      # np × ng, reference gradients (at the cell points)
     w::Vector{Float64}                       # np
-    coords::Matrix{VectorValue{D,Float64}}   # ng × ncells
+    coords::Matrix{VectorValue{D,Float64}}   # ng × ncells (of the integration triangulation)
+    Jf::JF
 end
 
-function GeoTable(trian::Triangulation, xq::AbstractVector, w::AbstractVector)
+"""
+    GeoTable(trian, xq, w; cells = 1:num_cells(trian), Jf = nothing)
+
+Geometry of the cells `cells` of `trian` (the FE-space triangulation) at the reference points
+`xq`: column `i` of `coords` holds the nodes of cell `cells[i]` (a face of a boundary group maps
+to its cell).
+"""
+function GeoTable(trian::Triangulation, xq::AbstractVector, w::AbstractVector; cells=1:num_cells(trian), Jf=nothing)
     reffes = Geometry.get_reffes(trian)
     length(reffes) == 1 || error("HyperFEMKernels: mixed cell types are not supported yet")
     M = get_shapefuns(reffes[1])
@@ -32,15 +45,15 @@ function GeoTable(trian::Triangulation, xq::AbstractVector, w::AbstractVector)
     D = num_point_dims(trian)
     cc = get_cell_coordinates(trian)
     ng = size(dM, 2)
-    coords = Matrix{VectorValue{D,Float64}}(undef, ng, num_cells(trian))
+    coords = Matrix{VectorValue{D,Float64}}(undef, ng, length(cells))
     cache = array_cache(cc)
-    for cell in 1:num_cells(trian)
+    for (i, cell) in enumerate(cells)
         xc = getindex!(cache, cc, cell)
         for n in 1:ng
-            coords[n, cell] = xc[n]
+            coords[n, i] = xc[n]
         end
     end
-    GeoTable{D}(length(xq), ng, Matrix{VectorValue{D,Float64}}(dM), collect(Float64, w), coords)
+    GeoTable{D,typeof(Jf)}(length(xq), ng, Matrix{VectorValue{D,Float64}}(dM), collect(Float64, w), coords, Jf)
 end
 
 "Scalar nodal shape functions of one field at the quadrature points and the local dof layout.
