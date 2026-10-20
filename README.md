@@ -25,7 +25,10 @@ matrix as Gridap to 1e-15):
 
 ## Status
 
-Phase 0 (profiling HyperFEM examples). No functionality yet. Internal progress log kept outside the repository.
+Phase 1: engine working and verified against Gridap to machine precision on HyperFEM's
+electro-mechanical, magneto-mechanical and visco-hyperelastic weak forms. Volume integrals on
+Lagrangian spaces (single/multi-field, Dirichlet masks, subdomains); boundary integrals and
+distributed (MPI) assembly are next.
 
 ## Roadmap
 
@@ -34,14 +37,22 @@ Phase 0 (profiling HyperFEM examples). No functionality yet. Internal progress l
 - **Phase 2** — `@weakform` macro, boundary integrals, subdomain fields, hybrid fallback to Gridap.
 - **Phase 3** — GridapDistributed (MPI), DG, Piola spaces.
 
-## Minimal example (planned API)
+## Usage
 
 ```julia
 using Gridap, HyperFEMKernels
-# U, V, dΩ, res, jac defined as usual in Gridap
-op = FEOperator(res, jac, U, V; backend = :kernel)   # planned
-check(res, jac, U, x)                                 # compares with Gridap
+# U, V, dΩ, res(u, v), jac(u, du, v) written as for Gridap's FEOperator
+op = KernelOperator(res, jac, U, V)          # Gridap NonlinearOperator (threaded, fused kernels)
+b  = residual(op, x); A = jacobian(op, x)
+op = update(op, res2, jac2)                  # new load step: keeps tables, pattern, colouring
+check(res, jac, U, V, x)                     # relative differences with Gridap (≈1e-15)
+allocations(op, x)                           # bytes per element call (0 = GPU-ready weak form)
+
+mf = MatrixFreeJacobian(op); prepare!(mf, x) # partial assembly (sum factorisation on n-cubes)
+y  = mf * dx                                 # Jacobian–vector product without the matrix
 ```
+
+With HyperFEM (branch `kernel-backend`): `StaticNonlinearModel(res, jac, U, V, D; backend = :kernel)`.
 
 ## License
 
