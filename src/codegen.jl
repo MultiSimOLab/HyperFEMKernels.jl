@@ -4,7 +4,8 @@
 #
 #     core(ops, C, FV, A, sv, su) -> Number
 #
-# where `ops` is the tuple of pointwise operations (user/HyperFEM functions, ⊙, ', ...), `C` the
+# where `ops` is the tuple of pointwise operations (user/HyperFEM functions, ⊙, ', ...) followed by the
+# numbers of the integrand (runtime parameters, see `emit!(::CodegenState, ::Const)`), `C` the
 # tuple of term coefficients, `FV[f] = (u_f, ∇u_f)` the unknown values at the point, `A[k]` the
 # auxiliary values at the point, and `sv`/`su` static vectors with the components ("slots") of the
 # test and trial leaves. The integrand is linear in `sv` and in `su`, so residual coefficients
@@ -69,8 +70,9 @@ struct CodegenState
     trial::SlotLayout
     aux::Vector{Aux}
     subst::IdDict{Any,Any}   # nodes replaced by a given expression (e.g. a symbol)
+    consts::Vector{Int}      # positions in `ops` that hold numbers of the integrand (parameters)
 end
-CodegenState(test, trial, aux) = CodegenState(Any[], Expr[], Dict{Any,Symbol}(), test, trial, aux, IdDict{Any,Any}())
+CodegenState(test, trial, aux) = CodegenState(Any[], Expr[], Dict{Any,Symbol}(), test, trial, aux, IdDict{Any,Any}(), Int[])
 
 "Emit a node, honouring substitutions."
 emit_node!(st::CodegenState, n::Node) = haskey(st.subst, n) ? st.subst[n] : emit!(st, n)
@@ -84,7 +86,18 @@ function emit!(st::CodegenState, n::Leaf)
     slot_expr(n.T, v, layout.offsets[k])
 end
 
-emit!(st::CodegenState, n::Const) = n.value
+"""
+Numbers of the integrand (`Λ * v`, `2μ * ε(u) ⊙ ε(v)`, `Pc(t) * (v ⋅ n)`) are runtime parameters, not
+literals: they are stored in `ops` and read as `ops[k]`, so the generated code depends on the structure
+of the weak form only, and `update` with other values reuses the compiled functions. One slot per
+occurrence: slots are never merged by value, which would make the code depend on the values again.
+"""
+function emit!(st::CodegenState, n::Const)
+    push!(st.ops, n.value)
+    k = length(st.ops)
+    push!(st.consts, k)
+    :(ops[$k])
+end
 
 function emit!(st::CodegenState, n::Aux)
     k = findfirst(a -> a.array === n.array, st.aux)
@@ -95,7 +108,7 @@ function emit!(st::CodegenState, n::Op)
     args = [emit_node!(st, c) for c in n.args]
     key = (objectid(n.f), args)
     haskey(st.memo, key) && return st.memo[key]
-    k = findfirst(f -> f === n.f, st.ops)
+    k = findfirst(i -> !(i in st.consts) && st.ops[i] === n.f, eachindex(st.ops))
     if k === nothing
         push!(st.ops, n.f)
         k = length(st.ops)
@@ -114,6 +127,7 @@ struct PointForm{F,O,C}
     test::SlotLayout
     trial::SlotLayout
     aux::Vector{Aux}
+    consts::Vector{Int}   # positions of the parameters (numbers of the integrand) in `ops`
     expr::Expr
 end
 
@@ -130,7 +144,7 @@ function PointForm(terms::Vector{Term})
     end)
     core = RuntimeGeneratedFunction(@__MODULE__, @__MODULE__, ex)
     coefs = Tuple(t.coef for t in terms)
-    PointForm(core, Tuple(st.ops), coefs, test, trial, aux, ex)
+    PointForm(core, Tuple(st.ops), coefs, test, trial, aux, st.consts, ex)
 end
 
 "Show the generated pointwise integrand (debugging)."

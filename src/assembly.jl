@@ -28,7 +28,9 @@ struct Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}
     locs::NTuple{NF,Int}  # offset of each field in the element vector
     tables::TT          # FieldTable per field
     geo::GeoTable{D,JF}
-    aux::AUX            # Gridap arrays, evaluated per cell
+    aux::Tuple          # Gridap arrays, evaluated per cell (lazy; their types are not part of the group's type,
+                        # so that a changed auxiliary expression does not recompile the kernels)
+                        # AUX: type of the dense values of `aux` at the points (NTuple of Matrix{T}, see materialize_aux)
     smv::SV             # slot specs (test) per field
     smu::SU             # slot specs (trial) per field
     trian::Triangulation
@@ -58,9 +60,10 @@ function Group(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int,
     smv = Tuple(SlotSpec(slot_map(pf.test, f, t.nc, D), D) for (f, t) in enumerate(tables))
     smu = Tuple(SlotSpec(slot_map(pf.trial, f, t.nc, D), D) for (f, t) in enumerate(tables))
     aux = Tuple(a.array for a in pf.aux)
+    AUX = Tuple{(Matrix{eltype(eltype(a))} for a in aux)...}
     NF = length(tables)
     lin = linear_maps ? LinearForm(terms, pf, tables, aux, pf.trial.nslots == 0 ? :res : :jac) : nothing
-    Group{pf.test.nslots,pf.trial.nslots,typeof(pf),typeof(tables),typeof(aux),typeof(smv),typeof(smu),D,NF,typeof(lin),typeof(geo.Jf)}(
+    Group{pf.test.nslots,pf.trial.nslots,typeof(pf),typeof(tables),AUX,typeof(smv),typeof(smu),D,NF,typeof(lin),typeof(geo.Jf)}(
         pf, lin, NTuple{NF,Int}(locs), tables, geo, aux, smv, smu, trian, collect(xq), Ref{Any}(nothing), cellmap, colors)
 end
 
@@ -434,26 +437,28 @@ end
 # once per operator with `cache_aux = true`) into dense `np × ncells` arrays, so the element
 # kernels only read plain arrays (requirement for GPU execution).
 
-"Dense values (np × ncells) of the auxiliary arrays of a group."
-function materialize_aux(g::Group, nthreads::Int)
+"Dense values (np × ncells) of the auxiliary arrays of a group (a tuple of type `AUX`)."
+function materialize_aux(g::Group{NSV,NSU,PF,TT,AUX}, nthreads::Int) where {NSV,NSU,PF,TT,AUX}
     np, ncells = g.geo.np, size(g.geo.coords, 2)
-    map(g.aux) do a
-        T = eltype(eltype(a))
-        M = Matrix{T}(undef, np, ncells)
-        chunks = Iterators.partition(1:ncells, cld(ncells, max(1, nthreads)))
+    chunks = collect(Iterators.partition(1:ncells, cld(ncells, max(1, nthreads))))
+    AUX(ntuple(length(g.aux)) do k
+        a = g.aux[k]                                   # not inferred: function barrier below
+        M = Matrix{eltype(eltype(a))}(undef, np, ncells)
         @sync for ch in chunks
-            Threads.@spawn begin
-                cache = array_cache(a)
-                for cell in ch
-                    v = getindex!(cache, a, cell)
-                    @inbounds for q in 1:np
-                        M[q, cell] = v[q]
-                    end
-                end
-            end
+            Threads.@spawn _materialize!(M, a, ch, np)
         end
         M
+    end)
+end
+function _materialize!(M::Matrix, a, cells, np::Int)
+    cache = array_cache(a)
+    for cell in cells
+        v = getindex!(cache, a, cell)
+        @inbounds for q in 1:np
+            M[q, cell] = v[q]
+        end
     end
+    M
 end
 
 function aux_data(op::KernelOperator, g::Group)
