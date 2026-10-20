@@ -22,10 +22,12 @@ Mesh: `aorta_fluido_h1p5_3p0.msh` (coarse, 33 643 tetrahedra, 99 141 free DOFs).
 the hemodynamics project (`aorta_fluido_h0p8_2p0.msh`, 8 MB) is not versioned; copy it here and pass
 `mesh=aorta_fluido_h0p8_2p0`.
 
-Writing note: numbers in the weak form are folded into the generated code when the operator is built, so
-values that change at every step (the Windkessel compliance pressures) are cell fields over a vector
-updated in place; the BDF2 coefficients change once and the operator is rebuilt with `update` after the
-first step. The weak form is also checked on a small channel in `test/test_cfd.jl`.
+Writing note: the weak form is written as in the original script. Fields (previous states, Laplacian of
+uⁿ, Dirichlet values) are overwritten in place and read at every assembly; numbers that change (the
+Windkessel compliance pressures at every step, the BDF2 coefficients after the first step) reach the kernel
+operator through `update(op, res, jac)`, which re-reads the weak form and reuses the compiled code: numbers
+of the integrand are runtime parameters. The weak form is also checked on a small channel in
+`test/test_cfd.jl`.
 
 ## Results (our measurement, Mac M5 Max, 18 threads, coarse mesh)
 
@@ -36,6 +38,6 @@ first step. The weak form is also checked on a small channel in `test/test_cfd.j
 - Two cycles (400 steps) with the kernel: 2.11 s/step, about 16 min.
 - 1 thread: the volume Jacobian group takes the dual-number path (SUPG terms are products of auxiliary
   inputs, so the linear-map shortcut does not apply): 2.2 s of the 3.0 s; auxiliary data 0.56 s.
-- Compilation: operator 38 s, `update` after the first step 28 s (Gridap also compiles ~85 s on steps 1–2).
+- Compilation: operator 38 s (Gridap also compiles ~85 s on steps 1–2).
 
 CSV files of each run are written to `results/` (git-ignored).
