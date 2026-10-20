@@ -8,6 +8,7 @@
 # Usage (from the HyperFEMKernels.jl folder; Adv_Mater_Ultra_Soft_Magnet cloned next to it):
 #   julia -t auto --project=benchmark benchmark/phase0/hmre2d.jl          # original invU (matrix sqrt)
 #   julia -t auto --project=benchmark benchmark/phase0/hmre2d.jl closed   # closed-form 2D invU
+#   julia -t auto --project=benchmark benchmark/phase0/hmre2d.jl sqrt 4   # refined mesh r = 4 (generate.jl hmre 4)
 #
 # Output: table on screen and CSV in benchmark/results/.
 
@@ -19,7 +20,8 @@ using GridapSolvers, GridapSolvers.NonlinearSolvers
 using LinearAlgebra, SparseArrays, Printf, Dates
 
 const ADV_DIR = normpath(joinpath(@__DIR__, "..", "..", "..", "Adv_Mater_Ultra_Soft_Magnet"))
-const MESH = joinpath(ADV_DIR, "data", "models", "Short_magnet.msh")
+const MESH_ORIG = joinpath(ADV_DIR, "data", "models", "Short_magnet.msh")
+meshfile(r) = r === nothing ? MESH_ORIG : joinpath(@__DIR__, "..", "meshes", "hmre_short_r$(r).msh")
 
 # Original implementation (hMRE_2D.jl): inverse of the right stretch tensor via matrix sqrt.
 function invU_sqrt(F; ε=1e-12)
@@ -49,8 +51,8 @@ function check_invU()
     return maxerr
 end
 
-function setup(invU)
-    model = GmshDiscreteModel(MESH)
+function setup(invU, mesh)
+    model = GmshDiscreteModel(mesh)
     params = [10.0, 12480.64495232286, 1.0, 2.0, 5195.545287237134, 0.2602717127043121, 2.0]
     modelmech = NonlinearMooneyRivlin2D(λ=(params[1] + params[2]) * 1e2, μ1=params[1] * 1e3, μ2=params[2],
                                         α1=params[3], α2=params[4]) +
@@ -109,8 +111,8 @@ function instrumented!(s; verbose=false, nsteps=20, maxiter=20, atol=1e-8, rtol=
     return (; total, t, n, ndofs = length(x), x = copy(x))
 end
 
-function hyperfem_solve(invU)
-    s = setup(invU)
+function hyperfem_solve(invU, mesh)
+    s = setup(invU, mesh)
     uh = FEFunction(s.U, zero_free_values(s.U))
     nls = NewtonSolver(LUSolver(); maxiter=20, atol=1.e-8, rtol=1.e-2, verbose=false)
     cm = StaticNonlinearModel(s.res, s.jac, s.U, s.V, s.Du; nls=nls, xh=uh, xh⁻=s.uh⁻)
@@ -121,16 +123,20 @@ end
 function main(args)
     variant = isempty(args) ? "sqrt" : args[1]
     invU = variant == "closed" ? invU_closed : invU_sqrt
-    println("hMRE 2D phase-0 profile — Short_magnet.msh, invU = $variant")
+    r = length(args) ≥ 2 ? parse(Float64, args[2]) : nothing
+    mesh = meshfile(r)
+    isfile(mesh) || error("missing $mesh: run benchmark/meshes/generate.jl hmre $r")
+    tag = r === nothing ? variant : "$(variant)_r$(r)"
+    println("hMRE 2D phase-0 profile — $(basename(mesh)), invU = $variant")
     println("Julia $(VERSION), threads $(Threads.nthreads()), BLAS threads $(BLAS.get_num_threads())")
     @printf("closed-form vs sqrt invU, max rel. difference on 1000 random F: %.2e\n", check_invU())
     flush(stdout)
 
-    cold = instrumented!(setup(invU); verbose=true)
+    cold = instrumented!(setup(invU, mesh); verbose=true)
     println("cold run done"); flush(stdout)
-    warm = instrumented!(setup(invU))
-    hf_t, hf_x = hyperfem_solve(invU)
-    ncells = num_cells(setup(invU).Ω)
+    warm = instrumented!(setup(invU, mesh))
+    hf_t, hf_x = hyperfem_solve(invU, mesh)
+    ncells = num_cells(setup(invU, mesh).Ω)
 
     rest = warm.total - warm.t[:res] - warm.t[:jac] - warm.t[:solve]
     asm = warm.t[:res] + warm.t[:jac]
@@ -148,10 +154,10 @@ function main(args)
     @printf("final displacement, instrumented vs HyperFEM: rel. diff %.2e\n", norm(warm.x - hf_x) / max(norm(hf_x), eps()))
 
     resdir = joinpath(@__DIR__, "..", "results"); mkpath(resdir)
-    file = joinpath(resdir, "phase0_hmre2d_$(variant).csv")
+    file = joinpath(resdir, "phase0_hmre2d_$(tag).csv")
     open(file, "w") do io
         println(io, "date,variant,cells,dofs,threads,t_res,n_res,t_jac,n_jac,t_solve,n_solve,t_rest,t_total,t_cold,t_hyperfem")
-        println(io, join((Dates.today(), variant, ncells, warm.ndofs, Threads.nthreads(),
+        println(io, join((Dates.today(), tag, ncells, warm.ndofs, Threads.nthreads(),
             warm.t[:res], warm.n[:res], warm.t[:jac], warm.n[:jac], warm.t[:solve], warm.n[:solve],
             rest, warm.total, cold.total, hf_t), ","))
     end

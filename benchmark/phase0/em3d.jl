@@ -7,6 +7,7 @@
 #
 # Usage (from the HyperFEMKernels.jl folder):
 #   julia -t auto --project=benchmark benchmark/phase0/em3d.jl            # test_static_EM.msh, P1
+#   julia -t auto --project=benchmark benchmark/phase0/em3d.jl plate 3 [order]  # README plate refined n = 3
 #   julia -t auto --project=benchmark benchmark/phase0/em3d.jl cart 40 8 8 2   # Cartesian box, Q2
 #
 # Output: table on screen and CSV in benchmark/results/.
@@ -25,6 +26,12 @@ function build_model(args)
     if isempty(args) || args[1] == "msh"
         order = length(args) ≥ 2 ? parse(Int, args[2]) : 1
         return GmshDiscreteModel(MESH), order, "msh", 0.1
+    elseif args[1] == "plate"          # refinable plate from benchmark/meshes/generate.jl em n
+        n = parse(Int, args[2])
+        order = length(args) ≥ 3 ? parse(Int, args[3]) : 1
+        file = joinpath(@__DIR__, "..", "meshes", "em_plate_n$(n).msh")
+        isfile(file) || error("missing $file: run benchmark/meshes/generate.jl em $n")
+        return GmshDiscreteModel(file), order, "plate_n$(n)", 0.1
     end
     nx, ny, nz = parse.(Int, args[2:4])
     order = length(args) ≥ 5 ? parse(Int, args[5]) : 1
