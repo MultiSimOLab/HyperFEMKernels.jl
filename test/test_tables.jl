@@ -22,7 +22,8 @@ end
 
 @testset "field table: nodes, components, local dof layout, values and gradients" begin
     for (prob, order, nn, nc) in ((poisson_2d(), 1, 4, 1), (poisson_2d(; order=2), 2, 9, 1),
-                                  (elasticity_3d(), 1, 8, 3), (elasticity_3d(; order=2), 2, 27, 3))
+                                  (elasticity_3d(), 1, 8, 3), (elasticity_3d(; order=2), 2, 27, 3),
+                                  (elasticity_3d(; n=(1, 1, 1), order=3), 3, 64, 3))
         geo, t, xq, w = tables_for(prob, order)
         @test t.nn == nn && t.nc == nc
         @test sort(vec(t.ldof)) == 1:nn*nc
