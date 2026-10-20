@@ -2,7 +2,8 @@ using Test
 using HyperFEMKernels
 using Gridap
 using Gridap.FESpaces, Gridap.Algebra, Gridap.CellData, Gridap.Arrays, Gridap.TensorValues
-using LinearAlgebra, SparseArrays, StaticArrays, Random
+using LinearAlgebra, SparseArrays, Random
+using HyperFEMKernels.StaticArrays, HyperFEMKernels.ForwardDiff
 
 const HK = HyperFEMKernels
 const TOL = 1e-12
