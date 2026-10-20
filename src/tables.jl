@@ -89,7 +89,7 @@ function FieldTable(space::SingleFieldFESpace, xq::AbstractVector, D::Int)
         first_dof[node[j]] == 0 && (first_dof[node[j]] = j)
     end
     N = [scalar(q, first_dof[n]) for q in 1:np, n in 1:nn]
-    dN = [VectorValue{D,Float64}(sgrad(q, first_dof[n])) for q in 1:np, n in 1:nn]
+    dN = VectorValue{D,Float64}[sgrad(q, first_dof[n]) for q in 1:np, n in 1:nn]
     FieldTable{D,T}(nn, nc, N, dN, ldof)
 end
 
