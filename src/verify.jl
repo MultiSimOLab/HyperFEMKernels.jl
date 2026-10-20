@@ -36,7 +36,7 @@ end
 function _element_allocations(kind::Symbol, op::KernelOperator, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D}, x, dvals) where {NSV,NSU,PF,TT,AUX,SV,SU,D}
     auxd = materialize_aux(g, 1)
     xl = zeros(op.ndl)
-    gather_cell!(xl, op.fields, x, dvals, 1)
+    gather_cell!(xl, op.fields, x, dvals, g.cellmap[1])
     dNb = map(t -> Vector{VectorValue{D,Float64}}(undef, t.nn), g.tables)
     if kind === :residual
         re = zeros(op.ndl)

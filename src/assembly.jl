@@ -25,9 +25,11 @@ struct Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF}
     trian::Triangulation
     xq::Vector          # reference quadrature points
     auxcache::Base.RefValue{Any}   # dense auxiliary values when cache_aux = true
+    cellmap::Vector{Int32}         # integration cell → cell of the FE spaces
+    colors::Vector{Vector{Int32}}  # integration cells per colour
 end
 
-function Group(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int, previous=Any[])
+function Group(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int, cellmap, colors, previous=Any[])
     pf = PointForm(terms)
     ls = vcat(pf.test.leaves, pf.trial.leaves, leaves(terms, :unknown))
     isempty(ls) && error("HyperFEMKernels: integral without unknown, test or trial functions")
@@ -46,7 +48,7 @@ function Group(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int,
     aux = Tuple(a.array for a in pf.aux)
     NF = length(tables)
     Group{pf.test.nslots,pf.trial.nslots,typeof(pf),typeof(tables),typeof(aux),typeof(smv),typeof(smu),D,NF}(
-        pf, NTuple{NF,Int}(locs), tables, geo, aux, smv, smu, trian, collect(xq), Ref{Any}(nothing))
+        pf, NTuple{NF,Int}(locs), tables, geo, aux, smv, smu, trian, collect(xq), Ref{Any}(nothing), cellmap, colors)
 end
 
 """
@@ -77,12 +79,53 @@ struct KernelOperator{R,J,US,VS} <: NonlinearOperator
     cache_aux::Bool
 end
 
-function compile_groups(forms::Vector{Form}, U, locs, ncells::Int, D::Int, previous=Any[])
+"""
+    integration_cells(trian, space_trian) -> Vector{Int32}
+
+Cell of the FE spaces for each cell of the integration triangulation `trian` (a subset of the
+cells of the spaces, e.g. a subdomain or, in MPI, the owned cells of a part).
+"""
+function integration_cells(trian::Triangulation, space_trian::Triangulation)
+    n = num_cells(trian)
+    trian === space_trian && return Int32.(1:n)
+    D = num_cell_dims(trian)
+    num_cell_dims(space_trian) == D ||
+        error("HyperFEMKernels: integrals on lower-dimensional triangulations (boundaries, skeletons) are not supported yet")
+    t2m = Geometry.get_glue(trian, Val(D)).tface_to_mface
+    s2m = Geometry.get_glue(space_trian, Val(D)).tface_to_mface
+    m2s = Dict{Int,Int32}()
+    for (sc, m) in enumerate(s2m)
+        m2s[m] = sc
+    end
+    cmap = Vector{Int32}(undef, n)
+    for (tc, m) in enumerate(t2m)
+        sc = get(m2s, m, Int32(0))
+        sc > 0 || error("HyperFEMKernels: the integration domain contains cells where the FE spaces are not defined")
+        cmap[tc] = sc
+    end
+    cmap
+end
+
+"Integration cells grouped by the colour of their FE-space cell."
+function group_colors(colors::Vector{Vector{Int32}}, cmap::Vector{Int32}, nspace::Int)
+    color_of = zeros(Int32, nspace)
+    for (c, cells) in enumerate(colors), cell in cells
+        color_of[cell] = c
+    end
+    out = [Int32[] for _ in colors]
+    for (tc, sc) in enumerate(cmap)
+        push!(out[color_of[sc]], tc)
+    end
+    filter!(!isempty, out)
+end
+
+function compile_groups(forms::Vector{Form}, U, locs, D::Int, colors, previous=Any[])
     groups = Any[]
     Us = field_spaces(U)
+    strian = get_triangulation(Us[1])
     for form in forms
-        num_cells(form.trian) == ncells ||
-            error("HyperFEMKernels: integrals on triangulations other than the one of the FE spaces are not supported yet")
+        cmap = integration_cells(form.trian, strian)
+        gcolors = group_colors(colors, cmap, num_cells(strian))
         bykey = Dict{UInt,Vector{Term}}()
         order = UInt[]
         for t in form.terms
@@ -91,7 +134,7 @@ function compile_groups(forms::Vector{Form}, U, locs, ncells::Int, D::Int, previ
             push!(bykey[k], t)
         end
         for k in order
-            push!(groups, Group(bykey[k], form.trian, Us, locs, D, previous))
+            push!(groups, Group(bykey[k], form.trian, Us, locs, D, cmap, gcolors, previous))
         end
     end
     groups
@@ -119,10 +162,10 @@ function KernelOperator(res, jac, U::FESpace, V::FESpace; nthreads::Int=Threads.
     rforms = capture(res, probes(U, :unknown), probes(V, :test))
     jforms = capture(jac, probes(U, :unknown), probes(U, :trial), probes(V, :test))
     locs = Tuple(fl.loc for fl in fields)
-    rgroups = compile_groups(rforms, U, locs, ncells, D)
-    jgroups = compile_groups(jforms, U, locs, ncells, D)
-    A0, nzpos = sparsity(fields, loc, ncells, toff, uoff)
     colors = color_cells(fields, ncells, toff)
+    rgroups = compile_groups(rforms, U, locs, D, colors)
+    jgroups = compile_groups(jforms, U, locs, D, colors)
+    A0, nzpos = sparsity(fields, loc, ncells, toff, uoff)
     KernelOperator(res, jac, U, V, fields, loc, rgroups, jgroups, A0, nzpos, colors, nthreads, cache_aux)
 end
 
@@ -134,11 +177,10 @@ positions and colouring of `op`.
 """
 function update(op::KernelOperator, res, jac)
     D = num_cell_dims(get_triangulation(field_spaces(op.U)[1]))
-    ncells = size(op.nzpos, 2)
     locs = Tuple(fl.loc for fl in op.fields)
     prev = vcat(op.rgroups, op.jgroups)
-    rgroups = compile_groups(capture(res, probes(op.U, :unknown), probes(op.V, :test)), op.U, locs, ncells, D, prev)
-    jgroups = compile_groups(capture(jac, probes(op.U, :unknown), probes(op.U, :trial), probes(op.V, :test)), op.U, locs, ncells, D, prev)
+    rgroups = compile_groups(capture(res, probes(op.U, :unknown), probes(op.V, :test)), op.U, locs, D, op.colors, prev)
+    jgroups = compile_groups(capture(jac, probes(op.U, :unknown), probes(op.U, :trial), probes(op.V, :test)), op.U, locs, D, op.colors, prev)
     KernelOperator(res, jac, op.U, op.V, op.fields, op.ndl, rgroups, jgroups, op.A0, op.nzpos, op.colors, op.nthreads, op.cache_aux)
 end
 
@@ -355,7 +397,7 @@ end
 
 function run_cells!(kind::Val, b, A, op::KernelOperator, g::Group, x, dvals)
     auxd = aux_data(op, g)
-    for color in op.colors
+    for color in g.colors
         # tasks of at least WORK_PER_TASK "units" (points × element-matrix entries per cell)
         work = length(color) * g.geo.np * op.ndl^2
         nchunks = clamp(work ÷ WORK_PER_TASK, 1, min(op.nthreads, length(color)))
@@ -378,17 +420,19 @@ function cells!(::Val{K}, b, A, op::KernelOperator, g::Group{NSV,NSU,PF,TT,AUX,S
     if K === :res
         re = zeros(ndl)
         for cell in cells
-            gather_cell!(xl, op.fields, x, dvals, cell)
+            sc = g.cellmap[cell]
+            gather_cell!(xl, op.fields, x, dvals, sc)
             element_residual!(re, g, xl, auxd, cell, dNb)
-            scatter_residual!(b, op.fields, re, cell)
+            scatter_residual!(b, op.fields, re, sc)
         end
     else
         KeT = zeros(ndl, ndl)
         nzv = nonzeros(A)
         for cell in cells
-            gather_cell!(xl, op.fields, x, dvals, cell)
+            sc = g.cellmap[cell]
+            gather_cell!(xl, op.fields, x, dvals, sc)
             element_jacobian!(KeT, g, xl, auxd, cell, dNb)
-            scatter_jacobian!(nzv, op.nzpos, KeT, ndl, cell)
+            scatter_jacobian!(nzv, op.nzpos, KeT, ndl, sc)
         end
     end
     nothing
