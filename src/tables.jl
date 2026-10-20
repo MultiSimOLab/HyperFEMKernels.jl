@@ -79,12 +79,15 @@ function FieldTable(space::SingleFieldFESpace, xq::AbstractVector, D::Int)
     scalar(q, j) = nc == 1 ? vals[q, j] : vals[q, j][comp[j]]
     sgrad(q, j) = nc == 1 ? grads[q, j] : VectorValue(ntuple(J -> grads[q, j][J, comp[j]], D))
     keyof(j) = [scalar(q, j) for q in axes(vals, 1)]
-    nodes = Dict{Vector{Float64},Int}()
-    node = zeros(Int, nd)
+    reps = Vector{Float64}[]          # one representative key per node (approximate matching:
+    node = zeros(Int, nd)             # Gridap evaluates each component with its own round-off)
     for j in 1:nd
-        node[j] = get!(nodes, keyof(j), length(nodes) + 1)
+        k = keyof(j)
+        n = findfirst(r -> isapprox(r, k; atol=1e-10, rtol=0.0), reps)
+        n === nothing && (push!(reps, k); n = length(reps))
+        node[j] = n
     end
-    nn = length(nodes)
+    nn = length(reps)
     nn * nc == nd || error("HyperFEMKernels: the FE space is not a nodal (Lagrangian) space")
     ldof = zeros(Int, nn, nc)
     first_dof = zeros(Int, nn)
