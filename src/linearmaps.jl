@@ -1,56 +1,59 @@
 # Linear-map shortcut: residual coefficients and tangents without dual numbers.
 #
 # Each term of a residual is linear in the test slots, and each term of a Jacobian is bilinear in
-# (test, trial) slots. In most weak forms (all of HyperFEM's) the part of the term that touches
-# the slots depends on the state through a single "state input": a subexpression that does not
-# contain test/trial functions, e.g. ∂Ψ∂FF(F, E) in ∇(v)' ⊙ (∂Ψ∂FF ∘ (...) ⊙ ∇(du)'). The slot
-# coefficients are then a *fixed linear map* of the components of that state input:
+# (test, trial) slots. The part of a term that touches the slots depends on the state through its
+# "state inputs": the maximal subexpressions that do not contain test/trial functions (e.g.
+# ∂Ψ∂FF(F, E) in ∇(v)' ⊙ (∂Ψ∂FF ∘ (...) ⊙ ∇(du)'), or u, uh⁻ and υh in (2/Δt²(u - uh⁻) - 2/Δt υh)⋅v).
+# Constants are folded into the code and are not inputs. When the slot coefficients are a linear
+# function of the concatenated components of the inputs (the common case: the weak form is linear
+# in stresses, tangents and states),
 #
-#     T[i, j] = Σ_k M[(i, j), k] · s_k
+#     coeff[i] = Σ_term C_term Σ_(g,k) M_term[i, (g,k)] · s_g[k]
 #
-# M is computed once (at compile time, with dual numbers on unit state inputs) and stored as a
-# sparse list. At run time only the state inputs are evaluated (plain numbers) and M is applied.
-# Terms with no state input (constant coefficients) have M applied to s = 1. If a term has more
-# than one state input, the group falls back to the dual-number path.
+# M is computed once (at compile time, with dual numbers on unit inputs) and checked on random
+# inputs; at run time only the inputs are evaluated (plain numbers) and M is applied. Terms that
+# are not linear in their inputs make the whole group fall back to the dual-number path.
 
 dependent(n::Leaf) = n.role !== :unknown
 dependent(n::Aux) = false
+dependent(n::Const) = false
 dependent(n::Op) = any(dependent, n.args)
 
-"State inputs of the slot-dependent part of `n` (arguments that do not depend on the slots)."
+"Maximal non-dependent subexpressions of `n` (constants excluded)."
 function state_inputs!(acc::Vector{Node}, n::Node)
     n isa Op || return acc
     for a in n.args
-        dependent(a) ? state_inputs!(acc, a) : push!(acc, a)
+        if dependent(a)
+            state_inputs!(acc, a)
+        elseif !(a isa Const) && !any(b -> b === a, acc)
+            push!(acc, a)
+        end
     end
     acc
 end
 
-"Sparse linear map: target slot index (linear in R or T), state component, value."
-const SparseMap = Vector{Tuple{Int32,Int32,Float64}}
+"Sparse linear map: target slot index (linear in R or T), global input index, component, value."
+const SparseMap = Vector{Tuple{Int32,Int32,Int32,Float64}}
 const DEBUG_LINEAR = get(ENV, "HFK_DEBUG_LINEAR", "0") == "1"
 _nolin(why) = (DEBUG_LINEAR && println("HyperFEMKernels: linear-map shortcut not used: ", why); nothing)
 
 struct LinearForm{F,O,C,ST}
-    state::F            # (ops, FV, A) -> tuple of state inputs, one per term (1.0 if none)
+    state::F            # (ops, FV, A) -> tuple of all state inputs of the group
     ops::O
-    coefs::C
+    coefs::C            # one coefficient per term
     maps::Vector{SparseMap}
     expr::Expr
 end
 
-ncomps_val(x::Real) = 1
-ncomps_val(x::MultiValue) = length(x)
 comp(x::Real, k) = x
 comp(x::MultiValue, k) = x.data[k]
-
+ncomp(::Type{<:Real}) = 1
+ncomp(::Type{T}) where {T<:MultiValue} = length(T)
 unit_value(::Type{<:Real}, k) = 1.0
 unit_value(::Type{T}, k) where {T<:MultiValue} = T(ntuple(i -> i == k ? 1.0 : 0.0, length(T)))
 rand_value(::Type{<:Real}) = rand()
 rand_value(::Type{T}) where {T<:MultiValue} = T(ntuple(_ -> rand(), length(T)))
 
-"Value types at a point of the unknowns of each field (value, gradient)."
-fv_types(tables) = Tuple{map(t -> Tuple{field_types(t)...}, tables)...}
 field_types(::FieldTable{D,Float64}) where {D} = (Float64, VectorValue{D,Float64})
 field_types(::FieldTable{D,VectorValue{NC,Float64}}) where {D,NC} = (VectorValue{NC,Float64}, TensorValue{D,NC,Float64,D * NC})
 
@@ -71,30 +74,31 @@ Build the linear-map shortcut for a group, or `nothing` if some term does not qu
 `kind` is `:res` (linear in test slots) or `:jac` (bilinear in test and trial slots).
 """
 function LinearForm(terms0::Vector{Term}, pf::PointForm, tables, aux::Tuple, kind::Symbol)
-    # additive parts of each term become separate terms with their own state input
     terms = Term[]
     for t in terms0, (e, sg) in split_sum(t.expr)
         push!(terms, Term(t.coef * sg, e, t.weights, t.jacobians))
     end
     coefs = Tuple(t.coef for t in terms)
-    for t in terms
-        dependent(t.expr) || return _nolin("a term does not depend on test/trial functions")
-        length(state_inputs!(Node[], t.expr)) <= 1 || return _nolin("a term has more than one state input")
+    all(t -> dependent(t.expr), terms) || return _nolin("a term does not depend on test/trial functions")
+    # all state inputs of the group (shared between terms when identical), one state function
+    inputs = Node[]
+    term_inputs = [Int[] for _ in terms]
+    for (i, t) in enumerate(terms)
+        for n in state_inputs!(Node[], t.expr)
+            k = findfirst(m -> m === n, inputs)
+            k === nothing && (push!(inputs, n); k = length(inputs))
+            push!(term_inputs[i], k)
+        end
     end
-    # state function: one value per term (1.0 if the term has no state input), shared CSE
     st = CodegenState(pf.test, pf.trial, pf.aux)
-    vals = Any[]
-    for t in terms
-        acc = state_inputs!(Node[], t.expr)
-        push!(vals, isempty(acc) ? 1.0 : emit_node!(st, acc[1]))
-    end
+    vals = Any[emit_node!(st, n) for n in inputs]
     ex = :((ops, FV, A) -> begin
         $(st.body...)
         return ($(vals...),)
     end)
     state = RuntimeGeneratedFunction(@__MODULE__, @__MODULE__, ex)
     ops = Tuple(st.ops)
-    # concrete types of the state inputs: evaluate once on sample data (small random state, first cell)
+    # concrete types of the inputs: evaluate once on sample data (small random state, first cell)
     FVs = map(t -> map(T -> 0.01 * rand_value(T), field_types(t)), tables)
     As = map(a -> a[1][1], aux)
     ST = try
@@ -107,10 +111,11 @@ function LinearForm(terms0::Vector{Term}, pf::PointForm, tables, aux::Tuple, kin
     nsv, nsu = pf.test.nslots, pf.trial.nslots
     maps = SparseMap[]
     for (i, t) in enumerate(terms)
-        S = ST.parameters[i]
-        acc = state_inputs!(Node[], t.expr)
+        gidx = term_inputs[i]
         lst = CodegenState(pf.test, pf.trial, pf.aux)
-        isempty(acc) || (lst.subst[acc[1]] = :S)
+        for (j, g) in enumerate(gidx)
+            lst.subst[inputs[g]] = :(S[$j])
+        end
         r = emit_node!(lst, t.expr)
         lex = :((ops, S, sv, su) -> begin
             $(lst.body...)
@@ -118,54 +123,56 @@ function LinearForm(terms0::Vector{Term}, pf::PointForm, tables, aux::Tuple, kin
         end)
         lin = RuntimeGeneratedFunction(@__MODULE__, @__MODULE__, lex)
         lops = Tuple(lst.ops)
-        coeffs(s) = slot_coeffs(lin, lops, s, nsv, nsu, kind)
+        types = [ST.parameters[g] for g in gidx]
+        coeffs(S) = slot_coeffs(lin, lops, S, nsv, nsu, kind)
         m = SparseMap()
-        ns = S <: Real ? 1 : length(S)
-        for k in 1:ns
-            Ek = isempty(acc) ? 1.0 : unit_value(S, k)
-            c = coeffs(Ek)
-            for (idx, v) in enumerate(c)
-                v != 0.0 && push!(m, (Int32(idx), Int32(k), v))
+        if isempty(gidx)
+            for (idx, v) in enumerate(coeffs(()))
+                v != 0.0 && push!(m, (Int32(idx), Int32(0), Int32(0), v))
             end
-        end
-        # check linearity in the state input with a random value
-        if !isempty(acc)
-            sr = rand_value(S)
-            direct = coeffs(sr)
+        else
+            zeros_S = Tuple(zero(T) for T in types)
+            c0 = coeffs(zeros_S)
+            any(!=(0.0), c0) && return _nolin("term $i has a slot coefficient that does not vanish for zero state inputs")
+            for (j, g) in enumerate(gidx), k in 1:ncomp(types[j])
+                S = Tuple(jj == j ? unit_value(types[j], k) : zero(types[jj]) for jj in eachindex(types))
+                for (idx, v) in enumerate(coeffs(S))
+                    v != 0.0 && push!(m, (Int32(idx), Int32(g), Int32(k), v))
+                end
+            end
+            # joint linearity check on random inputs
+            Sr = Tuple(rand_value(T) for T in types)
+            direct = coeffs(Sr)
             mapped = zeros(length(direct))
-            for (idx, k, v) in m
-                mapped[idx] += v * comp(sr, k)
+            for (idx, g, k, v) in m
+                mapped[idx] += v * comp(Sr[findfirst(==(g), gidx)], k)
             end
             norm(direct - mapped) <= 1e-12 * max(norm(direct), 1.0) ||
-                return _nolin("term $i is not linear in its state input (rel. error $(norm(direct - mapped) / max(norm(direct), 1.0)))")
+                return _nolin("term $i is not linear in its state inputs (rel. error $(norm(direct - mapped) / max(norm(direct), 1.0)))")
         end
         push!(maps, m)
     end
     LinearForm{typeof(state),typeof(ops),typeof(coefs),ST}(state, ops, coefs, maps, ex)
 end
 
-"Slot coefficients (vector for :res, vec of the matrix for :jac) of a linear part for state value `s`."
-function slot_coeffs(lin, lops, s, nsv, nsu, kind)
+"Slot coefficients (vector for :res, vec of the matrix for :jac) of a linear part for inputs `S`."
+function slot_coeffs(lin, lops, S, nsv, nsu, kind)
     zsv = zeros(SVector{nsv,Float64})
     if kind === :res
-        return collect(ForwardDiff.gradient(v -> lin(lops, s, v, SVector{0,Float64}()), zsv))
+        return collect(ForwardDiff.gradient(v -> lin(lops, S, v, SVector{0,Float64}()), zsv))
     end
     zsu = zeros(SVector{nsu,Float64})
-    vec(collect(ForwardDiff.jacobian(v -> ForwardDiff.gradient(w -> lin(lops, s, v, w), zsu), zsv)))
+    vec(collect(ForwardDiff.jacobian(v -> ForwardDiff.gradient(w -> lin(lops, S, v, w), zsu), zsv)))
 end
 
 "Apply the linear maps: coefficients (length nsv, or nsv*nsu) for the state inputs at a point."
 @inline function apply_maps(lf::LinearForm, svals::Tuple, ::Val{N}) where {N}
     out = zero(MVector{N,Float64})
-    _apply!(out, lf.maps, lf.coefs, svals, 1)
-    SVector(out)
-end
-@inline _apply!(out, maps, coefs, ::Tuple{}, i) = nothing
-@inline function _apply!(out, maps, coefs, svals::Tuple, i)
-    s = first(svals)
-    c = coefs[i]
-    @inbounds for (idx, k, v) in maps[i]
-        out[idx] += c * v * comp(s, k)
+    @inbounds for i in eachindex(lf.maps)
+        c = lf.coefs[i]
+        for (idx, g, k, v) in lf.maps[i]
+            out[idx] += g == 0 ? c * v : c * v * comp(svals[g], k)
+        end
     end
-    _apply!(out, maps, coefs, Base.tail(svals), i + 1)
+    SVector(out)
 end

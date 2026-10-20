@@ -59,6 +59,19 @@ end
     @test f[1].terms[1].weights !== f[1].terms[2].weights
 end
 
+@testset "numbers in the integrand become Const nodes" begin
+    dΩ = p.dΩ
+    r(u, v) = ∫(3.0 * v * u)dΩ
+    f = HK.capture(r, HK.probes(p.U, :unknown), HK.probes(p.V, :test))[1]
+    consts = HK.Node[]
+    walk(n::HK.Op) = foreach(walk, n.args)
+    walk(n::HK.Const) = push!(consts, n)
+    walk(n) = nothing
+    walk(f.terms[1].expr)
+    @test length(consts) == 1 && consts[1].value == 3.0
+    @test isempty(HK.aux_nodes(f.terms))
+end
+
 @testset "show" begin
     f = capture_res(p)[1]
     s = sprint(show, MIME"text/plain"(), f)

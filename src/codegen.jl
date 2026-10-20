@@ -84,6 +84,8 @@ function emit!(st::CodegenState, n::Leaf)
     slot_expr(n.T, v, layout.offsets[k])
 end
 
+emit!(st::CodegenState, n::Const) = n.value
+
 function emit!(st::CodegenState, n::Aux)
     k = findfirst(a -> a.array === n.array, st.aux)
     :(A[$k])

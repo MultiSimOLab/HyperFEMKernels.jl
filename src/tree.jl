@@ -23,6 +23,11 @@ struct Aux <: Node
     array::AbstractArray
 end
 
+"Constant (a number or tensor the same at every point): folded into the generated code."
+struct Const <: Node
+    value::Any
+end
+
 "Pointwise operation `f(args...)`."
 struct Op <: Node
     f::Any
@@ -78,8 +83,13 @@ function collect_terms(a::LazyArray, coef::Float64)
 end
 collect_terms(a, coef) = error("HyperFEMKernels: unsupported contribution of type $(typeof(a))")
 
+is_constant_value(v) = v isa Real || v isa MultiValue
+
 function to_node(a::AbstractArray)
     a isa ProbeArray && return Leaf(a.probe.role, a.probe.field, a.probe.deriv, probe_valtype(a.probe), a.points)
+    if a isa LazyArray && a.maps isa Fill && a.maps.value isa Fields.ConstantField && is_constant_value(a.maps.value.value)
+        return Const(a.maps.value.value)          # a Number turned into a CellField by Gridap
+    end
     contains_probe(a) || return Aux(a)
     if a isa LazyArray
         k = first(a.maps)
@@ -102,6 +112,7 @@ end
 _walk_leaves!(found, role, n::Leaf) = (n.role === role && !(n in found)) && push!(found, n)
 _walk_leaves!(found, role, n::Op) = foreach(c -> _walk_leaves!(found, role, c), n.args)
 _walk_leaves!(found, role, n::Aux) = nothing
+_walk_leaves!(found, role, n::Const) = nothing
 
 "Auxiliary nodes of a set of terms (identical arrays counted once)."
 function aux_nodes(terms::Vector{Term})
@@ -114,6 +125,7 @@ end
 _walk_aux!(found, n::Aux) = any(a -> a.array === n.array, found) || push!(found, n)
 _walk_aux!(found, n::Op) = foreach(c -> _walk_aux!(found, c), n.args)
 _walk_aux!(found, n::Leaf) = nothing
+_walk_aux!(found, n::Const) = nothing
 
 function show_tree(io::IO, n::Node, depth=0)
     pad = "  "^depth
@@ -121,6 +133,8 @@ function show_tree(io::IO, n::Node, depth=0)
         println(io, pad, n.role, "[", n.field, "]", n.deriv == 1 ? " ∇" : "", " :: ", n.T)
     elseif n isa Aux
         println(io, pad, "aux :: ", eltype(eltype(n.array)))
+    elseif n isa Const
+        println(io, pad, "const ", n.value)
     else
         println(io, pad, nameof_op(n.f))
         foreach(c -> show_tree(io, c, depth + 1), n.args)
