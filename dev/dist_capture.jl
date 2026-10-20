@@ -57,7 +57,7 @@ end
 
 with_debug() do distribute
     ranks = distribute(LinearIndices((4,)))
-    model = CartesianDiscreteModel(ranks, (2, 2), (0, 1, 0, 1, 0, 1), (6, 6, 3))
+    model = CartesianDiscreteModel(ranks, (2, 2, 1), (0, 1, 0, 1, 0, 1), (6, 6, 3))
     V = TestFESpace(model, ReferenceFE(lagrangian, VectorValue{3,Float64}, 1), dirichlet_tags=[1, 3, 5, 7])
     U = TrialFESpace(V, x -> VectorValue(0.01, 0.0, 0.0))
     uh = interpolate(x -> VectorValue(0.01 * x[2], 0.02 * x[1] * x[3], -0.01 * x[1]), U)
