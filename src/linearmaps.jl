@@ -180,7 +180,7 @@ function slot_coeffs(lin, lops, S, nsv, nsu, kind)
         return collect(ForwardDiff.gradient(v -> lin(lops, S, v, SVector{0,Float64}()), zsv))
     end
     zsu = zeros(SVector{nsu,Float64})
-    vec(collect(ForwardDiff.jacobian(v -> ForwardDiff.gradient(w -> lin(lops, S, v, w), zsu), zsv)))
+    vec(collect(ForwardDiff.jacobian(w -> ForwardDiff.gradient(v -> lin(lops, S, v, w), zsv), zsu)))   # [test slot, trial slot]
 end
 
 "Apply the linear maps: coefficients (length nsv, or nsv*nsu) for the state inputs at a point."

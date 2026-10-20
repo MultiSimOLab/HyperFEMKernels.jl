@@ -90,6 +90,38 @@ begin
         @test c2.jac < TOL
     end
 
+    @testset "Non-symmetric Jacobians (convection, different test/trial slot sets)" begin
+        model = CartesianDiscreteModel((0, 1, 0, 1), (6, 5))
+        Ω = Triangulation(model); dΩ = Measure(Ω, 2)
+        V = TestFESpace(model, ReferenceFE(lagrangian, Float64, 1), dirichlet_tags="boundary")
+        U = TrialFESpace(V, x -> x[1])
+        b = VectorValue(1.0, 0.3)
+        # test: value + gradient; trial: gradient only → nsv ≠ nsu, K not symmetric
+        res(u, v) = ∫(∇(v) ⋅ ∇(u) + v * (b ⋅ ∇(u)) + v * u * u)dΩ
+        jac(u, du, v) = ∫(∇(v) ⋅ ∇(du) + v * (b ⋅ ∇(du)))dΩ
+        x = rand(num_free_dofs(U))
+        for lm in (true, false)
+            op = KernelOperator(res, jac, U, V; linear_maps=lm)
+            c = check(res, jac, U, V, x; op)
+            @test c.res < TOL
+            @test c.jac < TOL
+        end
+        A = Algebra.jacobian(KernelOperator(res, jac, U, V), x)
+        @test norm(A - A') / norm(A) > 1e-2                    # really non-symmetric
+        # vector field with a non-symmetric 4th-order tensor (test gradient, trial value+gradient)
+        Vv = TestFESpace(model, ReferenceFE(lagrangian, VectorValue{2,Float64}, 1), dirichlet_tags="boundary")
+        Uv = TrialFESpace(Vv, x -> VectorValue(0.0, 0.0))
+        Cns(dF) = TensorValue(1.0dF[1, 1] + 0.5dF[1, 2], 0.2dF[2, 1], 0.7dF[2, 2] + 0.1dF[1, 1], 2.0dF[2, 2] + 0.3dF[2, 1])
+        resv(u, v) = ∫(∇(v)' ⊙ (Cns ∘ (∇(u)')) + v ⋅ u)dΩ
+        jacv(u, du, v) = ∫(∇(v)' ⊙ (Cns ∘ (∇(du)')) + ∇(v)' ⊙ (du ⊗ b))dΩ
+        xv = rand(num_free_dofs(Uv))
+        for lm in (true, false)
+            cv = check(resv, jacv, Uv, Vv, xv; op=KernelOperator(resv, jacv, Uv, Vv; linear_maps=lm))
+            @test cv.res < TOL
+            @test cv.jac < TOL
+        end
+    end
+
     @testset "Linear-map shortcut with a state-dependent coefficient tensor" begin
         model = CartesianDiscreteModel((0, 1, 0, 1, 0, 1), (3, 3, 2))
         Ω = Triangulation(model); dΩ = Measure(Ω, 2)
