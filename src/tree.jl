@@ -90,6 +90,10 @@ function to_node(a::AbstractArray)
     if a isa LazyArray && a.maps isa Fill && a.maps.value isa Fields.ConstantField && is_constant_value(a.maps.value.value)
         return Const(a.maps.value.value)          # a Number turned into a CellField by Gridap
     end
+    if a isa Fill && a.value isa AbstractVector && !isempty(a.value) && is_constant_value(a.value[1]) &&
+       all(v -> v == a.value[1], a.value)
+        return Const(a.value[1])                   # the same value at every point of every cell
+    end
     contains_probe(a) || return Aux(a)
     if a isa LazyArray
         k = first(a.maps)

@@ -67,8 +67,9 @@ end
 @testset "apply_maps on hand-built maps" begin
     maps = [HK.SparseMap([(Int32(1), Int32(1), Int32(1), 2.0), (Int32(3), Int32(1), Int32(2), -1.0)]),
             HK.SparseMap([(Int32(2), Int32(2), Int32(1), 1.0), (Int32(2), Int32(0), Int32(0), 4.0)])]
-    lf = HK.LinearForm{Nothing,Tuple{},Tuple{Float64,Float64},Tuple{VectorValue{2,Float64},Float64}}(
-        nothing, (), (1.0, 0.5), maps, :())
+    ST = Tuple{VectorValue{2,Float64},Float64}
+    ap = HK.generate_apply(maps, ST, 3)
+    lf = HK.LinearForm{Nothing,Tuple{},Tuple{Float64,Float64},ST,typeof(ap)}(nothing, (), (1.0, 0.5), maps, ap, :())
     out = HK.apply_maps(lf, (VectorValue(3.0, 4.0), 7.0), Val(3))
     @test out ≈ SVector(6.0, 3.5 + 2.0, -4.0)
 end
