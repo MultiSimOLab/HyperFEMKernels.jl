@@ -103,10 +103,8 @@ Fk(∇u) = one(∇u) + ∇u
 
     @testset "Integration on a subdomain of the FE space (and two measures)" begin
         model = CartesianDiscreteModel((0, 2, 0, 1), (8, 4))
-        labels = get_face_labeling(model)
-        add_tag_from_tags!(labels, "all", collect(1:9))
-        cell_tag = [x[1] < 1.0 ? 1 : 2 for x in lazy_map(c -> sum(c) / length(c), get_cell_coordinates(model))]
-        sub = Triangulation(model, findall(==(1), cell_tag))
+        left = Bool[sum(c)[1] / length(c) < 1.0 for c in vec(collect(get_cell_coordinates(model)))]
+        sub = Triangulation(model, left)
         Ω = Triangulation(model); dΩ = Measure(Ω, 2); dΩs = Measure(sub, 2)
         V = TestFESpace(model, ReferenceFE(lagrangian, Float64, 1), dirichlet_tags="boundary")
         U = TrialFESpace(V, x -> x[1])
