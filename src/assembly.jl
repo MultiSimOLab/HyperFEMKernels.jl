@@ -1,6 +1,7 @@
 # Operator and assembly.
 
 const EMPTY_SLOTS = SVector{0,Float64}()
+const MATRIX_PRODUCTS = get(ENV, "HFK_MATRIX_PRODUCTS", "1") == "1"
 const WORK_PER_TASK = parse(Int, get(ENV, "HFK_WORK_PER_TASK", "20000"))
 
 "Global numbering of one field: cell dof ids of test and trial spaces and offsets."
@@ -390,6 +391,46 @@ function element_jacobian!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF}, xl, a
     KeT
 end
 
+"Element Jacobian of `cell` as matrix products (requires node-contiguous dofs); buffers from `mm_buffers`."
+function element_jacobian_mm!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF}, xl, auxd, cell::Integer,
+                              Wb, Bb, Gb) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF}
+    fill!(KeT, 0.0)
+    tables, locs, pf = g.tables, g.locs, g.pf
+    np = g.geo.np
+    zsv = zero(SVector{NSV,Float64})
+    zsu = zero(SVector{NSU,Float64})
+    for q in 1:np
+        dV, iJt = point_geometry(g.geo, q, cell)
+        map((t, W) -> point_weights!(W, t, q, iJt), tables, Wb)
+        FV = map((t, l, W) -> field_point_values(t, xl, l, W), tables, locs, Wb)
+        Aq = map(a -> @inbounds(a[q, cell]), auxd)
+        T = if LF === Nothing
+            ForwardDiff.jacobian(s -> ForwardDiff.gradient(r -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsu), zsv)
+        else
+            SMatrix{NSV,NSU,Float64,NSV * NSU}(apply_maps(g.lin, g.lin.state(g.lin.ops, FV, Aq), Val(NSV * NSU)))
+        end
+        map((t, sm, W, B) -> store_test_weights!(B, sm, W, q, t.nn), tables, g.smv, Wb, Bb)
+        map((smf, Gf) -> map((tg, smg, Wg, G) -> store_trial_block!(G, smf, smg, Wg, T, q, dV, tg.nn),
+                             tables, g.smu, Wb, Gf), g.smv, Gb)
+    end
+    map((tf, lf, smf, B, Gf) -> map((tg, lg, smg, G) -> block_products!(KeT, tf, lf, smf, B, tg, lg, smg, G, np),
+                                    tables, locs, g.smu, Gf), tables, locs, g.smv, Bb, Gb)
+    KeT
+end
+
+"Buffers for the matrix-product path: weights per field, B per field, G per block (f, g)."
+function mm_buffers(g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D}) where {NSV,NSU,PF,TT,AUX,SV,SU,D}
+    np = g.geo.np
+    lv(sp::SlotSpec{NC,LV}) where {NC,LV} = LV
+    Wb = map(t -> zeros(t.nn, D + 1), g.tables)
+    Bb = map((t, sm) -> zeros(np * lv(sm), t.nn), g.tables, g.smv)
+    Gb = map((tf, smf) -> map((tg, smg) -> zeros(tg.nn, np * lv(smf), tg.nc, tf.nc), g.tables, g.smu), g.tables, g.smv)
+    (Wb, Bb, Gb)
+end
+
+"True if every field of the group has node-contiguous dofs (matrix-product path available)."
+contiguous(g::Group) = all(t -> t isa FieldTable{<:Any,<:Any,<:Any,<:Any,true}, g.tables)
+
 "Add an element residual to the global vector (serial numbering)."
 @inline function scatter_residual!(b, fields::Vector{FieldLayout}, re, cell::Integer)
     for fl in fields
@@ -447,10 +488,16 @@ function cells!(::Val{K}, b, A, op::KernelOperator, g::Group{NSV,NSU,PF,TT,AUX,S
     else
         KeT = zeros(ndl, ndl)
         nzv = nonzeros(A)
+        mm = MATRIX_PRODUCTS && contiguous(g)
+        Wb, Bb, Gb = mm ? mm_buffers(g) : (nothing, nothing, nothing)
         for cell in cells
             sc = g.cellmap[cell]
             gather_cell!(xl, op.fields, x, dvals, sc)
-            element_jacobian!(KeT, g, xl, auxd, cell, dNb)
+            if mm
+                element_jacobian_mm!(KeT, g, xl, auxd, cell, Wb, Bb, Gb)
+            else
+                element_jacobian!(KeT, g, xl, auxd, cell, dNb)
+            end
             scatter_jacobian!(nzv, op.nzpos, KeT, ndl, sc)
         end
     end
