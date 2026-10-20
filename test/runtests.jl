@@ -20,5 +20,6 @@ include("common.jl")
     @testset "assembly"         begin include("test_assembly.jl") end
     @testset "matrix-free"      begin include("test_matrixfree.jl") end
     @testset "errors"           begin include("test_errors.jl") end
+    @testset "hybrid fallback"  begin include("test_fallback.jl") end
     @testset "Gridap equality"  begin include("test_gridap_equality.jl") end
 end
