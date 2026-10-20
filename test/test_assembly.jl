@@ -132,6 +132,14 @@ end
     HK.element_jacobian!(K1, g, xl, auxd, 1, map(t -> zeros(t.nn, 4), g.tables))
     HK.element_jacobian_mm!(K2, g, xl, auxd, 1, HK.mm_buffers(g)...)
     @test K1 ≈ K2
+    # every point-block size (including one that does not divide the number of points, and all points)
+    qb0 = HK.POINT_BLOCK[]
+    for qb in (1, 5, 8, 27, 0)
+        HK.POINT_BLOCK[] = qb
+        fill!(K2, 0.0); HK.element_jacobian_mm!(K2, g, xl, auxd, 1, HK.mm_buffers(g)...)
+        @test K1 ≈ K2
+    end
+    HK.POINT_BLOCK[] = qb0
 end
 
 @testset "element kernels do not allocate" begin

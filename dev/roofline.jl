@@ -77,9 +77,9 @@ loop_elem(g, op, x, dvals, auxd, xl, KeT, Wb, Bb, Gb) = for cell in 1:length(g.c
     HK.gather_cell!(xl, op.fields, x, dvals, g.cellmap[cell])
     HK.element_jacobian_mm!(KeT, g, xl, auxd, cell, Wb, Bb, Gb)
 end
-loop_products(g, KeT, Bb, Gb) = for cell in 1:length(g.cellmap)
+loop_products(g, KeT, Bb, Gb) = for cell in 1:length(g.cellmap)   # one block of points per cell, scaled below
     fill!(KeT, 0.0)
-    map((tf, lf, smf, B, Gf) -> map((tg, lg, smg, G) -> HK.block_products!(KeT, tf, lf, smf, B, tg, lg, smg, G, g.geo.np),
+    map((tf, lf, smf, B, Gf) -> map((tg, lg, smg, G) -> HK.block_products!(KeT, tf, lf, smf, B, tg, lg, smg, G, HK.point_block(g.geo.np)),
                                     g.tables, g.locs, g.smu, Gf), g.tables, g.locs, g.smv, Bb, Gb)
 end
 loop_scatter(g, op, nzv, KeT) = for cell in 1:length(g.cellmap)
@@ -132,7 +132,7 @@ function analyse(name, res, jac, U, V)
         HK.contiguous(g) || (println("  (group without node-contiguous dofs: breakdown skipped)"); continue)
         Wb, Bb, Gb = HK.mm_buffers(g)
         te = best(() -> loop_elem(g, op, x, dvals, auxd, xl, KeT, Wb, Bb, Gb))
-        tp = best(() -> loop_products(g, KeT, Bb, Gb))
+        tp = best(() -> loop_products(g, KeT, Bb, Gb)) * cld(np, HK.point_block(np))
         ts = best(() -> loop_scatter(g, op, nzv, KeT))
         tt = g.lin === nothing ? NaN : best(() -> loop_tangent(g, op, x, dvals, auxd, xl, Wb))
         f1, f2 = flops_products(g)

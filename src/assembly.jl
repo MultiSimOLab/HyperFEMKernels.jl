@@ -391,36 +391,49 @@ function element_jacobian!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF}, xl, a
     KeT
 end
 
-"Element Jacobian of `cell` as matrix products (requires node-contiguous dofs); buffers from `mm_buffers`."
+"""
+Element Jacobian of `cell` as matrix products (requires node-contiguous dofs); buffers from
+`mm_buffers`. The quadrature points are processed in blocks of `POINT_BLOCK[]` points so that
+the G and B buffers of a block stay in L1 cache during the products (0 = all points at once).
+"""
 function element_jacobian_mm!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF}, xl, auxd, cell::Integer,
                               Wb, Bb, Gb) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF}
     fill!(KeT, 0.0)
     tables, locs, pf = g.tables, g.locs, g.pf
     np = g.geo.np
+    qb = point_block(np)
     zsv = zero(SVector{NSV,Float64})
     zsu = zero(SVector{NSU,Float64})
-    for q in 1:np
-        dV, iJt = point_geometry(g.geo, q, cell)
-        map((t, W) -> point_weights!(W, t, q, iJt), tables, Wb)
-        FV = map((t, l, W) -> field_point_values(t, xl, l, W), tables, locs, Wb)
-        Aq = map(a -> @inbounds(a[q, cell]), auxd)
-        T = if LF === Nothing
-            ForwardDiff.jacobian(r -> ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsv), zsu)   # T[test slot, trial slot]
-        else
-            SMatrix{NSV,NSU,Float64,NSV * NSU}(apply_maps(g.lin, g.lin.state(g.lin.ops, FV, Aq), Val(NSV * NSU)))
+    for q0 in 1:qb:np
+        nq = min(qb, np - q0 + 1)
+        for ql in 1:nq
+            q = q0 + ql - 1
+            dV, iJt = point_geometry(g.geo, q, cell)
+            map((t, W) -> point_weights!(W, t, q, iJt), tables, Wb)
+            FV = map((t, l, W) -> field_point_values(t, xl, l, W), tables, locs, Wb)
+            Aq = map(a -> @inbounds(a[q, cell]), auxd)
+            T = if LF === Nothing
+                ForwardDiff.jacobian(r -> ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsv), zsu)   # T[test slot, trial slot]
+            else
+                SMatrix{NSV,NSU,Float64,NSV * NSU}(apply_maps(g.lin, g.lin.state(g.lin.ops, FV, Aq), Val(NSV * NSU)))
+            end
+            map((t, sm, W, B) -> store_test_weights!(B, sm, W, ql, t.nn), tables, g.smv, Wb, Bb)
+            map((smf, Gf) -> map((tg, smg, Wg, G) -> store_trial_block!(G, smf, smg, Wg, T, ql, dV, tg.nn),
+                                 tables, g.smu, Wb, Gf), g.smv, Gb)
         end
-        map((t, sm, W, B) -> store_test_weights!(B, sm, W, q, t.nn), tables, g.smv, Wb, Bb)
-        map((smf, Gf) -> map((tg, smg, Wg, G) -> store_trial_block!(G, smf, smg, Wg, T, q, dV, tg.nn),
-                             tables, g.smu, Wb, Gf), g.smv, Gb)
+        map((tf, lf, smf, B, Gf) -> map((tg, lg, smg, G) -> block_products!(KeT, tf, lf, smf, B, tg, lg, smg, G, nq),
+                                        tables, locs, g.smu, Gf), tables, locs, g.smv, Bb, Gb)
     end
-    map((tf, lf, smf, B, Gf) -> map((tg, lg, smg, G) -> block_products!(KeT, tf, lf, smf, B, tg, lg, smg, G, np),
-                                    tables, locs, g.smu, Gf), tables, locs, g.smv, Bb, Gb)
     KeT
 end
 
+"Points per block of the matrix-product path (`HFK_POINT_BLOCK`, 0 = all points of the cell)."
+const POINT_BLOCK = Ref(parse(Int, get(ENV, "HFK_POINT_BLOCK", "12")))
+point_block(np::Int) = (qb = POINT_BLOCK[]; qb <= 0 ? np : min(qb, np))
+
 "Buffers for the matrix-product path: weights per field, B per field, G per block (f, g)."
 function mm_buffers(g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D}) where {NSV,NSU,PF,TT,AUX,SV,SU,D}
-    np = g.geo.np
+    np = point_block(g.geo.np)
     lv(sp::SlotSpec{NC,LV}) where {NC,LV} = LV
     Wb = map(t -> zeros(t.nn, D + 1), g.tables)
     Bb = map((t, sm) -> zeros(np * lv(sm), t.nn), g.tables, g.smv)
