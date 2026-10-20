@@ -2,13 +2,13 @@ Random.seed!(1)
 
 @testset "dependency and state inputs of nodes" begin
     p = poisson_2d()
-    f = HK.capture(p.jac, HK.probes(p.U, :unknown), HK.probes(p.U, :trial), HK.probes(p.V, :test))[1]
+    f = HK.capture(p.jac, HK.probes(p.U, :unknown), HK.probes(p.U, :trial), HK.probes(p.V, :test))[1][1]
     t = f.terms[1].expr
     @test HK.dependent(t)
     acc = HK.state_inputs!(HK.Node[], t)
     @test isempty(acc)                          # ∇v⋅∇du: no state input
     e = elasticity_3d()
-    fe = HK.capture(e.res, HK.probes(e.U, :unknown), HK.probes(e.V, :test))[1]
+    fe = HK.capture(e.res, HK.probes(e.U, :unknown), HK.probes(e.V, :test))[1][1]
     acc = HK.state_inputs!(HK.Node[], fe.terms[1].expr)
     @test length(acc) == 1 && acc[1] isa HK.Op   # P(F)
     @test !HK.dependent(acc[1])
@@ -16,7 +16,7 @@ end
 
 @testset "split_sum separates additive slot-dependent parts" begin
     p = poisson_2d()
-    f = HK.capture(p.res, HK.probes(p.U, :unknown), HK.probes(p.V, :test))[1]
+    f = HK.capture(p.res, HK.probes(p.U, :unknown), HK.probes(p.V, :test))[1][1]
     parts = HK.split_sum(f.terms[1].expr)
     @test length(parts) == 2
     @test Set(last.(parts)) == Set([1.0, -1.0])
@@ -81,7 +81,7 @@ end
     Δt = 0.1
     res(u, v) = ∫(960.0 * (2 / Δt^2 * (u - uold) - 2 / Δt * vold) ⋅ v + ∇(v)' ⊙ (0.5 * (P_svk ∘ (Fk ∘ (∇(u)')))))e.dΩ
     jac(u, du, v) = ∫(960.0 * (2 / Δt^2 * du) ⋅ v + ∇(v)' ⊙ (0.5 * (dP_svk ∘ (Fk ∘ (∇(u)'), ∇(du)'))))e.dΩ
-    f = HK.capture(res, HK.probes(e.U, :unknown), HK.probes(e.V, :test))[1]
+    f = HK.capture(res, HK.probes(e.U, :unknown), HK.probes(e.V, :test))[1][1]
     @test any(n -> n isa HK.Const, HK.state_inputs!(HK.Node[], f.terms[1].expr)) == false
     op = KernelOperator(res, jac, e.U, e.V)
     @test all(g -> g.lin !== nothing, op.rgroups)     # inputs: u, uold, vold, P(F); constants folded

@@ -14,6 +14,13 @@ struct FieldLayout
     nd::Int
 end
 
+"Triangulations assembled by Gridap (`[:all]` = every contribution) and the Gridap assembler."
+struct Fallback
+    rtrians::Vector{Any}
+    jtrians::Vector{Any}
+    assem::SparseMatrixAssembler
+end
+
 "A compiled group of terms: same triangulation and quadrature."
 struct Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF}
     pf::PF
@@ -87,6 +94,7 @@ struct KernelOperator{R,J,US,VS} <: NonlinearOperator
     nthreads::Int
     cache_aux::Bool
     linear_maps::Bool
+    fallback::Fallback
 end
 
 """
@@ -129,25 +137,86 @@ function group_colors(colors::Vector{Vector{Int32}}, cmap::Vector{Int32}, nspace
     filter!(!isempty, out)
 end
 
-function compile_groups(forms::Vector{Form}, U, locs, D::Int, colors, previous=Any[]; linear_maps::Bool=true)
+"""
+Compile the groups of the forms; forms whose compilation fails (unsupported triangulation,
+quadrature or operation) are added to `fallback` with the reason and are assembled by Gridap.
+"""
+function compile_groups(forms::Vector{Form}, U, locs, D::Int, colors, previous=Any[];
+                        linear_maps::Bool=true, fallback=Tuple{Any,String}[])
     groups = Any[]
     Us = field_spaces(U)
     strian = get_triangulation(Us[1])
     for form in forms
-        cmap = integration_cells(form.trian, strian)
-        gcolors = group_colors(colors, cmap, num_cells(strian))
-        bykey = Dict{UInt,Vector{Term}}()
-        order = UInt[]
-        for t in form.terms
-            k = objectid(t.weights)
-            haskey(bykey, k) || (push!(order, k); bykey[k] = Term[])
-            push!(bykey[k], t)
+        fgroups = Any[]
+        try
+            cmap = integration_cells(form.trian, strian)
+            gcolors = group_colors(colors, cmap, num_cells(strian))
+            bykey = Dict{UInt,Vector{Term}}()
+            order = UInt[]
+            for t in form.terms
+                k = objectid(t.weights)
+                haskey(bykey, k) || (push!(order, k); bykey[k] = Term[])
+                push!(bykey[k], t)
+            end
+            for k in order
+                push!(fgroups, Group(bykey[k], form.trian, Us, locs, D, cmap, gcolors, previous; linear_maps))
+            end
+        catch err
+            err isa ErrorException || rethrow()
+            push!(fallback, (form.trian, err.msg))
+            continue
         end
-        for k in order
-            push!(groups, Group(bykey[k], form.trian, Us, locs, D, cmap, gcolors, previous; linear_maps))
-        end
+        append!(groups, fgroups)
     end
     groups
+end
+
+# ---------------------------------------------------------------------------------------------
+# Hybrid fallback: contributions the engine cannot translate are assembled by Gridap.
+#
+# The user's `res`/`jac` are evaluated with Gridap's own arguments (FEFunction and bases); of the
+# resulting `DomainContribution` only the triangulations in the fallback list are kept (the others
+# are lazy and never evaluated) and assembled with Gridap's `SparseMatrixAssembler` into the same
+# vector/matrix, whose sparsity pattern is the union of the kernel's and Gridap's.
+
+"Keep the contributions of `dc` on `trians` (matched by identity; `[:all]` keeps everything)."
+function restrict(dc::DomainContribution, trians::Vector{Any})
+    any(t -> t === :all, trians) && return dc
+    out = DomainContribution()
+    for (trian, arr) in dc.dict
+        any(t -> t === trian, trians) && (out.dict[trian] = arr)
+    end
+    out
+end
+
+fallback_residual_dc(op, x) = restrict(op.res(FEFunction(op.U, x), get_fe_basis(op.V)), op.fallback.rtrians)
+fallback_jacobian_dc(op, x) = restrict(op.jac(FEFunction(op.U, x), get_trial_fe_basis(op.U), get_fe_basis(op.V)), op.fallback.jtrians)
+
+function fallback_residual!(b, op, x)
+    isempty(op.fallback.rtrians) && return b
+    assemble_vector_add!(b, op.fallback.assem, collect_cell_vector(op.V, fallback_residual_dc(op, x)))
+    b
+end
+function fallback_jacobian!(A, op, x)
+    isempty(op.fallback.jtrians) && return A
+    assemble_matrix_add!(A, op.fallback.assem, collect_cell_matrix(op.U, op.V, fallback_jacobian_dc(op, x)))
+    A
+end
+
+"Sparsity pattern of the Gridap-assembled part of the Jacobian (nothing when there is none)."
+function fallback_pattern(fb::Fallback, U, V, jac)
+    isempty(fb.jtrians) && return nothing
+    x = zeros(sum(num_free_dofs, field_spaces(U)))
+    dc = restrict(jac(FEFunction(U, x), get_trial_fe_basis(U), get_fe_basis(V)), fb.jtrians)
+    allocate_matrix(fb.assem, collect_cell_matrix(U, V, dc))
+end
+
+function warn_fallback(kind, list)
+    for (trian, why) in list
+        where = trian === :all ? "whole $kind is" : "$kind on a $(nameof(typeof(trian))) is"
+        msg = "HyperFEMKernels: the $where assembled by Gridap (hybrid fallback): $why"
+        @warn msg maxlog = 1 _id = hash(msg)
+    end
 end
 
 function KernelOperator(res, jac, U::FESpace, V::FESpace; nthreads::Int=Threads.nthreads(), cache_aux::Bool=false,
@@ -170,14 +239,16 @@ function KernelOperator(res, jac, U::FESpace, V::FESpace; nthreads::Int=Threads.
         uoff += num_free_dofs(su)
         loc += nd
     end
-    rforms = capture(res, probes(U, :unknown), probes(V, :test))
-    jforms = capture(jac, probes(U, :unknown), probes(U, :trial), probes(V, :test))
+    rforms, rfb = capture(res, probes(U, :unknown), probes(V, :test))
+    jforms, jfb = capture(jac, probes(U, :unknown), probes(U, :trial), probes(V, :test))
     locs = Tuple(fl.loc for fl in fields)
     colors = color_cells(fields, ncells, toff)
-    rgroups = compile_groups(rforms, U, locs, D, colors; linear_maps)
-    jgroups = compile_groups(jforms, U, locs, D, colors; linear_maps)
-    A0, nzpos = sparsity(fields, loc, ncells, toff, uoff)
-    KernelOperator(res, jac, U, V, fields, loc, rgroups, jgroups, A0, nzpos, colors, nthreads, cache_aux, linear_maps)
+    rgroups = compile_groups(rforms, U, locs, D, colors; linear_maps, fallback=rfb)
+    jgroups = compile_groups(jforms, U, locs, D, colors; linear_maps, fallback=jfb)
+    warn_fallback("residual", rfb); warn_fallback("Jacobian", jfb)
+    fb = Fallback(Any[t for (t, _) in rfb], Any[t for (t, _) in jfb], SparseMatrixAssembler(U, V))
+    A0, nzpos = sparsity(fields, loc, ncells, toff, uoff, fallback_pattern(fb, U, V, jac))
+    KernelOperator(res, jac, U, V, fields, loc, rgroups, jgroups, A0, nzpos, colors, nthreads, cache_aux, linear_maps, fb)
 end
 
 """
@@ -191,15 +262,25 @@ function update(op::KernelOperator, res, jac)
     locs = Tuple(fl.loc for fl in op.fields)
     prev = vcat(op.rgroups, op.jgroups)
     lm = op.linear_maps
-    rgroups = compile_groups(capture(res, probes(op.U, :unknown), probes(op.V, :test)), op.U, locs, D, op.colors, prev; linear_maps=lm)
-    jgroups = compile_groups(capture(jac, probes(op.U, :unknown), probes(op.U, :trial), probes(op.V, :test)), op.U, locs, D, op.colors, prev; linear_maps=lm)
-    KernelOperator(res, jac, op.U, op.V, op.fields, op.ndl, rgroups, jgroups, op.A0, op.nzpos, op.colors, op.nthreads, op.cache_aux, op.linear_maps)
+    rforms, rfb = capture(res, probes(op.U, :unknown), probes(op.V, :test))
+    jforms, jfb = capture(jac, probes(op.U, :unknown), probes(op.U, :trial), probes(op.V, :test))
+    rgroups = compile_groups(rforms, op.U, locs, D, op.colors, prev; linear_maps=lm, fallback=rfb)
+    jgroups = compile_groups(jforms, op.U, locs, D, op.colors, prev; linear_maps=lm, fallback=jfb)
+    warn_fallback("residual", rfb); warn_fallback("Jacobian", jfb)
+    fb = Fallback(Any[t for (t, _) in rfb], Any[t for (t, _) in jfb], op.fallback.assem)
+    same = length(fb.jtrians) == length(op.fallback.jtrians) && all(t -> any(s -> s === t, op.fallback.jtrians), fb.jtrians)
+    A0, nzpos = same ? (op.A0, op.nzpos) : begin
+        ncells = num_cells(get_triangulation(field_spaces(op.U)[1]))
+        sparsity(op.fields, op.ndl, ncells, sum(num_free_dofs, field_spaces(op.V)), sum(num_free_dofs, field_spaces(op.U)),
+                 fallback_pattern(fb, op.U, op.V, jac))
+    end
+    KernelOperator(res, jac, op.U, op.V, op.fields, op.ndl, rgroups, jgroups, A0, nzpos, op.colors, op.nthreads, op.cache_aux, op.linear_maps, fb)
 end
 
 # ---------------------------------------------------------------------------------------------
 # Sparsity pattern and nonzero positions
 
-function sparsity(fields::Vector{FieldLayout}, ndl::Int, ncells::Int, nrows::Int, ncols::Int)
+function sparsity(fields::Vector{FieldLayout}, ndl::Int, ncells::Int, nrows::Int, ncols::Int, extra=nothing)
     grow = zeros(Int32, ndl, ncells)
     gcol = zeros(Int32, ndl, ncells)
     for fl in fields, cell in 1:ncells, j in 1:fl.nd
@@ -216,6 +297,12 @@ function sparsity(fields::Vector{FieldLayout}, ndl::Int, ncells::Int, nrows::Int
         for ii in 1:ndl
             r = grow[ii, cell]
             r > 0 && push!(keys, (UInt64(c) << 32) | UInt64(r))
+        end
+    end
+    if extra !== nothing   # union with the pattern of the Gridap-assembled part
+        rv, cp = rowvals(extra), SparseArrays.getcolptr(extra)
+        for c in 1:ncols, p in cp[c]:cp[c+1]-1
+            push!(keys, (UInt64(c) << 32) | UInt64(rv[p]))
         end
     end
     sort!(keys)
@@ -262,7 +349,7 @@ function Algebra.residual!(b::AbstractVector, op::KernelOperator, x::AbstractVec
     for g in op.rgroups
         run_cells!(Val(:res), b, nothing, op, g, x, dvals)
     end
-    b
+    fallback_residual!(b, op, x)
 end
 
 function Algebra.jacobian!(A::SparseMatrixCSC, op::KernelOperator, x::AbstractVector)
@@ -271,7 +358,7 @@ function Algebra.jacobian!(A::SparseMatrixCSC, op::KernelOperator, x::AbstractVe
     for g in op.jgroups
         run_cells!(Val(:jac), nothing, A, op, g, x, dvals)
     end
-    A
+    fallback_jacobian!(A, op, x)
 end
 
 function Algebra.residual_and_jacobian!(b::AbstractVector, A::AbstractMatrix, op::KernelOperator, x::AbstractVector)

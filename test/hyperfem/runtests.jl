@@ -129,8 +129,14 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
             Algebra.solve!(xg, nls, opg); Algebra.solve!(xk, nls, opk)
         end
         @test reldiff(xk, xg) < 1e-10
-        # boundary term: clear error until phase 2
+        # the script's surface load on Γ: hybrid fallback (Γ assembled by Gridap, volume by the kernel)
         resΓ(u, v) = res(u, v) - ∫(f_mid(Δt) ⋅ v)dΓ
-        @test_throws ErrorException KernelOperator(resΓ, jac, Uu, Vu)
+        opΓ = KernelOperator(resΓ, jac, Uu, Vu)
+        @test length(opΓ.fallback.rtrians) == 1 && isempty(opΓ.fallback.jtrians)
+        cΓ = check(resΓ, jac, Uu, Vu, x; op=opΓ)
+        @test cΓ.res < TOL && cΓ.jac < TOL
+        xg = copy(x); xk = copy(x)
+        Algebra.solve!(xg, nls, gop(resΓ, jac, Uu, Vu)); Algebra.solve!(xk, nls, opΓ)
+        @test reldiff(xk, xg) < 1e-10
     end
 end
