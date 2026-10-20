@@ -94,10 +94,16 @@ function LinearForm(terms0::Vector{Term}, pf::PointForm, tables, aux::Tuple, kin
     end)
     state = RuntimeGeneratedFunction(@__MODULE__, @__MODULE__, ex)
     ops = Tuple(st.ops)
-    auxT = Tuple{map(a -> eltype(eltype(a)), aux)...}
-    ST = Core.Compiler.return_type(state, Tuple{typeof(ops),fv_types(tables),auxT})
-    (ST isa DataType && ST <: Tuple && all(T -> isconcretetype(T) && (T <: Real || T <: MultiValue), ST.parameters)) ||
-        return _nolin("state inputs have non-concrete or unsupported types: $ST")
+    # concrete types of the state inputs: evaluate once on sample data (small random state, first cell)
+    FVs = map(t -> map(T -> 0.01 * rand_value(T), field_types(t)), tables)
+    As = map(a -> a[1][1], aux)
+    ST = try
+        typeof(state(ops, FVs, As))
+    catch err
+        return _nolin("state function failed on sample data: $(sprint(showerror, err))")
+    end
+    all(T -> isconcretetype(T) && (T <: Real || T <: MultiValue), ST.parameters) ||
+        return _nolin("state inputs have unsupported types: $ST")
     nsv, nsu = pf.test.nslots, pf.trial.nslots
     maps = SparseMap[]
     for (i, t) in enumerate(terms)
