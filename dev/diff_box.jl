@@ -4,7 +4,7 @@ using LinearAlgebra, SparseArrays, Printf, Random
 Random.seed!(1)
 include(joinpath(@__DIR__, "bench_cases.jl"))
 res, jac, U, V = em_box(20, 4, 4, 2)
-x = 0.01 .* randn(num_free_dofs(U))
+x = parse(Float64, get(ENV, "XSCALE", "1e-5")) .* randn(num_free_dofs(U))
 gop = get_algebraic_operator(FEOperator(res, jac, U, V))
 kop = KernelOperator(res, jac, U, V)
 Ag = jacobian(gop, x); Ak = jacobian(kop, x)
