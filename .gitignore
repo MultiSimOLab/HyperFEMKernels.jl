@@ -15,3 +15,4 @@ run.log
 logs/
 CLAUDE.md
 ESTADO.md
+benchmark/meshes/*.msh
