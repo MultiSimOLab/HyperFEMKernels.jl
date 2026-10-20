@@ -44,6 +44,10 @@ Fk(∇u) = one(∇u) + ∇u
         @test c.res < TOL
         @test c.jac < TOL
         @test all(a -> a.bytes == 0, allocations(KernelOperator(res, jac, U, V), x))
+        cd = check(res, jac, U, V, x; op=KernelOperator(res, jac, U, V; linear_maps=false))  # dual-number path
+        @test cd.res < TOL
+        @test cd.jac < TOL
+        @test all(g -> g.lin !== nothing, KernelOperator(res, jac, U, V).jgroups)
     end
 
     @testset "Hyperelasticity 3D P1 (tetrahedra)" begin
