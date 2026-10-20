@@ -57,7 +57,7 @@ function slot_expr(T::Type, v::Symbol, off::Int)
     comps = [:($v[$(off + i)]) for i in 1:n]
     T <: Real && return comps[1]
     T <: VectorValue && return :(VectorValue(($(comps...),)))
-    T <: TensorValue && return :(TensorValue{$(size(T, 1)),$(size(T, 2))}(($(comps...),)))
+    T <: TensorValue && return :(TensorValue{$(size(T)[1]),$(size(T)[2])}(($(comps...),)))
     error("HyperFEMKernels: unsupported leaf type $T")
 end
 
