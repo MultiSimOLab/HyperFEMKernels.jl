@@ -30,14 +30,15 @@ end
         @test size(t.N) == (length(xq), nn) && size(t.dN) == (length(xq), nn)
         @test t.Nt == permutedims(t.N)
         @test all(sum(t.N[q, :]) ≈ 1.0 for q in 1:length(xq))          # partition of unity
-        @test all(norm(sum(t.dN[q, :])) < 1e-12 for q in 1:length(xq))
+        tol = order >= 3 ? 1e-8 : 1e-12     # Gridap's Q3 basis carries ~1e-9 round-off (Vandermonde)
+        @test all(norm(sum(t.dN[q, :])) < tol for q in 1:length(xq))
         # against Gridap's basis values and gradients
         fields = HK.uniform_value(get_data(get_fe_basis(prob.U)), "basis")
         vals = evaluate(fields, xq)
         for n in 1:nn, c in 1:nc, q in 1:length(xq)
             j = t.ldof[n, c]
             vg = nc == 1 ? vals[q, j] : vals[q, j][c]
-            @test vg ≈ t.N[q, n]
+            @test isapprox(vg, t.N[q, n]; atol=tol)
         end
     end
 end
