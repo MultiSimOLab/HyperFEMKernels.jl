@@ -87,7 +87,7 @@ end
 end
 
 @testset "gemm_add! tiles (full tiles and remainders)" begin
-    for (M, N, R) in ((8, 4, 5), (27, 27, 81), (3, 2, 4), (9, 5, 7))
+    for (M, N, R) in ((8, 4, 5), (27, 27, 81), (3, 2, 4), (9, 5, 7), (4, 4, 12), (10, 10, 12), (64, 64, 192), (15, 7, 3), (1, 1, 1), (6, 9, 2))
         A4 = randn(M, R, 2, 2); B = randn(R, N)
         C = zeros(M + 2, N + 3)
         HK.gemm_add!(C, 1, 2, A4, 2, 1, B, M, N, R)

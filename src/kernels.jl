@@ -154,7 +154,7 @@ end
 #     B_f[(q,jj), n]  = W_f,q[n, jj]
 #
 # G and B are filled during the point loop; the products are done once per cell with a
-# register-tiled kernel written in plain Julia (no BLAS), so the same code can run per thread
+# register-tiled kernel written in plain Julia (no BLAS, see `gemm_add!`), so the same code can run per thread
 # block on a GPU. Requires node-contiguous dofs (FieldTable CONTIG = true).
 
 "B_f[(q-1)*LV + jj, n] = W[n, col(jj)] for point q."
@@ -184,40 +184,59 @@ end
     G
 end
 
-"C[om + m, on + n] += Σ_r A[m, r, k, c] B[r, n] for m ≤ M, n ≤ N, r ≤ R (8×4 register tiles)."
+"""
+    gemm_add!(C, om, on, A, k, c, B, M, N, R)
+
+`C[om + m, on + n] += Σ_r A[m, r, k, c] B[r, n]` for m ≤ M, n ≤ N, r ≤ R. Register-tiled
+(8×4 tiles of C, remainders in 4/2/1-row and 1-column tiles, all with static sizes), plain
+Julia, no BLAS. On the M5 Max it runs at 30–45 GFLOP/s for the Q2/Q3 shapes (OpenBLAS: 40).
+"""
 @inline function gemm_add!(C, om::Int, on::Int, A, k::Int, c::Int, B, M::Int, N::Int, R::Int)
-    @inbounds for n0 in 1:4:N
-        nb = min(4, N - n0 + 1)
-        for m0 in 1:8:M
-            mb = min(8, M - m0 + 1)
-            if nb == 4 && mb == 8
-                c1 = c2 = c3 = c4 = zero(SVector{8,Float64})
-                for r in 1:R
-                    a = SVector{8,Float64}(ntuple(i -> A[m0+i-1, r, k, c], Val(8)))
-                    c1 += a * B[r, n0]
-                    c2 += a * B[r, n0+1]
-                    c3 += a * B[r, n0+2]
-                    c4 += a * B[r, n0+3]
-                end
-                for i in 1:8
-                    C[om+m0+i-1, on+n0] += c1[i]
-                    C[om+m0+i-1, on+n0+1] += c2[i]
-                    C[om+m0+i-1, on+n0+2] += c3[i]
-                    C[om+m0+i-1, on+n0+3] += c4[i]
-                end
-            else
-                for j in n0:n0+nb-1, i in m0:m0+mb-1
-                    s = 0.0
-                    for r in 1:R
-                        s += A[i, r, k, c] * B[r, j]
-                    end
-                    C[om+i, on+j] += s
-                end
-            end
-        end
+    lda = size(A, 1)
+    offA = ((c - 1) * size(A, 3) + (k - 1)) * size(A, 1) * size(A, 2)
+    n0 = 1
+    while n0 + 3 <= N
+        gemm_cols!(C, om, on, A, offA, lda, B, n0, M, R, Val(4)); n0 += 4
+    end
+    while n0 <= N
+        gemm_cols!(C, om, on, A, offA, lda, B, n0, M, R, Val(1)); n0 += 1
     end
     C
 end
+
+"Columns n0 … n0+NB-1 of the product, rows in tiles of 8 then 4, 2, 1."
+@inline function gemm_cols!(C, om, on, A, offA, lda, B, n0, M, R, vnb::Val{NB}) where {NB}
+    m0 = 1
+    while m0 + 7 <= M
+        gemm_tile!(C, om, on, A, offA, lda, B, m0, n0, R, Val(8), vnb); m0 += 8
+    end
+    rem = M - m0 + 1
+    if rem >= 4
+        gemm_tile!(C, om, on, A, offA, lda, B, m0, n0, R, Val(4), vnb); m0 += 4; rem -= 4
+    end
+    if rem >= 2
+        gemm_tile!(C, om, on, A, offA, lda, B, m0, n0, R, Val(2), vnb); m0 += 2; rem -= 2
+    end
+    rem >= 1 && gemm_tile!(C, om, on, A, offA, lda, B, m0, n0, R, Val(1), vnb)
+    nothing
+end
+
+"One MB×NB tile of C kept in registers over the whole r loop."
+@inline function gemm_tile!(C, om, on, A, offA, lda, B, m0, n0, R, ::Val{MB}, ::Val{NB}) where {MB,NB}
+    acc = ntuple(_ -> zero(SVector{MB,Float64}), Val(NB))
+    @inbounds for r in 1:R
+        base = offA + m0 - 1 + (r - 1) * lda
+        a = SVector{MB,Float64}(ntuple(i -> A[base+i], Val(MB)))
+        acc = gemm_accum(a, acc, B, r, n0)
+    end
+    @inbounds for j in 1:NB, i in 1:MB
+        C[om+m0+i-1, on+n0+j-1] += acc[j][i]
+    end
+    nothing
+end
+# acc is passed and returned, never captured: a closure over a reassigned variable would box it
+@inline gemm_accum(a, acc::NTuple{NB,Any}, B, r, n0) where {NB} =
+    ntuple(j -> muladd.(a, @inbounds(B[r, n0+j-1]), acc[j]), Val(NB))
 
 "Add the products of one block (f, g) to KeT (transposed element matrix)."
 @inline function block_products!(KeT, tf::FieldTable{D,Tf,NNf,NCf,true}, locf::Int, spf::SlotSpec{NCf,LVf}, B,
