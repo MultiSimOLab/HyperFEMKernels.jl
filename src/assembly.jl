@@ -14,8 +14,9 @@ struct FieldLayout
 end
 
 "A compiled group of terms: same triangulation and quadrature."
-struct Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF}
+struct Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF}
     pf::PF
+    lin::LF               # LinearForm (no dual numbers) or nothing
     locs::NTuple{NF,Int}  # offset of each field in the element vector
     tables::TT          # FieldTable per field
     geo::GeoTable{D}
@@ -29,7 +30,8 @@ struct Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF}
     colors::Vector{Vector{Int32}}  # integration cells per colour
 end
 
-function Group(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int, cellmap, colors, previous=Any[])
+function Group(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int, cellmap, colors, previous=Any[];
+               linear_maps::Bool=true)
     pf = PointForm(terms)
     ls = vcat(pf.test.leaves, pf.trial.leaves, leaves(terms, :unknown))
     isempty(ls) && error("HyperFEMKernels: integral without unknown, test or trial functions")
@@ -47,8 +49,9 @@ function Group(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int,
     smu = Tuple(SlotSpec(slot_map(pf.trial, f, t.nc, D), D) for (f, t) in enumerate(tables))
     aux = Tuple(a.array for a in pf.aux)
     NF = length(tables)
-    Group{pf.test.nslots,pf.trial.nslots,typeof(pf),typeof(tables),typeof(aux),typeof(smv),typeof(smu),D,NF}(
-        pf, NTuple{NF,Int}(locs), tables, geo, aux, smv, smu, trian, collect(xq), Ref{Any}(nothing), cellmap, colors)
+    lin = linear_maps ? LinearForm(terms, pf, tables, aux, pf.trial.nslots == 0 ? :res : :jac) : nothing
+    Group{pf.test.nslots,pf.trial.nslots,typeof(pf),typeof(tables),typeof(aux),typeof(smv),typeof(smu),D,NF,typeof(lin)}(
+        pf, lin, NTuple{NF,Int}(locs), tables, geo, aux, smv, smu, trian, collect(xq), Ref{Any}(nothing), cellmap, colors)
 end
 
 """
@@ -57,6 +60,11 @@ end
 Gridap `NonlinearOperator` that assembles `res(u, v)` and `jac(u, du, v)` with fused, threaded
 kernels. `res` and `jac` are written as for Gridap's `FEOperator`. Use [`update`](@ref) to change
 `res`/`jac` (e.g. a new load factor) while keeping tables, sparsity pattern and colouring.
+
+With `linear_maps = true` (default) residual coefficients and tangents are obtained by applying
+precomputed linear maps to the state inputs of each term (no dual numbers) whenever the weak
+form allows it (see `linearmaps.jl`); otherwise, and with `linear_maps = false`, by exact
+differentiation with dual numbers.
 
 With `cache_aux = true` the auxiliary data (fields that do not depend on the unknown, e.g. a
 previous state) is evaluated once per operator instead of once per assembly. Only safe when that
@@ -77,6 +85,7 @@ struct KernelOperator{R,J,US,VS} <: NonlinearOperator
     colors::Vector{Vector{Int32}}
     nthreads::Int
     cache_aux::Bool
+    linear_maps::Bool
 end
 
 """
@@ -119,7 +128,7 @@ function group_colors(colors::Vector{Vector{Int32}}, cmap::Vector{Int32}, nspace
     filter!(!isempty, out)
 end
 
-function compile_groups(forms::Vector{Form}, U, locs, D::Int, colors, previous=Any[])
+function compile_groups(forms::Vector{Form}, U, locs, D::Int, colors, previous=Any[]; linear_maps::Bool=true)
     groups = Any[]
     Us = field_spaces(U)
     strian = get_triangulation(Us[1])
@@ -134,13 +143,14 @@ function compile_groups(forms::Vector{Form}, U, locs, D::Int, colors, previous=A
             push!(bykey[k], t)
         end
         for k in order
-            push!(groups, Group(bykey[k], form.trian, Us, locs, D, cmap, gcolors, previous))
+            push!(groups, Group(bykey[k], form.trian, Us, locs, D, cmap, gcolors, previous; linear_maps))
         end
     end
     groups
 end
 
-function KernelOperator(res, jac, U::FESpace, V::FESpace; nthreads::Int=Threads.nthreads(), cache_aux::Bool=false)
+function KernelOperator(res, jac, U::FESpace, V::FESpace; nthreads::Int=Threads.nthreads(), cache_aux::Bool=false,
+                        linear_maps::Bool=true)
     Us, Vs = field_spaces(U), field_spaces(V)
     length(Us) == length(Vs) || error("HyperFEMKernels: test and trial spaces have different numbers of fields")
     if U isa MultiFieldFESpace
@@ -163,10 +173,10 @@ function KernelOperator(res, jac, U::FESpace, V::FESpace; nthreads::Int=Threads.
     jforms = capture(jac, probes(U, :unknown), probes(U, :trial), probes(V, :test))
     locs = Tuple(fl.loc for fl in fields)
     colors = color_cells(fields, ncells, toff)
-    rgroups = compile_groups(rforms, U, locs, D, colors)
-    jgroups = compile_groups(jforms, U, locs, D, colors)
+    rgroups = compile_groups(rforms, U, locs, D, colors; linear_maps)
+    jgroups = compile_groups(jforms, U, locs, D, colors; linear_maps)
     A0, nzpos = sparsity(fields, loc, ncells, toff, uoff)
-    KernelOperator(res, jac, U, V, fields, loc, rgroups, jgroups, A0, nzpos, colors, nthreads, cache_aux)
+    KernelOperator(res, jac, U, V, fields, loc, rgroups, jgroups, A0, nzpos, colors, nthreads, cache_aux, linear_maps)
 end
 
 """
@@ -179,9 +189,10 @@ function update(op::KernelOperator, res, jac)
     D = num_cell_dims(get_triangulation(field_spaces(op.U)[1]))
     locs = Tuple(fl.loc for fl in op.fields)
     prev = vcat(op.rgroups, op.jgroups)
-    rgroups = compile_groups(capture(res, probes(op.U, :unknown), probes(op.V, :test)), op.U, locs, D, op.colors, prev)
-    jgroups = compile_groups(capture(jac, probes(op.U, :unknown), probes(op.U, :trial), probes(op.V, :test)), op.U, locs, D, op.colors, prev)
-    KernelOperator(res, jac, op.U, op.V, op.fields, op.ndl, rgroups, jgroups, op.A0, op.nzpos, op.colors, op.nthreads, op.cache_aux)
+    lm = op.linear_maps
+    rgroups = compile_groups(capture(res, probes(op.U, :unknown), probes(op.V, :test)), op.U, locs, D, op.colors, prev; linear_maps=lm)
+    jgroups = compile_groups(capture(jac, probes(op.U, :unknown), probes(op.U, :trial), probes(op.V, :test)), op.U, locs, D, op.colors, prev; linear_maps=lm)
+    KernelOperator(res, jac, op.U, op.V, op.fields, op.ndl, rgroups, jgroups, op.A0, op.nzpos, op.colors, op.nthreads, op.cache_aux, op.linear_maps)
 end
 
 # ---------------------------------------------------------------------------------------------
@@ -334,8 +345,8 @@ end
 end
 
 "Element residual of `cell` into `re` (local numbering of the element)."
-function element_residual!(re, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF}, xl, auxd, cell::Integer,
-                           dNb) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF}
+function element_residual!(re, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF}, xl, auxd, cell::Integer,
+                           dNb) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF}
     fill!(re, 0.0)
     tables, locs, pf = g.tables, g.locs, g.pf
     zsv = zero(SVector{NSV,Float64})
@@ -344,15 +355,19 @@ function element_residual!(re, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF}, xl, auxd,
         map((t, buf) -> phys_grads!(buf, t, q, iJt), tables, dNb)
         FV = map((t, l, buf) -> field_point_values(t, xl, l, q, buf), tables, locs, dNb)
         Aq = map(a -> @inbounds(a[q, cell]), auxd)
-        R = ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, EMPTY_SLOTS), zsv)
+        R = if LF === Nothing
+            ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, EMPTY_SLOTS), zsv)
+        else
+            apply_maps(g.lin, g.lin.state(g.lin.ops, FV, Aq), Val(NSV))
+        end
         map((t, l, sm, buf) -> contract_residual!(re, t, l, sm, R, q, buf, dV), tables, locs, g.smv, dNb)
     end
     re
 end
 
 "Element Jacobian of `cell` into `KeT` (transposed: KeT[trial, test], local numbering)."
-function element_jacobian!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF}, xl, auxd, cell::Integer,
-                           dNb) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF}
+function element_jacobian!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF}, xl, auxd, cell::Integer,
+                           dNb) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF}
     fill!(KeT, 0.0)
     tables, locs, pf = g.tables, g.locs, g.pf
     zsv = zero(SVector{NSV,Float64})
@@ -362,7 +377,11 @@ function element_jacobian!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF}, xl, auxd
         map((t, buf) -> phys_grads!(buf, t, q, iJt), tables, dNb)
         FV = map((t, l, buf) -> field_point_values(t, xl, l, q, buf), tables, locs, dNb)
         Aq = map(a -> @inbounds(a[q, cell]), auxd)
-        T = ForwardDiff.jacobian(s -> ForwardDiff.gradient(r -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsu), zsv)
+        T = if LF === Nothing
+            ForwardDiff.jacobian(s -> ForwardDiff.gradient(r -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsu), zsv)
+        else
+            SMatrix{NSV,NSU,Float64,NSV * NSU}(apply_maps(g.lin, g.lin.state(g.lin.ops, FV, Aq), Val(NSV * NSU)))
+        end
         map((tf, lf, smf, bf) -> map((tg, lg, smg, bg) ->
                 contract_jacobian!(KeT, tf, lf, smf, bf, tg, lg, smg, bg, T, q, dV),
                 tables, locs, g.smu, dNb),
@@ -412,8 +431,8 @@ function run_cells!(kind::Val, b, A, op::KernelOperator, g::Group, x, dvals)
     nothing
 end
 
-function cells!(::Val{K}, b, A, op::KernelOperator, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF},
-                x, dvals, auxd, cells) where {K,NSV,NSU,PF,TT,AUX,SV,SU,D,NF}
+function cells!(::Val{K}, b, A, op::KernelOperator, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D},
+                x, dvals, auxd, cells) where {K,NSV,NSU,PF,TT,AUX,SV,SU,D}
     ndl = op.ndl
     xl = zeros(ndl)
     dNb = map(t -> Vector{VectorValue{D,Float64}}(undef, t.nn), g.tables)

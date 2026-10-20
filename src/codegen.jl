@@ -68,7 +68,12 @@ struct CodegenState
     test::SlotLayout
     trial::SlotLayout
     aux::Vector{Aux}
+    subst::IdDict{Any,Any}   # nodes replaced by a given expression (e.g. a symbol)
 end
+CodegenState(test, trial, aux) = CodegenState(Any[], Expr[], Dict{Any,Symbol}(), test, trial, aux, IdDict{Any,Any}())
+
+"Emit a node, honouring substitutions."
+emit_node!(st::CodegenState, n::Node) = haskey(st.subst, n) ? st.subst[n] : emit!(st, n)
 
 function emit!(st::CodegenState, n::Leaf)
     if n.role === :unknown
@@ -85,7 +90,7 @@ function emit!(st::CodegenState, n::Aux)
 end
 
 function emit!(st::CodegenState, n::Op)
-    args = [emit!(st, c) for c in n.args]
+    args = [emit_node!(st, c) for c in n.args]
     key = (objectid(n.f), args)
     haskey(st.memo, key) && return st.memo[key]
     k = findfirst(f -> f === n.f, st.ops)
@@ -114,8 +119,8 @@ function PointForm(terms::Vector{Term})
     test = SlotLayout(leaves(terms, :test))
     trial = SlotLayout(leaves(terms, :trial))
     aux = aux_nodes(terms)
-    st = CodegenState(Any[], Expr[], Dict{Any,Symbol}(), test, trial, aux)
-    results = [emit!(st, t.expr) for t in terms]
+    st = CodegenState(test, trial, aux)
+    results = [emit_node!(st, t.expr) for t in terms]
     total = Expr(:call, :+, [:(C[$i] * $(r)) for (i, r) in enumerate(results)]...)
     ex = :((ops, C, FV, A, sv, su) -> begin
         $(st.body...)

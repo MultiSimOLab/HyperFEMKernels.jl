@@ -42,6 +42,7 @@ export KernelOperator, update, check, allocations
 include("probes.jl")
 include("tree.jl")
 include("codegen.jl")
+include("linearmaps.jl")
 include("tables.jl")
 include("kernels.jl")
 include("assembly.jl")
