@@ -22,12 +22,12 @@ struct Fallback
 end
 
 "A compiled group of terms: same triangulation and quadrature."
-struct Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF}
+struct Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}
     pf::PF
     lin::LF               # LinearForm (no dual numbers) or nothing
     locs::NTuple{NF,Int}  # offset of each field in the element vector
     tables::TT          # FieldTable per field
-    geo::GeoTable{D}
+    geo::GeoTable{D,JF}
     aux::AUX            # Gridap arrays, evaluated per cell
     smv::SV             # slot specs (test) per field
     smu::SU             # slot specs (trial) per field
@@ -39,16 +39,18 @@ struct Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF}
 end
 
 function Group(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int, cellmap, colors, previous=Any[];
-               linear_maps::Bool=true)
+               linear_maps::Bool=true, boundary=nothing)
     pf = PointForm(terms)
     ls = vcat(pf.test.leaves, pf.trial.leaves, leaves(terms, :unknown))
     isempty(ls) && error("HyperFEMKernels: integral without unknown, test or trial functions")
-    xq = uniform_value(get_data(ls[1].points), "the quadrature points")
     w = uniform_value(terms[1].weights, "the quadrature weights")
+    # quadrature points in the reference cell (for a boundary group: the face points mapped to the cell)
+    xq = boundary === nothing ? uniform_value(get_data(ls[1].points), "the quadrature points") : boundary.xq
     # reuse geometry and shape-function tables of a previous operator with the same quadrature
     k = findfirst(g -> g.trian === trian && g.xq == xq && g.geo.w == w, previous)
     if k === nothing
-        geo = GeoTable(trian, xq, w)
+        strian = get_triangulation(Uspaces[1])
+        geo = boundary === nothing ? GeoTable(strian, xq, w; cells=cellmap) : GeoTable(strian, xq, w; cells=cellmap, Jf=boundary.Jf)
         tables = Tuple(FieldTable(s, xq, D) for s in Uspaces)
     else
         geo, tables = previous[k].geo, previous[k].tables
@@ -58,7 +60,7 @@ function Group(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int,
     aux = Tuple(a.array for a in pf.aux)
     NF = length(tables)
     lin = linear_maps ? LinearForm(terms, pf, tables, aux, pf.trial.nslots == 0 ? :res : :jac) : nothing
-    Group{pf.test.nslots,pf.trial.nslots,typeof(pf),typeof(tables),typeof(aux),typeof(smv),typeof(smu),D,NF,typeof(lin)}(
+    Group{pf.test.nslots,pf.trial.nslots,typeof(pf),typeof(tables),typeof(aux),typeof(smv),typeof(smu),D,NF,typeof(lin),typeof(geo.Jf)}(
         pf, lin, NTuple{NF,Int}(locs), tables, geo, aux, smv, smu, trian, collect(xq), Ref{Any}(nothing), cellmap, colors)
 end
 
@@ -106,10 +108,11 @@ cells of the spaces, e.g. a subdomain or, in MPI, the owned cells of a part).
 function integration_cells(trian::Triangulation, space_trian::Triangulation)
     n = num_cells(trian)
     trian === space_trian && return Int32.(1:n)
-    D = num_cell_dims(trian)
-    num_cell_dims(space_trian) == D ||
-        error("HyperFEMKernels: integrals on lower-dimensional triangulations (boundaries, skeletons) are not supported yet")
-    t2m = Geometry.get_glue(trian, Val(D)).tface_to_mface
+    D = num_cell_dims(space_trian)
+    glue = Geometry.get_glue(trian, Val(D))
+    glue isa Geometry.FaceToFaceGlue ||
+        error("HyperFEMKernels: integrals on this triangulation are not supported yet (no glue to the cells of the FE spaces)")
+    t2m = glue.tface_to_mface
     s2m = Geometry.get_glue(space_trian, Val(D)).tface_to_mface
     m2s = Dict{Int,Int32}()
     for (sc, m) in enumerate(s2m)
@@ -124,17 +127,24 @@ function integration_cells(trian::Triangulation, space_trian::Triangulation)
     cmap
 end
 
-"Integration cells grouped by the colour of their FE-space cell."
-function group_colors(colors::Vector{Vector{Int32}}, cmap::Vector{Int32}, nspace::Int)
+"""
+Integration cells grouped by the colour of their FE-space cell. Several integration cells may
+map to the same FE cell (faces of a boundary): they are put in different colours.
+"""
+function group_colors(colors::Vector{Vector{Int32}}, cmap::Vector{Int32}, nspace::Int; subset=nothing)
     color_of = zeros(Int32, nspace)
     for (c, cells) in enumerate(colors), cell in cells
         color_of[cell] = c
     end
-    out = [Int32[] for _ in colors]
-    for (tc, sc) in enumerate(cmap)
-        push!(out[color_of[sc]], tc)
+    out = Dict{Tuple{Int32,Int},Vector{Int32}}()
+    seen = Dict{Int32,Int}()
+    for tc in (subset === nothing ? eachindex(cmap) : subset)
+        sc = cmap[tc]
+        k = get(seen, sc, 0) + 1
+        seen[sc] = k
+        push!(get!(out, (color_of[sc], k), Int32[]), Int32(tc))
     end
-    filter!(!isempty, out)
+    [out[k] for k in sort!(collect(keys(out)))]
 end
 
 """
@@ -150,7 +160,6 @@ function compile_groups(forms::Vector{Form}, U, locs, D::Int, colors, previous=A
         fgroups = Any[]
         try
             cmap = integration_cells(form.trian, strian)
-            gcolors = group_colors(colors, cmap, num_cells(strian))
             bykey = Dict{UInt,Vector{Term}}()
             order = UInt[]
             for t in form.terms
@@ -158,18 +167,68 @@ function compile_groups(forms::Vector{Form}, U, locs, D::Int, colors, previous=A
                 haskey(bykey, k) || (push!(order, k); bykey[k] = Term[])
                 push!(bykey[k], t)
             end
-            for k in order
-                push!(fgroups, Group(bykey[k], form.trian, Us, locs, D, cmap, gcolors, previous; linear_maps))
+            if num_cell_dims(form.trian) == D
+                gcolors = group_colors(colors, cmap, num_cells(strian))
+                for k in order
+                    push!(fgroups, Group(bykey[k], form.trian, Us, locs, D, cmap, gcolors, previous; linear_maps))
+                end
+            else
+                # boundary: one group per class of faces with the same points in the reference cell
+                for k in order, b in boundary_classes(form.trian, bykey[k], D)
+                    gcolors = group_colors(colors, cmap, num_cells(strian); subset=b.faces)
+                    push!(fgroups, Group(bykey[k], form.trian, Us, locs, D, cmap, gcolors, previous; linear_maps, boundary=b))
+                end
             end
         catch err
-            err isa ErrorException || rethrow()
-            push!(fallback, (form.trian, err.msg))
+            err isa InterruptException && rethrow()
+            push!(fallback, (form.trian, sprint(showerror, err)))
             continue
         end
         append!(groups, fgroups)
     end
     groups
 end
+
+# ---------------------------------------------------------------------------------------------
+# Boundary integrals: faces of a lower-dimensional triangulation glued to the cells of the spaces.
+#
+# The quadrature points of a face are mapped to the reference cell through the glue; faces with
+# the same mapped points (same local face and cell type) form a class and share the tables. The
+# normal and any field of the volume evaluated on the faces are ordinary auxiliary data (Gridap
+# arrays, materialised per face), so no new node type is needed.
+
+"Faces with the same reference-cell points: (faces, xq, Jf) per class."
+function boundary_classes(trian::Triangulation, terms::Vector{Term}, D::Int)
+    pts = get_data(_first_points(terms))
+    glue = Geometry.get_glue(trian, Val(D))
+    cpts = lazy_map(evaluate, glue.tface_to_mface_map, pts)
+    jf = lazy_map(∇, glue.tface_to_mface_map)
+    classes = Dict{Vector{Float64},Vector{Int32}}()
+    data = Dict{Vector{Float64},Any}()
+    cache = array_cache(cpts); jcache = array_cache(jf)
+    for face in 1:num_cells(trian)
+        x = getindex!(cache, cpts, face)
+        key = round.(reduce(vcat, [collect(p.data) for p in x]); digits=10)
+        if !haskey(classes, key)
+            classes[key] = Int32[]
+            Jf = evaluate(getindex!(jcache, jf, face), pts[face])[1]
+            data[key] = (xq=collect(x), Jf=Jf)
+        end
+        push!(classes[key], Int32(face))
+    end
+    [(faces=classes[k], xq=data[k].xq, Jf=data[k].Jf) for k in sort!(collect(keys(classes)))]
+end
+
+function _first_points(terms::Vector{Term})
+    for t in terms
+        l = _first_leaf(t.expr)
+        l === nothing || return l.points
+    end
+    error("HyperFEMKernels: integral without unknown, test or trial functions")
+end
+_first_leaf(n::Leaf) = n
+_first_leaf(n::Op) = (for a in n.args; l = _first_leaf(a); l === nothing || return l; end; nothing)
+_first_leaf(n) = nothing
 
 # ---------------------------------------------------------------------------------------------
 # Hybrid fallback: contributions the engine cannot translate are assembled by Gridap.
@@ -429,12 +488,14 @@ end
     @inbounds for n in 1:geo.ng
         Jt += outer(geo.dM[q, n], geo.coords[n, cell])
     end
-    (geo.w[q] * meas(Jt), inv(Jt))
+    (geo.w[q] * measure(Jt, geo.Jf), inv(Jt))
 end
+@inline measure(Jt, ::Nothing) = meas(Jt)           # volume
+@inline measure(Jt, Jf) = meas(Jf ⋅ Jt)             # surface: Jacobian of the face map composed with the cell map
 
 "Element residual of `cell` into `re` (local numbering of the element)."
-function element_residual!(re, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF}, xl, auxd, cell::Integer,
-                           dNb) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF}
+function element_residual!(re, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}, xl, auxd, cell::Integer,
+                           dNb) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}
     fill!(re, 0.0)
     tables, locs, pf = g.tables, g.locs, g.pf
     zsv = zero(SVector{NSV,Float64})
@@ -454,8 +515,8 @@ function element_residual!(re, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF}, xl, au
 end
 
 "Element Jacobian of `cell` into `KeT` (transposed: KeT[trial, test], local numbering)."
-function element_jacobian!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF}, xl, auxd, cell::Integer,
-                           dNb) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF}
+function element_jacobian!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}, xl, auxd, cell::Integer,
+                           dNb) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}
     fill!(KeT, 0.0)
     tables, locs, pf = g.tables, g.locs, g.pf
     zsv = zero(SVector{NSV,Float64})
@@ -483,8 +544,8 @@ Element Jacobian of `cell` as matrix products (requires node-contiguous dofs); b
 `mm_buffers`. The quadrature points are processed in blocks of `POINT_BLOCK[]` points so that
 the G and B buffers of a block stay in L1 cache during the products (0 = all points at once).
 """
-function element_jacobian_mm!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF}, xl, auxd, cell::Integer,
-                              Wb, Bb, Gb) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF}
+function element_jacobian_mm!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}, xl, auxd, cell::Integer,
+                              Wb, Bb, Gb) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}
     fill!(KeT, 0.0)
     tables, locs, pf = g.tables, g.locs, g.pf
     np = g.geo.np

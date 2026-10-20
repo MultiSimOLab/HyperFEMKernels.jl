@@ -34,7 +34,7 @@ function MatrixFreeJacobian(op::KernelOperator)
     end
     data = map(op.jgroups) do g
         np, nc = g.geo.np, length(g.cellmap)
-        D = num_cell_dims(g.trian)
+        D = group_dim(g)
         nsv, nsu = nslots(g)
         GroupData{D}(zeros(nsv * nsu, np, nc), zeros(D * D, np, nc), zeros(np, nc))
     end
@@ -43,6 +43,7 @@ function MatrixFreeJacobian(op::KernelOperator)
 end
 
 nslots(::Group{NSV,NSU}) where {NSV,NSU} = (NSV, NSU)
+group_dim(::Group{NSV,NSU,PF,TT,AUX,SV,SU,D}) where {NSV,NSU,PF,TT,AUX,SV,SU,D} = D
 
 Base.size(mf::MatrixFreeJacobian) = size(mf.op.A0)
 Base.size(mf::MatrixFreeJacobian, i::Int) = size(mf.op.A0, i)
@@ -56,7 +57,7 @@ function prepare!(mf::MatrixFreeJacobian, x::AbstractVector)
     for (gi, g) in enumerate(op.jgroups)
         auxd = aux_data(op, g)
         gd = mf.data[gi]
-        cells = 1:length(g.cellmap)
+        cells = reduce(vcat, g.colors)
         nchunks = clamp(length(cells) ÷ 16, 1, mf.nthreads)
         @sync for ch in Iterators.partition(cells, cld(length(cells), nchunks))
             Threads.@spawn prepare_cells!(gd, g, op, x, dvals, auxd, ch)
@@ -69,7 +70,7 @@ function prepare!(mf::MatrixFreeJacobian, x::AbstractVector)
     mf
 end
 
-function prepare_cells!(gd::GroupData{D}, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF}, op, x, dvals, auxd, cells) where {D,NSV,NSU,PF,TT,AUX,SV,SU,NF,LF}
+function prepare_cells!(gd::GroupData{D}, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}, op, x, dvals, auxd, cells) where {D,NSV,NSU,PF,TT,AUX,SV,SU,NF,LF,JF}
     tables, locs, pf = g.tables, g.locs, g.pf
     xl = zeros(op.ndl)
     Wb = map(t -> zeros(t.nn, D + 1), tables)

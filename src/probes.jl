@@ -26,8 +26,10 @@ end
 
 CellData.get_triangulation(p::ProbeField) = p.trian
 CellData.DomainStyle(::Type{ProbeField}) = ReferenceDomain()
-CellData.change_domain(p::ProbeField, ::Triangulation, ::ReferenceDomain) = p
-CellData.change_domain(p::ProbeField, ::ReferenceDomain, ::Triangulation, ::ReferenceDomain) = p
+# moved to another triangulation (e.g. a boundary) the probe reports that triangulation, as a
+# real basis would, so that Gridap picks the right common domain in e.g. ∇(u) ⋅ n
+CellData.change_domain(p::ProbeField, t::Triangulation, ::ReferenceDomain) = ProbeField(p.role, p.field, p.deriv, p.T, p.D, t)
+CellData.change_domain(p::ProbeField, ::ReferenceDomain, t::Triangulation, ::ReferenceDomain) = ProbeField(p.role, p.field, p.deriv, p.T, p.D, t)
 
 function Fields.gradient(p::ProbeField)
     p.deriv == 0 || error("HyperFEMKernels: second derivatives of the unknown/test/trial functions are not supported yet")
@@ -36,9 +38,15 @@ end
 Fields.symmetric_gradient(p::ProbeField) = Operation(symmetric_part)(gradient(p))
 Fields.divergence(p::ProbeField) = Operation(tr)(gradient(p))
 
+# A differential operator applied to an expression with probes (∇(u*w)), or plus/minus on a
+# skeleton, makes Gridap ask for the cell-wise data of the probe. There is none: the whole weak
+# form then goes to the hybrid fallback (see `capture`). Returning mock cell data instead was
+# tried and rejected: Gridap then builds a tree the reader misparses silently.
 CellData.get_data(p::ProbeField) = error("""
     HyperFEMKernels: a differential operator was applied to an expression that contains the
-    unknown, test or trial function (e.g. ∇(u*w)). Write it in terms of ∇(u) instead.""")
+    unknown, test or trial function (e.g. ∇(u*w)), or the expression is restricted to one side of
+    a skeleton (plus/minus/jump/mean). Write it in terms of ∇(u), or let the hybrid fallback
+    assemble it with Gridap.""")
 
 "Value type of a probe at a quadrature point (Gridap's convention for gradients)."
 function probe_valtype(p::ProbeField)

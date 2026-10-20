@@ -129,10 +129,11 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
             Algebra.solve!(xg, nls, opg); Algebra.solve!(xk, nls, opk)
         end
         @test reldiff(xk, xg) < 1e-10
-        # the script's surface load on Γ: hybrid fallback (Γ assembled by Gridap, volume by the kernel)
+        # the script's surface load on Γ: a boundary group of the kernel (no fallback)
         resΓ(u, v) = res(u, v) - ∫(f_mid(Δt) ⋅ v)dΓ
         opΓ = KernelOperator(resΓ, jac, Uu, Vu)
-        @test length(opΓ.fallback.rtrians) == 1 && isempty(opΓ.fallback.jtrians)
+        @test isempty(opΓ.fallback.rtrians) && isempty(opΓ.fallback.jtrians)
+        @test any(g -> g.trian isa BoundaryTriangulation, opΓ.rgroups)
         cΓ = check(resΓ, jac, Uu, Vu, x; op=opΓ)
         @test cΓ.res < TOL && cΓ.jac < TOL
         xg = copy(x); xk = copy(x)
