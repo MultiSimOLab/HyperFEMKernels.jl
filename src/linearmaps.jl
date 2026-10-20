@@ -52,13 +52,7 @@ fv_types(tables) = Tuple{map(t -> Tuple{field_types(t)...}, tables)...}
 field_types(::FieldTable{D,Float64}) where {D} = (Float64, VectorValue{D,Float64})
 field_types(::FieldTable{D,VectorValue{NC,Float64}}) where {D,NC} = (VectorValue{NC,Float64}, TensorValue{D,NC,Float64,D * NC})
 
-"""
-    LinearForm(terms, pf, tables, aux, kind) -> LinearForm or nothing
-
-Build the linear-map shortcut for a group, or `nothing` if some term does not qualify.
-`kind` is `:res` (linear in test slots) or `:jac` (bilinear in test and trial slots).
-"""
-"Split a slot-dependent expression into additive parts: [(expr, sign), ...]."
+# Split a slot-dependent expression into additive parts: [(expr, sign), ...].
 function split_sum(n::Node, sgn::Float64=1.0)
     if n isa Op && all(dependent, n.args)
         n.f === (+) && return reduce(vcat, [split_sum(a, sgn) for a in n.args])
@@ -68,6 +62,12 @@ function split_sum(n::Node, sgn::Float64=1.0)
     [(n, sgn)]
 end
 
+"""
+    LinearForm(terms, pf, tables, aux, kind) -> LinearForm or nothing
+
+Build the linear-map shortcut for a group, or `nothing` if some term does not qualify.
+`kind` is `:res` (linear in test slots) or `:jac` (bilinear in test and trial slots).
+"""
 function LinearForm(terms0::Vector{Term}, pf::PointForm, tables, aux::Tuple, kind::Symbol)
     # additive parts of each term become separate terms with their own state input
     terms = Term[]
