@@ -39,9 +39,11 @@ Fk(∇u) = one(∇u) + ∇u
         U = TrialFESpace(V, x -> VectorValue(0.01, 0.0, 0.0))
         res(u, v) = ∫(∇(v)' ⊙ (P ∘ (Fk ∘ (∇(u)'))))dΩ
         jac(u, du, v) = ∫(∇(v)' ⊙ (dP ∘ (Fk ∘ (∇(u)'), ∇(du)')))dΩ
-        c = check(res, jac, U, V, 0.01 .* randn(num_free_dofs(U)))
+        x = 0.01 .* randn(num_free_dofs(U))
+        c = check(res, jac, U, V, x)
         @test c.res < TOL
         @test c.jac < TOL
+        @test all(a -> a.bytes == 0, allocations(KernelOperator(res, jac, U, V), x))
     end
 
     @testset "Hyperelasticity 3D P1 (tetrahedra)" begin
@@ -68,9 +70,11 @@ Fk(∇u) = one(∇u) + ∇u
                                  β * vφ * (tr ∘ (Fk ∘ (∇(u)'))))dΩ
         jac((u, φ), (du, dφ), (v, vφ)) = ∫(∇(v)' ⊙ (dP ∘ (Fk ∘ (∇(u)'), ∇(du)')) + β * dφ * tr(∇(v)) +
                                            ∇(vφ) ⋅ ∇(dφ) + β * vφ * tr(∇(du)))dΩ
-        c = check(res, jac, U, V, 0.01 .* randn(num_free_dofs(U)))
+        x = 0.01 .* randn(num_free_dofs(U))
+        c = check(res, jac, U, V, x)
         @test c.res < TOL
         @test c.jac < TOL
+        @test all(a -> a.bytes == 0, allocations(KernelOperator(res, jac, U, V), x))
     end
 
     @testset "Dirichlet masks, auxiliary FE functions and scaled integrals (2D)" begin
@@ -87,9 +91,14 @@ Fk(∇u) = one(∇u) + ∇u
         res(u, v) = ∫(∇(v)' ⊙ (P ∘ (Fk ∘ (∇(u)'))))dΩ - Λ * ∫((g ∘ (Fk ∘ (∇(uold)'), N)) ⊙ ∇(v)')dΩ +
                     ∫(v ⋅ uold)dΩ
         jac(u, du, v) = ∫(∇(v)' ⊙ (dP ∘ (Fk ∘ (∇(u)'), ∇(du)')))dΩ
-        c = check(res, jac, U, V, 0.01 .* randn(num_free_dofs(U)))
+        x = 0.01 .* randn(num_free_dofs(U))
+        c = check(res, jac, U, V, x)
         @test c.res < TOL
         @test c.jac < TOL
+        @test all(a -> a.bytes == 0, allocations(KernelOperator(res, jac, U, V), x))
+        c2 = check(res, jac, U, V, x; op=KernelOperator(res, jac, U, V; cache_aux=true))
+        @test c2.res < TOL
+        @test c2.jac < TOL
     end
 
     @testset "update keeps the structure and follows new parameters" begin
