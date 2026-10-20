@@ -80,7 +80,7 @@ function TPTable(t::FieldTable{D,T,NN}, xq::AbstractVector) where {D,T,NN}
     for (lin, idx) in enumerate(CartesianIndices(ntuple(_ -> Q, D)))
         ii = Tuple(idx)
         vals = [prod(d -> N1[Tuple(CartesianIndices(ntuple(_ -> P, D))[pl])[d], ii[d]], 1:D) for pl in 1:np]
-        n = findfirst(n -> !used[n] && all(pl -> isapprox(t.N[pointperm[pl], n], vals[pl]; atol=1e-10), 1:np), 1:NN)
+        n = findfirst(n -> !used[n] && all(pl -> isapprox(t.N[pointperm[pl], n], vals[pl]; atol=1e-7), 1:np), 1:NN)   # Q3 values carry ~1e-9 round-off
         n === nothing && return nothing
         used[n] = true
         nodeperm[lin] = n

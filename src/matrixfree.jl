@@ -197,17 +197,20 @@ function interpolate_slots!(su, t::FieldTable{D,T,NN,NC}, loc, sp::SlotSpec{NC,L
         iJt = TensorValue{D,D,Float64,D * D}(ntuple(i -> gd.iJt[i, q, cell], Val(D * D)))
         point_weights!(W, t, q, iJt)
         for c in 1:NC
-            v = 0.0
-            g = ntuple(_ -> 0.0, Val(D))
-            for n in 1:NN
-                a = xl[loc+t.ldof[n, c]]
-                v += a * W[n, 1]
-                g = ntuple(J -> g[J] + a * W[n, 1+J], Val(D))
+            if HV
+                v = 0.0
+                @simd for n in 1:NN
+                    v += xl[loc+ldofidx(t, n, c)] * W[n, 1]
+                end
+                su[sp.sm[c, 1], q] = v
             end
-            HV && (su[sp.sm[c, 1], q] = v)
             if HG
                 for J in 1:D
-                    su[sp.sm[c, HV ? 1 + J : J], q] = g[J]
+                    gJ = 0.0
+                    @simd for n in 1:NN
+                        gJ += xl[loc+ldofidx(t, n, c)] * W[n, 1+J]
+                    end
+                    su[sp.sm[c, HV ? 1 + J : J], q] = gJ
                 end
             end
         end
@@ -250,14 +253,19 @@ function contract_slots!(re, t::FieldTable{D,T,NN,NC}, loc, sp::SlotSpec{NC,LV,H
         iJt = TensorValue{D,D,Float64,D * D}(ntuple(i -> gd.iJt[i, q, cell], Val(D * D)))
         point_weights!(W, t, q, iJt)
         for c in 1:NC
-            r0 = HV ? sv[sp.sm[c, 1], q] : 0.0
-            rg = ntuple(J -> HG ? sv[sp.sm[c, HV ? 1 + J : J], q] : 0.0, Val(D))
-            for n in 1:NN
-                acc = r0 * W[n, 1]
-                for J in 1:D
-                    acc += rg[J] * W[n, 1+J]
+            if HV
+                r0 = sv[sp.sm[c, 1], q]
+                @simd for n in 1:NN
+                    re[loc+ldofidx(t, n, c)] += r0 * W[n, 1]
                 end
-                re[loc+t.ldof[n, c]] += acc
+            end
+            if HG
+                for J in 1:D
+                    rJ = sv[sp.sm[c, HV ? 1 + J : J], q]
+                    @simd for n in 1:NN
+                        re[loc+ldofidx(t, n, c)] += rJ * W[n, 1+J]
+                    end
+                end
             end
         end
     end
