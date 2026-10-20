@@ -1,7 +1,7 @@
 # Operator and assembly.
 
 const EMPTY_SLOTS = SVector{0,Float64}()
-const MIN_CELLS_PER_TASK = 8
+const WORK_PER_TASK = parse(Int, get(ENV, "HFK_WORK_PER_TASK", "20000"))
 
 "Global numbering of one field: cell dof ids of test and trial spaces and offsets."
 struct FieldLayout
@@ -356,7 +356,9 @@ end
 function run_cells!(kind::Val, b, A, op::KernelOperator, g::Group, x, dvals)
     auxd = aux_data(op, g)
     for color in op.colors
-        nchunks = clamp(length(color) ÷ MIN_CELLS_PER_TASK, 1, op.nthreads)
+        # tasks of at least WORK_PER_TASK "units" (points × element-matrix entries per cell)
+        work = length(color) * g.geo.np * op.ndl^2
+        nchunks = clamp(work ÷ WORK_PER_TASK, 1, min(op.nthreads, length(color)))
         if nchunks == 1
             cells!(kind, b, A, op, g, x, dvals, auxd, color)
         else
