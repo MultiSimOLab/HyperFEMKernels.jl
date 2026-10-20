@@ -13,6 +13,7 @@ Manifest-v*.toml
 .run_status
 run.log
 logs/
-CLAUDE.md
-ESTADO.md
 benchmark/meshes/*.msh
+# Markdown: only README files are versioned
+*.md
+!README.md
