@@ -69,8 +69,8 @@ end
             HK.SparseMap([(Int32(2), Int32(2), Int32(1), 1.0), (Int32(2), Int32(0), Int32(0), 4.0)])]
     ST = Tuple{VectorValue{2,Float64},Float64}
     ap = HK.generate_apply(maps, ST, 3)
-    vals = HK.map_values(maps)
-    @test vals == (2.0, -1.0, 1.0, 4.0)
+    vals = HK.map_values(maps, (1.0, 0.5))
+    @test vals == (2.0, -1.0, 0.5, 2.0)
     lf = HK.LinearForm{Nothing,Tuple{},Tuple{Float64,Float64},ST,typeof(ap),typeof(vals)}(nothing, (), (1.0, 0.5), maps, ap, vals, :())
     out = HK.apply_maps(lf, (VectorValue(3.0, 4.0), 7.0), Val(3))
     @test out ≈ SVector(6.0, 3.5 + 2.0, -4.0)

@@ -48,7 +48,8 @@ using Gridap, HyperFEMKernels
 # U, V, dΩ, res(u, v), jac(u, du, v) written as for Gridap's FEOperator
 op = KernelOperator(res, jac, U, V)          # Gridap NonlinearOperator (threaded, fused kernels)
 b  = residual(op, x); A = jacobian(op, x)
-op = update(op, res2, jac2)                  # new load step: keeps tables, pattern, colouring
+op = update(op, res2, jac2)                  # new load step / time step: keeps tables, pattern, colouring
+                                             # and the compiled code (numbers of the weak form are parameters)
 check(res, jac, U, V, x)                     # relative differences with Gridap (≈1e-15)
 allocations(op, x)                           # bytes per element call (0 = GPU-ready weak form)
 
