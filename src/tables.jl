@@ -83,7 +83,7 @@ function FieldTable(space::SingleFieldFESpace, xq::AbstractVector, D::Int)
     node = zeros(Int, nd)             # Gridap evaluates each component with its own round-off)
     for j in 1:nd
         k = keyof(j)
-        n = findfirst(r -> isapprox(r, k; atol=1e-10, rtol=0.0), reps)
+        n = findfirst(r -> isapprox(r, k; atol=1e-7, rtol=0.0), reps)   # Q3 values carry ~1e-9 round-off
         n === nothing && (push!(reps, k); n = length(reps))
         node[j] = n
     end
