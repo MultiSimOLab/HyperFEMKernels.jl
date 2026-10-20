@@ -1,4 +1,5 @@
 Random.seed!(1)
+const TOL_MF = 1e-11   # different summation order than the assembled product (sum factorisation)
 
 @testset "1D Lagrange basis: partition of unity, Kronecker property, derivative sum" begin
     for Q in 1:4, ξ in (0.0, 0.3, 1.0)
@@ -75,13 +76,13 @@ end
         dx = randn(num_free_dofs(prob.U))
         y = mf * dx
         @test size(mf) == size(A)
-        @test reldiff(y, A * dx) < TOL
+        @test reldiff(y, A * dx) < TOL_MF
         y2 = similar(y); LinearAlgebra.mul!(y2, mf, dx)
         @test y2 == y
         # new state → prepare! again
         x2 = randx(prob.U)
         prepare!(mf, x2)
-        @test reldiff(mf * dx, Algebra.jacobian(op, x2) * dx) < TOL
+        @test reldiff(mf * dx, Algebra.jacobian(op, x2) * dx) < TOL_MF
     end
 end
 
@@ -97,5 +98,5 @@ end
     op = KernelOperator(res, jac, U, V)
     mf = MatrixFreeJacobian(op); prepare!(mf, x)
     dx = randn(num_free_dofs(U))
-    @test reldiff(mf * dx, Algebra.jacobian(op, x) * dx) < TOL
+    @test reldiff(mf * dx, Algebra.jacobian(op, x) * dx) < TOL_MF
 end
