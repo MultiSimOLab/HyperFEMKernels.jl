@@ -379,7 +379,7 @@ function element_jacobian!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF}, xl, a
         FV = map((t, l, W) -> field_point_values(t, xl, l, W), tables, locs, dNb)
         Aq = map(a -> @inbounds(a[q, cell]), auxd)
         T = if LF === Nothing
-            ForwardDiff.jacobian(s -> ForwardDiff.gradient(r -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsu), zsv)
+            ForwardDiff.jacobian(r -> ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsv), zsu)   # T[test slot, trial slot]
         else
             SMatrix{NSV,NSU,Float64,NSV * NSU}(apply_maps(g.lin, g.lin.state(g.lin.ops, FV, Aq), Val(NSV * NSU)))
         end
@@ -405,7 +405,7 @@ function element_jacobian_mm!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF}, xl
         FV = map((t, l, W) -> field_point_values(t, xl, l, W), tables, locs, Wb)
         Aq = map(a -> @inbounds(a[q, cell]), auxd)
         T = if LF === Nothing
-            ForwardDiff.jacobian(s -> ForwardDiff.gradient(r -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsu), zsv)
+            ForwardDiff.jacobian(r -> ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsv), zsu)   # T[test slot, trial slot]
         else
             SMatrix{NSV,NSU,Float64,NSV * NSU}(apply_maps(g.lin, g.lin.state(g.lin.ops, FV, Aq), Val(NSV * NSU)))
         end
