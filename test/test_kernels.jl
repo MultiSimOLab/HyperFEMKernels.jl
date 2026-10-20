@@ -20,10 +20,11 @@ end
     e = elasticity_3d(; n=(1, 1, 1))
     xq = quad_points(e.dΩ)
     w = quad_weights(e.dΩ)
-    geo = HK.GeoTable(e.Ω, xq, w); t = HK.FieldTable(e.U, xq, 3)
+    Vfree = TestFESpace(e.model, ReferenceFE(lagrangian, VectorValue{3,Float64}, 1))   # no Dirichlet
+    geo = HK.GeoTable(e.Ω, xq, w); t = HK.FieldTable(Vfree, xq, 3)
     # u(x) = A x + b  (affine) → gradient A' (Gridap convention) everywhere
     A = TensorValue(0.1, 0.2, 0.3, -0.1, 0.05, 0.0, 0.02, 0.01, 0.4)
-    uh = interpolate(x -> A ⋅ x + VectorValue(1.0, 2.0, 3.0), e.U)
+    uh = interpolate(x -> A ⋅ x + VectorValue(1.0, 2.0, 3.0), Vfree)
     xl = collect(get_cell_dof_values(uh)[1])
     W = zeros(t.nn, 4)
     coords = get_cell_coordinates(e.Ω)[1]
