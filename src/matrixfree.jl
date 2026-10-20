@@ -25,6 +25,7 @@ mutable struct MatrixFreeJacobian{OP,TP,GD}
     tps::TP                  # per Jacobian group: tuple of TPTable or nothing per field
     data::GD                 # per Jacobian group: GroupData
     nthreads::Int
+    Afb::Union{Nothing,SparseMatrixCSC{Float64,Int}}   # Gridap-assembled part (hybrid fallback)
 end
 
 function MatrixFreeJacobian(op::KernelOperator)
@@ -37,7 +38,8 @@ function MatrixFreeJacobian(op::KernelOperator)
         nsv, nsu = nslots(g)
         GroupData{D}(zeros(nsv * nsu, np, nc), zeros(D * D, np, nc), zeros(np, nc))
     end
-    MatrixFreeJacobian(op, Tuple(tps), Tuple(data), op.nthreads)
+    Afb = isempty(op.fallback.jtrians) ? nothing : fallback_pattern(op.fallback, op.U, op.V, op.jac)
+    MatrixFreeJacobian(op, Tuple(tps), Tuple(data), op.nthreads, Afb)
 end
 
 nslots(::Group{NSV,NSU}) where {NSV,NSU} = (NSV, NSU)
@@ -59,6 +61,10 @@ function prepare!(mf::MatrixFreeJacobian, x::AbstractVector)
         @sync for ch in Iterators.partition(cells, cld(length(cells), nchunks))
             Threads.@spawn prepare_cells!(gd, g, op, x, dvals, auxd, ch)
         end
+    end
+    if mf.Afb !== nothing
+        fill!(nonzeros(mf.Afb), 0.0)
+        fallback_jacobian!(mf.Afb, op, x)
     end
     mf
 end
@@ -104,6 +110,7 @@ function LinearAlgebra.mul!(y::AbstractVector, mf::MatrixFreeJacobian, dx::Abstr
             end
         end
     end
+    mf.Afb === nothing || mul!(y, mf.Afb, dx, 1.0, 1.0)
     y
 end
 

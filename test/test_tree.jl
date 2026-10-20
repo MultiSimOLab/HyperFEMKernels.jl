@@ -2,8 +2,8 @@ Random.seed!(1)
 p = poisson_2d()
 c = coupled_3d()
 
-capture_res(prob) = HK.capture(prob.res, HK.probes(prob.U, :unknown), HK.probes(prob.V, :test))
-capture_jac(prob) = HK.capture(prob.jac, HK.probes(prob.U, :unknown), HK.probes(prob.U, :trial), HK.probes(prob.V, :test))
+capture_res(prob) = HK.capture(prob.res, HK.probes(prob.U, :unknown), HK.probes(prob.V, :test))[1]
+capture_jac(prob) = HK.capture(prob.jac, HK.probes(prob.U, :unknown), HK.probes(prob.U, :trial), HK.probes(prob.V, :test))[1]
 
 @testset "capture returns one Form per triangulation with integral terms" begin
     forms = capture_res(p)
@@ -33,13 +33,13 @@ end
 @testset "coefficients: sums, differences and scalings of integrals" begin
     dΩ = p.dΩ
     r1(u, v) = ∫(∇(v) ⋅ ∇(u))dΩ + 2.0 * ∫(v * u)dΩ - ∫(v)dΩ + (-3.0) * ∫(v)dΩ
-    f = HK.capture(r1, HK.probes(p.U, :unknown), HK.probes(p.V, :test))[1]
+    f = HK.capture(r1, HK.probes(p.U, :unknown), HK.probes(p.V, :test))[1][1]
     @test sort([t.coef for t in f.terms]) == [-3.0, -1.0, 1.0, 2.0]
     r2(u, v) = ∫(v * u)dΩ * 4.0
-    f2 = HK.capture(r2, HK.probes(p.U, :unknown), HK.probes(p.V, :test))[1]
+    f2 = HK.capture(r2, HK.probes(p.U, :unknown), HK.probes(p.V, :test))[1][1]
     @test [t.coef for t in f2.terms] == [4.0]
     r3(u, v) = ∫(v)dΩ - ∫(v * u)dΩ * 2.0
-    f3 = HK.capture(r3, HK.probes(p.U, :unknown), HK.probes(p.V, :test))[1]
+    f3 = HK.capture(r3, HK.probes(p.U, :unknown), HK.probes(p.V, :test))[1][1]
     @test sort([t.coef for t in f3.terms]) == [-2.0, 1.0]
 end
 
@@ -54,7 +54,7 @@ end
 @testset "integrals on two measures become separate terms of one form" begin
     dΩ1 = Measure(p.Ω, 2); dΩ2 = Measure(p.Ω, 4)
     r(u, v) = ∫(∇(v) ⋅ ∇(u))dΩ1 + ∫(v * u)dΩ2
-    f = HK.capture(r, HK.probes(p.U, :unknown), HK.probes(p.V, :test))
+    f = HK.capture(r, HK.probes(p.U, :unknown), HK.probes(p.V, :test))[1]
     @test length(f) == 1 && length(f[1].terms) == 2
     @test f[1].terms[1].weights !== f[1].terms[2].weights
 end
@@ -62,7 +62,7 @@ end
 @testset "numbers in the integrand become Const nodes" begin
     dΩ = p.dΩ
     r(u, v) = ∫(3.0 * v * u)dΩ
-    f = HK.capture(r, HK.probes(p.U, :unknown), HK.probes(p.V, :test))[1]
+    f = HK.capture(r, HK.probes(p.U, :unknown), HK.probes(p.V, :test))[1][1]
     consts = HK.Node[]
     walk(n::HK.Op) = foreach(walk, n.args)
     walk(n::HK.Const) = push!(consts, n)

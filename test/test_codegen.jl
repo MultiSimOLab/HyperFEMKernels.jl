@@ -3,8 +3,8 @@ p = poisson_2d()
 e = elasticity_3d()
 
 function pointform(prob, kind)
-    forms = kind === :res ? HK.capture(prob.res, HK.probes(prob.U, :unknown), HK.probes(prob.V, :test)) :
-            HK.capture(prob.jac, HK.probes(prob.U, :unknown), HK.probes(prob.U, :trial), HK.probes(prob.V, :test))
+    forms = kind === :res ? HK.capture(prob.res, HK.probes(prob.U, :unknown), HK.probes(prob.V, :test))[1] :
+            HK.capture(prob.jac, HK.probes(prob.U, :unknown), HK.probes(prob.U, :trial), HK.probes(prob.V, :test))[1]
     HK.PointForm(forms[1].terms)
 end
 
