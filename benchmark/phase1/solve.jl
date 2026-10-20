@@ -83,15 +83,15 @@ function main(args)
     backend = Symbol(args[end])
     if args[1] == "em"
         model, order, φtop, tag, _ = em_model(args[2:end-1])
-        run() = em_solve(model, order, φtop, backend)
+        runf = () -> em_solve(model, order, φtop, backend)
         tag = "em_" * tag
     else
-        run() = hmre_solve(args[2], backend)
+        runf = () -> hmre_solve(args[2], backend)
         tag = "hmre_r" * args[2]
     end
     println("Phase-1 solve — $tag, backend = $backend, threads $(Threads.nthreads())"); flush(stdout)
-    tb0, ts0, _, _ = run()
-    tb1, ts1, x, n = run()
+    tb0, ts0, _, _ = runf()
+    tb1, ts1, x, n = runf()
     @printf("DOFs %d\ncold: build %.2f s + solve %.2f s\nwarm: build %.2f s + solve %.2f s = %.2f s\n", n, tb0, ts0, tb1, ts1, tb1 + ts1)
     resdir = joinpath(@__DIR__, "..", "results"); mkpath(resdir)
     serialize(joinpath(resdir, "phase1_$(tag)_$(backend).jls"), (x=x, tb=tb1, ts=ts1, cold=tb0 + ts0))
