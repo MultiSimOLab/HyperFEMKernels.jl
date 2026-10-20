@@ -352,15 +352,15 @@ function element_residual!(re, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF}, xl, au
     zsv = zero(SVector{NSV,Float64})
     for q in 1:g.geo.np
         dV, iJt = point_geometry(g.geo, q, cell)
-        map((t, buf) -> phys_grads!(buf, t, q, iJt), tables, dNb)
-        FV = map((t, l, buf) -> field_point_values(t, xl, l, q, buf), tables, locs, dNb)
+        map((t, W) -> point_weights!(W, t, q, iJt), tables, dNb)
+        FV = map((t, l, W) -> field_point_values(t, xl, l, W), tables, locs, dNb)
         Aq = map(a -> @inbounds(a[q, cell]), auxd)
         R = if LF === Nothing
             ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, EMPTY_SLOTS), zsv)
         else
             apply_maps(g.lin, g.lin.state(g.lin.ops, FV, Aq), Val(NSV))
         end
-        map((t, l, sm, buf) -> contract_residual!(re, t, l, sm, R, q, buf, dV), tables, locs, g.smv, dNb)
+        map((t, l, sm, W) -> contract_residual!(re, t, l, sm, R, W, dV), tables, locs, g.smv, dNb)
     end
     re
 end
@@ -374,8 +374,8 @@ function element_jacobian!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF}, xl, a
     zsu = zero(SVector{NSU,Float64})
     for q in 1:g.geo.np
         dV, iJt = point_geometry(g.geo, q, cell)
-        map((t, buf) -> phys_grads!(buf, t, q, iJt), tables, dNb)
-        FV = map((t, l, buf) -> field_point_values(t, xl, l, q, buf), tables, locs, dNb)
+        map((t, W) -> point_weights!(W, t, q, iJt), tables, dNb)
+        FV = map((t, l, W) -> field_point_values(t, xl, l, W), tables, locs, dNb)
         Aq = map(a -> @inbounds(a[q, cell]), auxd)
         T = if LF === Nothing
             ForwardDiff.jacobian(s -> ForwardDiff.gradient(r -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsu), zsv)
@@ -383,7 +383,7 @@ function element_jacobian!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF}, xl, a
             SMatrix{NSV,NSU,Float64,NSV * NSU}(apply_maps(g.lin, g.lin.state(g.lin.ops, FV, Aq), Val(NSV * NSU)))
         end
         map((tf, lf, smf, bf) -> map((tg, lg, smg, bg) ->
-                contract_jacobian!(KeT, tf, lf, smf, bf, tg, lg, smg, bg, T, q, dV),
+                contract_jacobian!(KeT, tf, lf, smf, bf, tg, lg, smg, bg, T, dV),
                 tables, locs, g.smu, dNb),
             tables, locs, g.smv, dNb)
     end
@@ -435,7 +435,7 @@ function cells!(::Val{K}, b, A, op::KernelOperator, g::Group{NSV,NSU,PF,TT,AUX,S
                 x, dvals, auxd, cells) where {K,NSV,NSU,PF,TT,AUX,SV,SU,D}
     ndl = op.ndl
     xl = zeros(ndl)
-    dNb = map(t -> Vector{VectorValue{D,Float64}}(undef, t.nn), g.tables)
+    dNb = map(t -> zeros(t.nn, D + 1), g.tables)
     if K === :res
         re = zeros(ndl)
         for cell in cells

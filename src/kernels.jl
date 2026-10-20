@@ -1,10 +1,14 @@
 # Fused element kernels.
 #
-# Per cell and quadrature point: geometry, physical gradients of the shape functions, values and
-# gradients of the unknowns, auxiliary values; then one call to the generated integrand with dual
-# numbers on the test (and trial) slots gives the residual coefficients (and the tangent), which
-# are contracted with the nodal shape functions. Sizes are type parameters so that loops have
-# constant bounds.
+# Per cell and quadrature point: geometry, shape-function weights W (values and physical
+# gradients, stored node-contiguous), values and gradients of the unknowns, auxiliary values;
+# then the residual coefficients R (or the tangent T) in slot space, contracted with W:
+#
+#     r[(n,c)]          += dV Σ_jj W[n, jj] R[slot(c, jj)]
+#     K[(n,c), (m,k)]   += dV Σ_jj Σ_ll W_f[n, jj] T[slot_f(c, jj), slot_g(k, ll)] W_g[m, ll]
+#
+# The innermost loops run over nodes with unit stride (when the dofs of each component are
+# consecutive), so they vectorise on CPU and map to coalesced accesses on GPU. No BLAS calls.
 
 """
     SlotSpec{NC,LV,HV,HG}
@@ -28,37 +32,51 @@ function SlotSpec(smap::Matrix{Int}, D::Int)
     SlotSpec{nc,lv,hv,hg,typeof(sm)}(sm)
 end
 
-"Weights of node `n` at point `q` for the derivative indices of a slot spec."
-@inline wvec(::SlotSpec{NC,LV,true,true}, N, g) where {NC,LV} = SVector{LV,Float64}(N, Tuple(g)...)
-@inline wvec(::SlotSpec{NC,LV,true,false}, N, g) where {NC,LV} = SVector{1,Float64}(N)
-@inline wvec(::SlotSpec{NC,LV,false,true}, N, g) where {NC,LV} = SVector{LV,Float64}(Tuple(g))
-@inline wvec(::SlotSpec{NC,0,false,false}, N, g) where {NC} = SVector{0,Float64}()
+"Column of the weight matrix W for derivative index jj (W[:,1] = values, W[:,1+J] = ∂_J)."
+@inline wcol(::SlotSpec{NC,LV,HV}, jj) where {NC,LV,HV} = HV ? jj : jj + 1
 
-"Physical gradients of the nodal shape functions at point `q` into `buf`."
-@inline function phys_grads!(buf::Vector{VectorValue{D,Float64}}, t::FieldTable{D,T,NN}, q::Int, iJt) where {D,T,NN}
-    @inbounds for n in 1:NN
-        buf[n] = iJt ⋅ t.dN[q, n]
+"Shape-function weights of `t` at point `q`: W[n,1] = N_n, W[n,1+J] = ∂N_n/∂x_J."
+@inline function point_weights!(W::Matrix{Float64}, t::FieldTable{D,T,NN}, q::Int, iJt) where {D,T,NN}
+    @inbounds @simd for n in 1:NN
+        W[n, 1] = t.Nt[n, q]
     end
-    buf
+    @inbounds for J in 1:D
+        a = ntuple(K -> iJt[J, K], Val(D))
+        @simd for n in 1:NN
+            s = 0.0
+            for K in 1:D
+                s += a[K] * t.dNt[n, K, q]
+            end
+            W[n, 1+J] = s
+        end
+    end
+    W
 end
 
-"Value and gradient (Gridap convention) of a field at point `q` from its local dof values."
-@inline function field_point_values(t::FieldTable{D,Float64,NN}, xl, off::Int, q::Int, dN) where {D,NN}
+@inline ldofidx(t::FieldTable{D,T,NN,NC,true}, n, c) where {D,T,NN,NC} = t.ldof[1, c] + n - 1
+@inline ldofidx(t::FieldTable{D,T,NN,NC,false}, n, c) where {D,T,NN,NC} = t.ldof[n, c]
+
+"Value and gradient (Gridap convention) of a field at the point from its local dof values."
+@inline function field_point_values(t::FieldTable{D,Float64,NN}, xl, off::Int, W) where {D,NN}
     u = 0.0
-    g = zero(VectorValue{D,Float64})
-    @inbounds for n in 1:NN
-        a = xl[off+t.ldof[n, 1]]
-        u += a * t.N[q, n]
-        g += a * dN[n]
+    @inbounds @simd for n in 1:NN
+        u += xl[off+ldofidx(t, n, 1)] * W[n, 1]
     end
-    (u, g)
+    g = ntuple(J -> begin
+        s = 0.0
+        @inbounds @simd for n in 1:NN
+            s += xl[off+ldofidx(t, n, 1)] * W[n, 1+J]
+        end
+        s
+    end, Val(D))
+    (u, VectorValue{D,Float64}(g))
 end
 
-@inline function field_point_values(t::FieldTable{D,VectorValue{NC,Float64},NN,NC}, xl, off::Int, q::Int, dN) where {D,NN,NC}
+@inline function field_point_values(t::FieldTable{D,VectorValue{NC,Float64},NN,NC}, xl, off::Int, W) where {D,NN,NC}
     u = ntuple(c -> begin
         s = 0.0
-        @inbounds for n in 1:NN
-            s += xl[off+t.ldof[n, c]] * t.N[q, n]
+        @inbounds @simd for n in 1:NN
+            s += xl[off+ldofidx(t, n, c)] * W[n, 1]
         end
         s
     end, Val(NC))
@@ -66,57 +84,59 @@ end
         J = (i - 1) % D + 1
         c = (i - 1) ÷ D + 1
         s = 0.0
-        @inbounds for n in 1:NN
-            s += xl[off+t.ldof[n, c]] * dN[n][J]
+        @inbounds @simd for n in 1:NN
+            s += xl[off+ldofidx(t, n, c)] * W[n, 1+J]
         end
         s
     end, Val(D * NC))
     (VectorValue{NC,Float64}(u), TensorValue{D,NC,Float64,D * NC}(g))
 end
 
-"Residual contribution of one field: r[(n,c)] += dV Σ_jj W_n[jj] R[slot(c,jj)]."
+"Residual contribution of one field."
 @inline function contract_residual!(re, t::FieldTable{D,T,NN,NC}, loc::Int, sp::SlotSpec{NC,LV},
-                                    R, q::Int, dN, dV) where {D,T,NN,NC,LV}
+                                    R, W, dV) where {D,T,NN,NC,LV}
     LV == 0 && return nothing
-    Rm = SMatrix{NC,LV,Float64,NC * LV}(ntuple(i -> R[sp.sm[i]], Val(NC * LV)))
-    @inbounds for n in 1:NN
-        W = wvec(sp, t.N[q, n], dN[n])
-        r = Rm * W
-        for c in 1:NC
-            re[loc+t.ldof[n, c]] += dV * r[c]
+    @inbounds for c in 1:NC
+        r = ntuple(jj -> dV * R[sp.sm[c, jj]], Val(LV))
+        cols = ntuple(jj -> wcol(sp, jj), Val(LV))
+        @simd for n in 1:NN
+            acc = 0.0
+            for jj in 1:LV
+                acc += r[jj] * W[n, cols[jj]]
+            end
+            re[loc+ldofidx(t, n, c)] += acc
         end
     end
     nothing
 end
 
-"""
-Jacobian block (test field f, trial field g), stored transposed (`KeT[trial, test]`):
-K[(n,c),(m,k)] += dV Σ_{jj,ll} W_n[jj] T[slot_f(c,jj), slot_g(k,ll)] W_m[ll].
-"""
-@inline function contract_jacobian!(KeT, tf::FieldTable{D,Tf,NNf,NCf}, locf::Int, spf::SlotSpec{NCf,LVf}, dNf,
-                                    tg::FieldTable{D,Tg,NNg,NCg}, locg::Int, spg::SlotSpec{NCg,LVg}, dNg,
-                                    T, q::Int, dV) where {D,Tf,NNf,NCf,LVf,Tg,NNg,NCg,LVg}
+"Jacobian block (test field f, trial field g), stored transposed: KeT[trial dof, test dof]."
+@inline function contract_jacobian!(KeT, tf::FieldTable{D,Tf,NNf,NCf}, locf::Int, spf::SlotSpec{NCf,LVf}, Wf,
+                                    tg::FieldTable{D,Tg,NNg,NCg}, locg::Int, spg::SlotSpec{NCg,LVg}, Wg,
+                                    T, dV) where {D,Tf,NNf,NCf,LVf,Tg,NNg,NCg,LVg}
     (LVf == 0 || LVg == 0) && return nothing
-    Wg = ntuple(m -> wvec(spg, tg.N[q, m], dNg[m]), Val(NNg))
+    colsf = ntuple(jj -> wcol(spf, jj), Val(LVf))
+    colsg = ntuple(ll -> wcol(spg, ll), Val(LVg))
     @inbounds for n in 1:NNf
-        Wn = wvec(spf, tf.N[q, n], dNf[n])
+        wn = ntuple(jj -> dV * Wf[n, colsf[jj]], Val(LVf))
         for c in 1:NCf
-            # Z[k, ll] = Σ_jj W_n[jj] T[slot_f(c,jj), slot_g(k,ll)]
-            Z = SMatrix{NCg,LVg,Float64,NCg * LVg}(ntuple(i -> begin
-                    k = (i - 1) % NCg + 1
-                    ll = (i - 1) ÷ NCg + 1
-                    su = spg.sm[k, ll]
-                    z = 0.0
-                    for jj in 1:LVf
-                        z += Wn[jj] * T[spf.sm[c, jj], su]
+            i = locf + ldofidx(tf, n, c)
+            for k in 1:NCg
+                # z[ll] = Σ_jj W_f[n, jj] T[slot_f(c, jj), slot_g(k, ll)]
+                z = ntuple(ll -> begin
+                        su = spg.sm[k, ll]
+                        acc = 0.0
+                        for jj in 1:LVf
+                            acc += wn[jj] * T[spf.sm[c, jj], su]
+                        end
+                        acc
+                    end, Val(LVg))
+                @simd for m in 1:NNg
+                    acc = 0.0
+                    for ll in 1:LVg
+                        acc += z[ll] * Wg[m, colsg[ll]]
                     end
-                    z
-                end, Val(NCg * LVg)))
-            i = locf + tf.ldof[n, c]
-            for m in 1:NNg
-                zm = Z * Wg[m]
-                for k in 1:NCg
-                    KeT[locg+tg.ldof[m, k], i] += dV * zm[k]
+                    KeT[locg+ldofidx(tg, m, k), i] += acc
                 end
             end
         end

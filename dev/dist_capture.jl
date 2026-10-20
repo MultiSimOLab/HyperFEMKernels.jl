@@ -32,7 +32,7 @@ function compare(label, res, jac, U, V, uh)
                 auxd = HK.materialize_aux(g, 1)
                 nd = HK.ndofs(g.tables[1])
                 xl = zeros(nd); re = zeros(nd); KeT = zeros(nd, nd)
-                dNb = (Vector{VectorValue{3,Float64}}(undef, g.tables[1].nn),)
+                dNb = (zeros(g.tables[1].nn, 4),)
                 cv = get_cell_dof_values(uhl)
                 ref = dcr.dict[trian]
                 for cell in 1:length(cmap)
