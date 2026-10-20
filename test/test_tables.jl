@@ -29,7 +29,7 @@ end
         @test size(t.N) == (length(xq), nn) && size(t.dN) == (length(xq), nn)
         @test t.Nt == permutedims(t.N)
         @test all(sum(t.N[q, :]) ≈ 1.0 for q in 1:length(xq))          # partition of unity
-        @test all(sum(t.dN[q, :]) ≈ zero(VectorValue{num_cell_dims(prob.Ω),Float64}) for q in 1:length(xq))
+        @test all(norm(sum(t.dN[q, :])) < 1e-12 for q in 1:length(xq))
         # against Gridap's basis values and gradients
         fields = HK.uniform_value(get_data(get_fe_basis(prob.U)), "basis")
         vals = evaluate(fields, xq)
