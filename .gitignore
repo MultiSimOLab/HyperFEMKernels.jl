@@ -8,5 +8,10 @@ Manifest-v*.toml
 *.vtu
 *.pvd
 .DS_Store
+.run_request
+.run_stop
+.run_status
+run.log
+logs/
 CLAUDE.md
 ESTADO.md
