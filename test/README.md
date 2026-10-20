@@ -18,3 +18,10 @@ tolerance is 1e-12 relative.
 | `test_gridap_equality.jl` | end-to-end equality with Gridap on all problem types |
 
 Set `HFK_DEBUG_LINEAR=1` to print why the linear-map shortcut is not used for a weak form.
+
+## Tests that need HyperFEM
+
+`test/hyperfem/runtests.jl` (run with `julia -t auto --project=benchmark test/hyperfem/runtests.jl`,
+with HyperFEM.jl and Adv_Mater_Ultra_Soft_Magnet cloned next to this package): EM monolithic,
+hMRE with masks and auxiliary fields, and a visco-hyperelastic dynamic problem with `CellState`
+internal variables, value+gradient test/trial terms and a time-stepping comparison.
