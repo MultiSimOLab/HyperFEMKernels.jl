@@ -40,3 +40,20 @@ for (name, res, jac) in (
     for g in op.rgroups; println("  aux types: ", map(a -> eltype(eltype(a)), g.aux)); end
     flush(stdout)
 end
+
+println("--- isolate the jacobian difference (stress only) ---")
+res(u, v) = ∫(∇(v)' ⊙ (∂Ψ∂F ∘ (F ∘ ∇(u)', Fh⁻, Ah...)))dΩ
+jac(u, du, v) = ∫(∇(v)' ⊙ ((∂∂Ψ∂FF ∘ (F ∘ ∇(u)', Fh⁻, Ah...)) ⊙ ∇(du)'))dΩ
+g = get_algebraic_operator(FEOperator(res, jac, Uu, Vu))
+A1 = Algebra.jacobian(g, x); A2 = Algebra.jacobian(g, x)
+@printf("Gridap twice: %.2e\n", norm(A1 - A2) / norm(A1))
+opD = KernelOperator(res, jac, Uu, Vu; linear_maps=false)
+@printf("dual path vs Gridap: %.2e\n", norm(Algebra.jacobian(opD, x) - A1) / norm(A1))
+opL = KernelOperator(res, jac, Uu, Vu; linear_maps=true)
+@printf("linear maps vs Gridap: %.2e\n", norm(Algebra.jacobian(opL, x) - A1) / norm(A1))
+@printf("symmetry of Gridap jac: %.2e\n", norm(A1 - A1') / norm(A1))
+# pointwise: evaluate ∂∂Ψ∂FF at one point via Gridap's cell arrays and via plain call
+Fq = (F ∘ ∇(uh⁺)')(get_cell_points(dΩ))[1][1]; Fnq = Fh⁻(get_cell_points(dΩ))[1][1]
+Aq = map(a -> a(get_cell_points(dΩ))[1][1], Ah)
+T1 = ∂∂Ψ∂FF(Fq, Fnq, Aq...); T2 = ∂∂Ψ∂FF(Fq, Fnq, Aq...)
+@printf("law twice same inputs: %.2e ; alloc %d\n", norm(get_array(T1 - T2)) / norm(get_array(T1)), @allocated ∂∂Ψ∂FF(Fq, Fnq, Aq...))
