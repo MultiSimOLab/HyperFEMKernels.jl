@@ -65,10 +65,27 @@ end
 end
 
 @testset "apply_maps on hand-built maps" begin
-    maps = [HK.SparseMap([(Int32(1), Int32(1), 2.0), (Int32(3), Int32(2), -1.0)]),
-            HK.SparseMap([(Int32(2), Int32(1), 1.0)])]
+    maps = [HK.SparseMap([(Int32(1), Int32(1), Int32(1), 2.0), (Int32(3), Int32(1), Int32(2), -1.0)]),
+            HK.SparseMap([(Int32(2), Int32(2), Int32(1), 1.0), (Int32(2), Int32(0), Int32(0), 4.0)])]
     lf = HK.LinearForm{Nothing,Tuple{},Tuple{Float64,Float64},Tuple{VectorValue{2,Float64},Float64}}(
         nothing, (), (1.0, 0.5), maps, :())
     out = HK.apply_maps(lf, (VectorValue(3.0, 4.0), 7.0), Val(3))
-    @test out ≈ SVector(6.0, 3.5, -4.0)
+    @test out ≈ SVector(6.0, 3.5 + 2.0, -4.0)
+end
+
+@testset "constants are folded and several state inputs are allowed (dynamics-like term)" begin
+    e = elasticity_3d()
+    uold = interpolate(x -> VectorValue(0.01x[1], 0.0, 0.02x[3]), e.U)
+    vold = interpolate(x -> VectorValue(0.0, 0.1x[2], 0.0), e.U)
+    Δt = 0.1
+    res(u, v) = ∫(960.0 * (2 / Δt^2 * (u - uold) - 2 / Δt * vold) ⋅ v + ∇(v)' ⊙ (0.5 * (P_svk ∘ (Fk ∘ (∇(u)')))))e.dΩ
+    jac(u, du, v) = ∫(960.0 * (2 / Δt^2 * du) ⋅ v + ∇(v)' ⊙ (0.5 * (dP_svk ∘ (Fk ∘ (∇(u)'), ∇(du)'))))e.dΩ
+    f = HK.capture(res, HK.probes(e.U, :unknown), HK.probes(e.V, :test))[1]
+    @test any(n -> n isa HK.Const, HK.state_inputs!(HK.Node[], f.terms[1].expr)) == false
+    op = KernelOperator(res, jac, e.U, e.V)
+    @test all(g -> g.lin !== nothing, op.rgroups)     # inputs: u, uold, vold, P(F); constants folded
+    x = randx(e.U)
+    c = check(res, jac, e.U, e.V, x; op)
+    @test c.res < TOL && c.jac < TOL
+    @test all(a -> a.bytes == 0, allocations(op, x))
 end
