@@ -164,7 +164,7 @@ function generate_apply(maps::Vector{SparseMap}, ST, N::Int)
         if g == 0
             push!(sums[idx], :(C[$i] * $v))
         else
-            sg = ST.parameters[g] <: Real ? :(S[$g]) : :(S[$g].data[$k])
+            sg = ST.parameters[Int(g)] <: Real ? :(S[$(Int(g))]) : :(S[$(Int(g))].data[$(Int(k))])
             push!(sums[idx], :(C[$i] * $v * $sg))
         end
     end
