@@ -14,6 +14,7 @@ tolerance is 1e-12 relative.
 | `test_kernels.jl` | slot specs, shape-function weights and field values on an affine field, contractions against explicit sums, matrix-product path, `gemm_add!` tiles |
 | `test_linearmaps.jl` | state-input detection, additive splitting, linear maps vs dual numbers, where the shortcut applies / falls back, `apply_maps` |
 | `test_assembly.jl` | sparsity pattern and positions vs Gridap, colouring, threads vs serial, Algebra interface, Dirichlet re-read, `update`, auxiliary data and `cache_aux`, subdomains, matrix-product vs loop Jacobian, zero allocations |
+| `test_fallback.jl` | hybrid fallback: boundary integrals (Neumann/Robin, surface loads) and unsupported operations assembled by Gridap and added to the kernel vector/matrix, union of sparsity patterns, matrix-free, `update`; every case against pure Gridap |
 | `test_matrixfree.jl` | 1D Lagrange basis, tensor-product tables vs ND tables (Q1–Q3, 2D/3D, simplices rejected), sum-factorised interpolation/contraction vs dense, matrix-free Jacobian vs assembled (n-cubes and dense fallback, several states, non-symmetric forms) |
 | `test_errors.jl` | clear errors for unsupported inputs; `check` |
 | `test_gridap_equality.jl` | end-to-end equality with Gridap on all problem types |

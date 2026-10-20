@@ -51,14 +51,33 @@ end
 const Fill = Arrays.Fill
 
 """
-    capture(f, args...) -> Vector{Form}
+    capture(f, args...) -> (forms::Vector{Form}, fallback::Vector{Tuple{Any,String}})
 
-Call `f(args...)` with probe arguments and read the resulting tree.
+Call `f(args...)` with probe arguments and read the resulting tree. Triangulations whose
+contributions cannot be read are returned in `fallback` with the reason (they are assembled by
+Gridap, see `assembly.jl`); `(:all, reason)` when the weak form could not be evaluated at all.
 """
 function capture(f, args...)
-    dc = f(args...)
+    forms = Form[]
+    fallback = Tuple{Any,String}[]
+    dc = try
+        f(args...)
+    catch err
+        # the weak form itself failed on the probes (e.g. ∇(u*u)): every contribution to Gridap
+        (err isa ErrorException && startswith(err.msg, "HyperFEMKernels")) || rethrow()
+        push!(fallback, (:all, err.msg))
+        return forms, fallback
+    end
     dc isa DomainContribution || error("HyperFEMKernels: the weak form did not return integrals (got $(typeof(dc)))")
-    [Form(trian, collect_terms(arr, 1.0)) for (trian, arr) in dc.dict]
+    for (trian, arr) in dc.dict
+        try
+            push!(forms, Form(trian, collect_terms(arr, 1.0)))
+        catch err
+            err isa ErrorException || rethrow()
+            push!(fallback, (trian, err.msg))
+        end
+    end
+    forms, fallback
 end
 
 function collect_terms(a::LazyArray, coef::Float64)
