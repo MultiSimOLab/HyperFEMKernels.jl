@@ -72,7 +72,7 @@ end
 function Arrays.evaluate!(cache, p::ProbeField, x::CellPoint)
     np = length(testitem(get_data(x)))
     N = p.role === :unknown ? 1 : p.role === :test ? 2 : 3
-    ProbeArray{probe_valtype(p),N}(p, x, num_cells(p.trian), np)
+    ProbeArray{probe_valtype(p),N}(p, x, length(get_data(x)), np)
 end
 
 contains_probe(a::ProbeArray) = true
