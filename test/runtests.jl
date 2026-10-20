@@ -47,7 +47,9 @@ Fk(∇u) = one(∇u) + ∇u
         cd = check(res, jac, U, V, x; op=KernelOperator(res, jac, U, V; linear_maps=false))  # dual-number path
         @test cd.res < TOL
         @test cd.jac < TOL
-        @test all(g -> g.lin !== nothing, KernelOperator(res, jac, U, V).jgroups)
+        op = KernelOperator(res, jac, U, V)
+        @test all(g -> g.lin !== nothing, op.rgroups)   # residual: linear map of P(F)
+        @test all(g -> g.lin === nothing, op.jgroups)   # dP(F, dF) is not linear in F: dual numbers
     end
 
     @testset "Hyperelasticity 3D P1 (tetrahedra)" begin
@@ -103,6 +105,24 @@ Fk(∇u) = one(∇u) + ∇u
         c2 = check(res, jac, U, V, x; op=KernelOperator(res, jac, U, V; cache_aux=true))
         @test c2.res < TOL
         @test c2.jac < TOL
+    end
+
+    @testset "Linear-map shortcut with a state-dependent coefficient tensor" begin
+        model = CartesianDiscreteModel((0, 1, 0, 1, 0, 1), (3, 3, 2))
+        Ω = Triangulation(model); dΩ = Measure(Ω, 2)
+        V = TestFESpace(model, ReferenceFE(lagrangian, Float64, 1), dirichlet_tags="boundary")
+        U = TrialFESpace(V, x -> x[1])
+        K(u) = TensorValue(1 + u^2, 0.1u, 0.0, 0.1u, 2 + u, 0.0, 0.0, 0.0, 1.0)
+        res(u, v) = ∫(∇(v) ⋅ ((K ∘ u) ⋅ ∇(u)) + 0.5 * v)dΩ
+        jac(u, du, v) = ∫(∇(v) ⋅ ((K ∘ u) ⋅ ∇(du)))dΩ
+        x = rand(num_free_dofs(U))
+        op = KernelOperator(res, jac, U, V)
+        @test all(g -> g.lin !== nothing, op.rgroups)
+        @test all(g -> g.lin !== nothing, op.jgroups)
+        c = check(res, jac, U, V, x; op)
+        @test c.res < TOL
+        @test c.jac < TOL
+        @test all(a -> a.bytes == 0, allocations(op, x))
     end
 
     @testset "Integration on a subdomain of the FE space (and two measures)" begin
