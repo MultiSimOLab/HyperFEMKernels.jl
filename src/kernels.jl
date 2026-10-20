@@ -143,3 +143,90 @@ end
     end
     nothing
 end
+
+# ---------------------------------------------------------------------------------------------
+# Jacobian as a matrix product (per cell, written once)
+#
+# For test field f (component c) and trial field g (component k):
+#
+#     K_ck[m, n] = Σ_r G_ck[m, r] B_f[r, n],   r = (q, jj)
+#     G_ck[m, (q,jj)] = dV_q Σ_ll T_q[slot_f(c,jj), slot_g(k,ll)] W_g,q[m, ll]
+#     B_f[(q,jj), n]  = W_f,q[n, jj]
+#
+# G and B are filled during the point loop; the products are done once per cell with a
+# register-tiled kernel written in plain Julia (no BLAS), so the same code can run per thread
+# block on a GPU. Requires node-contiguous dofs (FieldTable CONTIG = true).
+
+"B_f[(q-1)*LV + jj, n] = W[n, col(jj)] for point q."
+@inline function store_test_weights!(B, sp::SlotSpec{NC,LV}, W, q::Int, NN::Int) where {NC,LV}
+    @inbounds for n in 1:NN, jj in 1:LV
+        B[(q-1)*LV+jj, n] = W[n, wcol(sp, jj)]
+    end
+    B
+end
+
+"G[m, (q-1)*LVf+jj, k, c] = dV Σ_ll T[slot_f(c,jj), slot_g(k,ll)] W_g[m, ll] for point q."
+@inline function store_trial_block!(G, spf::SlotSpec{NCf,LVf}, spg::SlotSpec{NCg,LVg}, Wg, T, q::Int, dV,
+                                    NNg::Int) where {NCf,LVf,NCg,LVg}
+    (LVf == 0 || LVg == 0) && return G
+    colsg = ntuple(ll -> wcol(spg, ll), Val(LVg))
+    @inbounds for c in 1:NCf, k in 1:NCg, jj in 1:LVf
+        z = ntuple(ll -> dV * T[spf.sm[c, jj], spg.sm[k, ll]], Val(LVg))
+        r = (q - 1) * LVf + jj
+        @simd for m in 1:NNg
+            acc = 0.0
+            for ll in 1:LVg
+                acc += z[ll] * Wg[m, colsg[ll]]
+            end
+            G[m, r, k, c] = acc
+        end
+    end
+    G
+end
+
+"C[om + m, on + n] += Σ_r A[m, r, k, c] B[r, n] for m ≤ M, n ≤ N, r ≤ R (8×4 register tiles)."
+@inline function gemm_add!(C, om::Int, on::Int, A, k::Int, c::Int, B, M::Int, N::Int, R::Int)
+    @inbounds for n0 in 1:4:N
+        nb = min(4, N - n0 + 1)
+        for m0 in 1:8:M
+            mb = min(8, M - m0 + 1)
+            if nb == 4 && mb == 8
+                c1 = c2 = c3 = c4 = zero(SVector{8,Float64})
+                for r in 1:R
+                    a = SVector{8,Float64}(ntuple(i -> A[m0+i-1, r, k, c], Val(8)))
+                    c1 += a * B[r, n0]
+                    c2 += a * B[r, n0+1]
+                    c3 += a * B[r, n0+2]
+                    c4 += a * B[r, n0+3]
+                end
+                for i in 1:8
+                    C[om+m0+i-1, on+n0] += c1[i]
+                    C[om+m0+i-1, on+n0+1] += c2[i]
+                    C[om+m0+i-1, on+n0+2] += c3[i]
+                    C[om+m0+i-1, on+n0+3] += c4[i]
+                end
+            else
+                for j in n0:n0+nb-1, i in m0:m0+mb-1
+                    s = 0.0
+                    for r in 1:R
+                        s += A[i, r, k, c] * B[r, j]
+                    end
+                    C[om+i, on+j] += s
+                end
+            end
+        end
+    end
+    C
+end
+
+"Add the products of one block (f, g) to KeT (transposed element matrix)."
+@inline function block_products!(KeT, tf::FieldTable{D,Tf,NNf,NCf,true}, locf::Int, spf::SlotSpec{NCf,LVf}, B,
+                                 tg::FieldTable{D,Tg,NNg,NCg,true}, locg::Int, spg::SlotSpec{NCg,LVg}, G,
+                                 np::Int) where {D,Tf,NNf,NCf,LVf,Tg,NNg,NCg,LVg}
+    (LVf == 0 || LVg == 0) && return KeT
+    R = np * LVf
+    for c in 1:NCf, k in 1:NCg
+        gemm_add!(KeT, locg + tg.ldof[1, k] - 1, locf + tf.ldof[1, c] - 1, G, k, c, B, NNg, NNf, R)
+    end
+    KeT
+end
