@@ -17,3 +17,5 @@ benchmark/meshes/*.msh
 # Markdown: only README files are versioned
 *.md
 !README.md
+test/hyperfem/Manifest.toml
+test/hyperfem/Project.toml

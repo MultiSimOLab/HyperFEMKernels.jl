@@ -20,9 +20,11 @@ tolerance is 1e-12 relative.
 
 Set `HFK_DEBUG_LINEAR=1` to print why the linear-map shortcut is not used for a weak form.
 
-## Tests that need HyperFEM
+## Tests on HyperFEM's weak forms
 
-`test/hyperfem/runtests.jl` (run with `julia -t auto --project=benchmark test/hyperfem/runtests.jl`,
-with HyperFEM.jl and Adv_Mater_Ultra_Soft_Magnet cloned next to this package): EM monolithic,
-hMRE with masks and auxiliary fields, and a visco-hyperelastic dynamic problem with `CellState`
-internal variables, value+gradient test/trial terms and a time-stepping comparison.
+`test/hyperfem/runtests.jl`: EM monolithic, hMRE with masks and auxiliary fields, and a
+visco-hyperelastic dynamic problem with `CellState` internal variables, value+gradient test/trial
+terms and a time-stepping comparison. They need HyperFEM.jl and Adv_Mater_Ultra_Soft_Magnet cloned
+next to this package. The CI job `hyperfem` clones them and runs `test/hyperfem/setup.jl` then the
+tests; locally: `julia test/hyperfem/setup.jl` once, then
+`julia -t auto --project=test/hyperfem test/hyperfem/runtests.jl` (or the benchmark environment).
