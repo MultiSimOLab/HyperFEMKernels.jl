@@ -8,3 +8,5 @@ Manifest-v*.toml
 *.vtu
 *.pvd
 .DS_Store
+CLAUDE.md
+ESTADO.md
