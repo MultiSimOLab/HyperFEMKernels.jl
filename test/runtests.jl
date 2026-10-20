@@ -18,6 +18,7 @@ include("common.jl")
     @testset "kernels"          begin include("test_kernels.jl") end
     @testset "linear maps"      begin include("test_linearmaps.jl") end
     @testset "assembly"         begin include("test_assembly.jl") end
+    @testset "matrix-free"      begin include("test_matrixfree.jl") end
     @testset "errors"           begin include("test_errors.jl") end
     @testset "Gridap equality"  begin include("test_gridap_equality.jl") end
 end

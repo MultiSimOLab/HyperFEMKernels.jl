@@ -37,7 +37,7 @@ import Gridap.Algebra: NonlinearOperator
 
 RuntimeGeneratedFunctions.init(@__MODULE__)
 
-export KernelOperator, update, check, allocations
+export KernelOperator, update, check, allocations, MatrixFreeJacobian, prepare!
 
 include("probes.jl")
 include("tree.jl")
@@ -47,6 +47,8 @@ include("linearmaps.jl")
 include("kernels.jl")
 include("assembly.jl")
 include("coloring.jl")
+include("tensorproduct.jl")
+include("matrixfree.jl")
 include("verify.jl")
 
 end # module
