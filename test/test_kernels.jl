@@ -18,8 +18,8 @@ end
 
 @testset "point weights and field values against a known field (Q1 3D)" begin
     e = elasticity_3d(; n=(1, 1, 1))
-    xq = HK.uniform_value(get_data(get_cell_points(e.dΩ)), "points")
-    w = HK.uniform_value(get_cell_quadrature(e.dΩ).cell_weight, "weights")
+    xq = quad_points(e.dΩ)
+    w = quad_weights(e.dΩ)
     geo = HK.GeoTable(e.Ω, xq, w); t = HK.FieldTable(e.U, xq, 3)
     # u(x) = A x + b  (affine) → gradient A' (Gridap convention) everywhere
     A = TensorValue(0.1, 0.2, 0.3, -0.1, 0.05, 0.0, 0.02, 0.01, 0.4)
@@ -39,8 +39,8 @@ end
 
 @testset "contract_residual! against explicit sums (scalar field, value+gradient)" begin
     p = poisson_2d(; n=(1, 1))
-    xq = HK.uniform_value(get_data(get_cell_points(p.dΩ)), "points")
-    w = HK.uniform_value(get_cell_quadrature(p.dΩ).cell_weight, "weights")
+    xq = quad_points(p.dΩ)
+    w = quad_weights(p.dΩ)
     geo = HK.GeoTable(p.Ω, xq, w); t = HK.FieldTable(p.U, xq, 2)
     sp = HK.SlotSpec([1 2 3], 2)
     R = SVector(0.5, -1.0, 2.0)
@@ -55,8 +55,8 @@ end
 
 @testset "contract_jacobian! and matrix-product path agree with explicit sums (vector field)" begin
     e = elasticity_3d(; n=(1, 1, 1))
-    xq = HK.uniform_value(get_data(get_cell_points(e.dΩ)), "points")
-    w = HK.uniform_value(get_cell_quadrature(e.dΩ).cell_weight, "weights")
+    xq = quad_points(e.dΩ)
+    w = quad_weights(e.dΩ)
     geo = HK.GeoTable(e.Ω, xq, w); t = HK.FieldTable(e.U, xq, 3)
     sm = zeros(Int, 3, 4); sm[:, 2:4] .= reshape(1:9, 3, 3)'   # gradient-only slots (∂_J of comp c)
     sp = HK.SlotSpec(sm, 3)

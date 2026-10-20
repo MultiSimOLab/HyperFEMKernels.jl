@@ -1,8 +1,8 @@
 Random.seed!(1)
 
 function tables_for(prob, order)
-    xq = HK.uniform_value(get_data(get_cell_points(prob.dΩ)), "points")
-    w = HK.uniform_value(get_cell_quadrature(prob.dΩ).cell_weight, "weights")
+    xq = quad_points(prob.dΩ)
+    w = quad_weights(prob.dΩ)
     D = num_cell_dims(prob.Ω)
     HK.GeoTable(prob.Ω, xq, w), HK.FieldTable(prob.U, xq, D), xq, w
 end

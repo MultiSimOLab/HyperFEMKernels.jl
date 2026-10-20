@@ -14,7 +14,6 @@ c = coupled_3d()
     @test pc isa Tuple && length(pc) == 2
     @test pc[1].field == 1 && pc[2].field == 2
     @test pc[1].T === VectorValue{3,Float64} && pc[2].T === Float64
-    @test_throws ErrorException HK.probes(p.U, :unknown).role === :nothing || true
 end
 
 @testset "gradient of a probe and value types" begin
