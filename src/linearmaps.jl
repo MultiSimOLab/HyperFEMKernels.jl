@@ -28,6 +28,8 @@ end
 
 "Sparse linear map: target slot index (linear in R or T), state component, value."
 const SparseMap = Vector{Tuple{Int32,Int32,Float64}}
+const DEBUG_LINEAR = get(ENV, "HFK_DEBUG_LINEAR", "0") == "1"
+_nolin(why) = (DEBUG_LINEAR && println("HyperFEMKernels: linear-map shortcut not used: ", why); nothing)
 
 struct LinearForm{F,O,C,ST}
     state::F            # (ops, FV, A) -> tuple of state inputs, one per term (1.0 if none)
@@ -76,8 +78,8 @@ function LinearForm(terms0::Vector{Term}, pf::PointForm, tables, aux::Tuple, kin
     end
     coefs = Tuple(t.coef for t in terms)
     for t in terms
-        dependent(t.expr) || return nothing
-        length(state_inputs!(Node[], t.expr)) <= 1 || return nothing
+        dependent(t.expr) || return _nolin("a term does not depend on test/trial functions")
+        length(state_inputs!(Node[], t.expr)) <= 1 || return _nolin("a term has more than one state input")
     end
     # state function: one value per term (1.0 if the term has no state input), shared CSE
     st = CodegenState(pf.test, pf.trial, pf.aux)
@@ -95,7 +97,7 @@ function LinearForm(terms0::Vector{Term}, pf::PointForm, tables, aux::Tuple, kin
     auxT = Tuple{map(a -> eltype(eltype(a)), aux)...}
     ST = Core.Compiler.return_type(state, Tuple{typeof(ops),fv_types(tables),auxT})
     (ST isa DataType && ST <: Tuple && all(T -> isconcretetype(T) && (T <: Real || T <: MultiValue), ST.parameters)) ||
-        return nothing
+        return _nolin("state inputs have non-concrete or unsupported types: $ST")
     nsv, nsu = pf.test.nslots, pf.trial.nslots
     maps = SparseMap[]
     for (i, t) in enumerate(terms)
@@ -128,7 +130,8 @@ function LinearForm(terms0::Vector{Term}, pf::PointForm, tables, aux::Tuple, kin
             for (idx, k, v) in m
                 mapped[idx] += v * comp(sr, k)
             end
-            norm(direct - mapped) <= 1e-12 * max(norm(direct), 1.0) || return nothing
+            norm(direct - mapped) <= 1e-12 * max(norm(direct), 1.0) ||
+                return _nolin("term $i is not linear in its state input (rel. error $(norm(direct - mapped) / max(norm(direct), 1.0)))")
         end
         push!(maps, m)
     end
