@@ -22,5 +22,6 @@ include("common.jl")
     @testset "errors"           begin include("test_errors.jl") end
     @testset "hybrid fallback"  begin include("test_fallback.jl") end
     @testset "boundary"         begin include("test_boundary.jl") end
+    @testset "CFD (Oseen step)" begin include("test_cfd.jl") end
     @testset "Gridap equality"  begin include("test_gridap_equality.jl") end
 end
