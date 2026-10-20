@@ -31,6 +31,9 @@ function bench(name, res, jac, U, V)
     best(f) = minimum(@elapsed(f()) for _ in 1:3)
     tjg = best(() -> jacobian!(Ag, gop, x)); tjk = best(() -> jacobian!(Ak, kop, x))
     trg = best(() -> residual!(bg, gop, x)); trk = best(() -> residual!(bk, kop, x))
+    kopd = KernelOperator(res, jac, U, V; nthreads=1, linear_maps=false)
+    jacobian!(Ak, kopd, x); residual!(bk, kopd, x)
+    tjd1 = best(() -> jacobian!(Ak, kopd, x)); trd1 = best(() -> residual!(bk, kopd, x))
     kop1 = KernelOperator(res, jac, U, V; nthreads=1)
     jacobian!(Ak, kop1, x); residual!(bk, kop1, x)
     tjk1 = best(() -> jacobian!(Ak, kop1, x)); trk1 = best(() -> residual!(bk, kop1, x))
@@ -40,6 +43,8 @@ function bench(name, res, jac, U, V)
             tjg, tjk1, tjg / tjk1, Threads.nthreads(), tjk, tjg / tjk, ej)
     @printf("  Residual : Gridap %.4f s | kernel 1 thr %.4f s (×%.1f) | %d thr %.4f s (×%.1f) | rel.diff %.1e\n",
             trg, trk1, trg / trk1, Threads.nthreads(), trk, trg / trk, er)
+    @printf("  1 thread, dual-number path: Jacobian %.4f s, residual %.4f s | linear maps used: res %s, jac %s\n",
+            tjd1, trd1, all(g -> g.lin !== nothing, kop.rgroups), all(g -> g.lin !== nothing, kop.jgroups))
     @printf("  first call (compilation): Gridap %.1f s, kernel %.1f s; kernel operator build %.2f s\n", tc_g, tc_k, tbuild)
     flush(stdout)
 end
