@@ -19,8 +19,8 @@ struct Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF}
     tables::TT          # FieldTable per field
     geo::GeoTable{D}
     aux::AUX            # Gridap arrays, evaluated per cell
-    smv::SV             # slot maps (test) per field
-    smu::SU             # slot maps (trial) per field
+    smv::SV             # slot specs (test) per field
+    smu::SU             # slot specs (trial) per field
 end
 
 function Group(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int)
@@ -31,8 +31,8 @@ function Group(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int)
     w = uniform_value(terms[1].weights, "the quadrature weights")
     geo = GeoTable(trian, xq, w)
     tables = Tuple(FieldTable(s, xq, D) for s in Uspaces)
-    smv = Tuple(slot_map(pf.test, f, t.nc, D) for (f, t) in enumerate(tables))
-    smu = Tuple(slot_map(pf.trial, f, t.nc, D) for (f, t) in enumerate(tables))
+    smv = Tuple(SlotSpec(slot_map(pf.test, f, t.nc, D), D) for (f, t) in enumerate(tables))
+    smu = Tuple(SlotSpec(slot_map(pf.trial, f, t.nc, D), D) for (f, t) in enumerate(tables))
     aux = Tuple(a.array for a in pf.aux)
     NF = length(tables)
     Group{pf.test.nslots,pf.trial.nslots,typeof(pf),typeof(tables),typeof(aux),typeof(smv),typeof(smu),D,NF}(
@@ -232,9 +232,8 @@ function cells!(kind::Val{K}, b, A, op::KernelOperator, g::Group{NSV,NSU,PF,TT,A
     pf = g.pf
     xl = zeros(ndl)
     re = K === :res ? zeros(ndl) : Float64[]
-    Ke = K === :jac ? zeros(ndl, ndl) : zeros(0, 0)
+    KeT = K === :jac ? zeros(ndl, ndl) : zeros(0, 0)   # transposed: KeT[trial, test]
     locs = g.locs
-    Z = zeros(maximum(t -> t.nc, tables), D + 1)
     dNb = map(t -> Vector{VectorValue{D,Float64}}(undef, t.nn), tables)
     caches = map(array_cache, g.aux)
     zsv = zero(SVector{NSV,Float64})
@@ -250,7 +249,7 @@ function cells!(kind::Val{K}, b, A, op::KernelOperator, g::Group{NSV,NSU,PF,TT,A
                 xl[fl.loc+j] = id > 0 ? x[off+id] : dv[-id]
             end
         end
-        K === :res ? fill!(re, 0.0) : fill!(Ke, 0.0)
+        K === :res ? fill!(re, 0.0) : fill!(KeT, 0.0)
         auxcell = map((c, a) -> getindex!(c, a, cell), caches, g.aux)
         for q in 1:geo.np
             Jt = zero(TensorValue{D,D,Float64,D * D})
@@ -269,7 +268,7 @@ function cells!(kind::Val{K}, b, A, op::KernelOperator, g::Group{NSV,NSU,PF,TT,A
             else
                 T = ForwardDiff.jacobian(s -> ForwardDiff.gradient(r -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsu), zsv)
                 map((tf, flf, smf, bf) -> map((tg, flg, smg, bg) ->
-                        contract_jacobian!(Ke, tf, flf, smf, bf, tg, flg, smg, bg, T, q, dV, Z),
+                        contract_jacobian!(KeT, tf, flf, smf, bf, tg, flg, smg, bg, T, q, dV),
                         tables, locs, g.smu, dNb),
                     tables, locs, g.smv, dNb)
             end
@@ -286,7 +285,7 @@ function cells!(kind::Val{K}, b, A, op::KernelOperator, g::Group{NSV,NSU,PF,TT,A
         else
             @inbounds for jj in 1:ndl, ii in 1:ndl
                 p = op.nzpos[ii+(jj-1)*ndl, cell]
-                p > 0 && (nzv[p] += Ke[ii, jj])
+                p > 0 && (nzv[p] += KeT[jj, ii])
             end
         end
     end

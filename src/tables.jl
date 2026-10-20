@@ -45,7 +45,7 @@ end
 
 "Scalar nodal shape functions of one field at the quadrature points and the local dof layout.
 `T` is the value type of the field (`Float64` or `VectorValue{nc,Float64}`)."
-struct FieldTable{D,T}
+struct FieldTable{D,T,NN,NC}
     nn::Int                                   # nodes
     nc::Int                                   # components
     N::Matrix{Float64}                        # np × nn
@@ -90,7 +90,7 @@ function FieldTable(space::SingleFieldFESpace, xq::AbstractVector, D::Int)
     end
     N = [scalar(q, first_dof[n]) for q in 1:np, n in 1:nn]
     dN = VectorValue{D,Float64}[sgrad(q, first_dof[n]) for q in 1:np, n in 1:nn]
-    FieldTable{D,T}(nn, nc, N, dN, ldof)
+    FieldTable{D,T,nn,nc}(nn, nc, N, dN, ldof)
 end
 
 ndofs(t::FieldTable) = t.nn * t.nc
