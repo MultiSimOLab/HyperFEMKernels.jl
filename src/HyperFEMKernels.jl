@@ -37,7 +37,7 @@ import Gridap.Algebra: NonlinearOperator
 
 RuntimeGeneratedFunctions.init(@__MODULE__)
 
-export KernelOperator, update, check
+export KernelOperator, update, check, allocations
 
 include("probes.jl")
 include("tree.jl")

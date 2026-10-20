@@ -5,6 +5,10 @@ using LinearAlgebra, Printf, Random
 
 Random.seed!(1)
 report(name, c) = (@printf("%-40s res %.2e   jac %.2e\n", name, c.res, c.jac); flush(stdout))
+function report_alloc(name, res, jac, U, V, x)
+    a = allocations(KernelOperator(res, jac, U, V), x)
+    println("  allocations ", name, ": ", join(["$(t.kind)[$(t.group)] $(t.bytes) B" for t in a], ", ")); flush(stdout)
+end
 
 # 1. Poisson 2D Q1, inhomogeneous Dirichlet
 let
@@ -31,6 +35,7 @@ for order in (1, 2)
     jac(u, du, v) = ∫(∇(v)' ⊙ ((∂ΨFF ∘ (F ∘ (∇(u)'))) ⊙ (∇(du)')))dΩ
     x = 0.01 .* randn(num_free_dofs(U))
     report("Neo-Hooke 3D Q$order", check(res, jac, U, V, x))
+    report_alloc("Neo-Hooke Q$order", res, jac, U, V, x)
 end
 
 # 3. EM 3D monolithic (HyperFEM README), test_static_EM.msh
@@ -49,6 +54,7 @@ let
     jac((u, φ), (du, dφ), (v, vφ)) = HyperFEM.jacobian(physmodel, k, (u, φ), (du, dφ), (v, vφ), dΩ)
     x = 0.01 .* randn(num_free_dofs(U))
     report("EM 3D monolithic (README mesh)", check(res, jac, U, V, x))
+    report_alloc("EM", res, jac, U, V, x)
 end
 
 # 4. hMRE 2D (Adv_Mater_Ultra_Soft_Magnet hMRE_2D.jl): Dirichlet masks, auxiliary fields, Λ * ∫
@@ -80,4 +86,5 @@ let
     jac(u, du, v) = ∫(∇(v)' ⊙ ((∂Ψs∂FF ∘ (F ∘ (∇(u)'), Nh)) ⊙ (∇(du)')))dΩs
     x = 1e-4 .* randn(num_free_dofs(U))
     report("hMRE 2D (masks, aux fields, Λ*∫)", check(res, jac, U, V, x))
+    report_alloc("hMRE (closed-form invU)", res, jac, U, V, x)
 end
