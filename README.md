@@ -25,7 +25,7 @@ matrix as Gridap to 1e-15):
 
 ## Status
 
-Phase 0 (profiling HyperFEM examples). No functionality yet. See [`ESTADO.md`](ESTADO.md).
+Phase 0 (profiling HyperFEM examples). No functionality yet. Internal progress log kept outside the repository.
 
 ## Roadmap
 
