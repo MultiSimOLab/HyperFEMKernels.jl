@@ -1,7 +1,7 @@
 # Operator and assembly.
 
 const EMPTY_SLOTS = SVector{0,Float64}()
-const MIN_CELLS_PER_TASK = 64
+const MIN_CELLS_PER_TASK = 8
 
 "Global numbering of one field: cell dof ids of test and trial spaces and offsets."
 struct FieldLayout
