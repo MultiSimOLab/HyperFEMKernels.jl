@@ -58,7 +58,23 @@ field_types(::FieldTable{D,VectorValue{NC,Float64}}) where {D,NC} = (VectorValue
 Build the linear-map shortcut for a group, or `nothing` if some term does not qualify.
 `kind` is `:res` (linear in test slots) or `:jac` (bilinear in test and trial slots).
 """
-function LinearForm(terms::Vector{Term}, pf::PointForm, tables, aux::Tuple, kind::Symbol)
+"Split a slot-dependent expression into additive parts: [(expr, sign), ...]."
+function split_sum(n::Node, sgn::Float64=1.0)
+    if n isa Op && all(dependent, n.args)
+        n.f === (+) && return reduce(vcat, [split_sum(a, sgn) for a in n.args])
+        n.f === (-) && length(n.args) == 1 && return split_sum(n.args[1], -sgn)
+        n.f === (-) && length(n.args) == 2 && return vcat(split_sum(n.args[1], sgn), split_sum(n.args[2], -sgn))
+    end
+    [(n, sgn)]
+end
+
+function LinearForm(terms0::Vector{Term}, pf::PointForm, tables, aux::Tuple, kind::Symbol)
+    # additive parts of each term become separate terms with their own state input
+    terms = Term[]
+    for t in terms0, (e, sg) in split_sum(t.expr)
+        push!(terms, Term(t.coef * sg, e, t.weights, t.jacobians))
+    end
+    coefs = Tuple(t.coef for t in terms)
     for t in terms
         dependent(t.expr) || return nothing
         length(state_inputs!(Node[], t.expr)) <= 1 || return nothing
@@ -116,7 +132,7 @@ function LinearForm(terms::Vector{Term}, pf::PointForm, tables, aux::Tuple, kind
         end
         push!(maps, m)
     end
-    LinearForm{typeof(state),typeof(ops),typeof(pf.coefs),ST}(state, ops, pf.coefs, maps, ex)
+    LinearForm{typeof(state),typeof(ops),typeof(coefs),ST}(state, ops, coefs, maps, ex)
 end
 
 "Slot coefficients (vector for :res, vec of the matrix for :jac) of a linear part for state value `s`."
