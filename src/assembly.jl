@@ -1,6 +1,7 @@
 # Operator and assembly.
 
 const EMPTY_SLOTS = SVector{0,Float64}()
+const MIN_CELLS_PER_TASK = 64
 
 "Global numbering of one field: cell dof ids of test and trial spaces and offsets."
 struct FieldLayout
@@ -21,22 +22,30 @@ struct Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF}
     aux::AUX            # Gridap arrays, evaluated per cell
     smv::SV             # slot specs (test) per field
     smu::SU             # slot specs (trial) per field
+    trian::Triangulation
+    xq::Vector          # reference quadrature points
 end
 
-function Group(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int)
+function Group(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int, previous=Any[])
     pf = PointForm(terms)
     ls = vcat(pf.test.leaves, pf.trial.leaves, leaves(terms, :unknown))
     isempty(ls) && error("HyperFEMKernels: integral without unknown, test or trial functions")
     xq = uniform_value(get_data(ls[1].points), "the quadrature points")
     w = uniform_value(terms[1].weights, "the quadrature weights")
-    geo = GeoTable(trian, xq, w)
-    tables = Tuple(FieldTable(s, xq, D) for s in Uspaces)
+    # reuse geometry and shape-function tables of a previous operator with the same quadrature
+    k = findfirst(g -> g.trian === trian && g.xq == xq && g.geo.w == w, previous)
+    if k === nothing
+        geo = GeoTable(trian, xq, w)
+        tables = Tuple(FieldTable(s, xq, D) for s in Uspaces)
+    else
+        geo, tables = previous[k].geo, previous[k].tables
+    end
     smv = Tuple(SlotSpec(slot_map(pf.test, f, t.nc, D), D) for (f, t) in enumerate(tables))
     smu = Tuple(SlotSpec(slot_map(pf.trial, f, t.nc, D), D) for (f, t) in enumerate(tables))
     aux = Tuple(a.array for a in pf.aux)
     NF = length(tables)
     Group{pf.test.nslots,pf.trial.nslots,typeof(pf),typeof(tables),typeof(aux),typeof(smv),typeof(smu),D,NF}(
-        pf, NTuple{NF,Int}(locs), tables, geo, aux, smv, smu)
+        pf, NTuple{NF,Int}(locs), tables, geo, aux, smv, smu, trian, collect(xq))
 end
 
 """
@@ -61,7 +70,7 @@ struct KernelOperator{R,J,US,VS} <: NonlinearOperator
     nthreads::Int
 end
 
-function compile_groups(forms::Vector{Form}, U, locs, ncells::Int, D::Int)
+function compile_groups(forms::Vector{Form}, U, locs, ncells::Int, D::Int, previous=Any[])
     groups = Any[]
     Us = field_spaces(U)
     for form in forms
@@ -75,7 +84,7 @@ function compile_groups(forms::Vector{Form}, U, locs, ncells::Int, D::Int)
             push!(bykey[k], t)
         end
         for k in order
-            push!(groups, Group(bykey[k], form.trian, Us, locs, D))
+            push!(groups, Group(bykey[k], form.trian, Us, locs, D, previous))
         end
     end
     groups
@@ -120,8 +129,9 @@ function update(op::KernelOperator, res, jac)
     D = num_cell_dims(get_triangulation(field_spaces(op.U)[1]))
     ncells = size(op.nzpos, 2)
     locs = Tuple(fl.loc for fl in op.fields)
-    rgroups = compile_groups(capture(res, probes(op.U, :unknown), probes(op.V, :test)), op.U, locs, ncells, D)
-    jgroups = compile_groups(capture(jac, probes(op.U, :unknown), probes(op.U, :trial), probes(op.V, :test)), op.U, locs, ncells, D)
+    prev = vcat(op.rgroups, op.jgroups)
+    rgroups = compile_groups(capture(res, probes(op.U, :unknown), probes(op.V, :test)), op.U, locs, ncells, D, prev)
+    jgroups = compile_groups(capture(jac, probes(op.U, :unknown), probes(op.U, :trial), probes(op.V, :test)), op.U, locs, ncells, D, prev)
     KernelOperator(res, jac, op.U, op.V, op.fields, op.ndl, rgroups, jgroups, op.A0, op.nzpos, op.colors, op.nthreads)
 end
 
@@ -214,10 +224,14 @@ end
 
 function run_cells!(kind::Val, b, A, op::KernelOperator, g::Group, x, dvals)
     for color in op.colors
-        nchunks = min(op.nthreads, length(color))
+        nchunks = clamp(length(color) ÷ MIN_CELLS_PER_TASK, 1, op.nthreads)
         chunks = Iterators.partition(color, cld(length(color), nchunks))
-        @sync for ch in chunks
-            Threads.@spawn cells!(kind, b, A, op, g, x, dvals, ch)
+        if nchunks == 1
+            cells!(kind, b, A, op, g, x, dvals, color)
+        else
+            @sync for ch in chunks
+                Threads.@spawn cells!(kind, b, A, op, g, x, dvals, ch)
+            end
         end
     end
     nothing
