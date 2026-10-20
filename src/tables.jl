@@ -45,13 +45,17 @@ end
 
 "Scalar nodal shape functions of one field at the quadrature points and the local dof layout.
 `T` is the value type of the field (`Float64` or `VectorValue{nc,Float64}`)."
-struct FieldTable{D,T,NN,NC}
+struct FieldTable{D,T,NN,NC,CONTIG}
     nn::Int                                   # nodes
     nc::Int                                   # components
     N::Matrix{Float64}                        # np × nn
     dN::Matrix{VectorValue{D,Float64}}        # np × nn, reference gradients
     ldof::Matrix{Int}                         # nn × nc → local dof
+    Nt::Matrix{Float64}                       # nn × np (contiguous over nodes)
+    dNt::Array{Float64,3}                     # nn × D × np, reference gradients (contiguous over nodes)
 end
+# CONTIG: the dofs of each component are consecutive (ldof[n, c] = ldof[1, c] + n - 1), which
+# makes the node loops contiguous in memory (vectorisable on CPU, coalesced on GPU).
 
 function FieldTable(space::SingleFieldFESpace, xq::AbstractVector, D::Int)
     fields = uniform_value(get_data(get_fe_basis(space)), "the FE basis")
@@ -90,7 +94,10 @@ function FieldTable(space::SingleFieldFESpace, xq::AbstractVector, D::Int)
     end
     N = [scalar(q, first_dof[n]) for q in 1:np, n in 1:nn]
     dN = VectorValue{D,Float64}[sgrad(q, first_dof[n]) for q in 1:np, n in 1:nn]
-    FieldTable{D,T,nn,nc}(nn, nc, N, dN, ldof)
+    Nt = permutedims(N)
+    dNt = [dN[q, n][K] for n in 1:nn, K in 1:D, q in 1:np]
+    contig = all(c -> ldof[:, c] == ldof[1, c] .+ (0:nn-1), 1:nc)
+    FieldTable{D,T,nn,nc,contig}(nn, nc, N, dN, ldof, Nt, dNt)
 end
 
 ndofs(t::FieldTable) = t.nn * t.nc
