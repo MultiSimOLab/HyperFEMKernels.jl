@@ -10,9 +10,9 @@
 # needed (and a mismatch is detected: `TPTable` returns `nothing`).
 
 "1D basis values/derivatives at the 1D points and the permutations to Gridap's numbering."
-struct TPTable{D,Q,P}
-    N1::SMatrix{P,Q,Float64}        # N1[a, i]: 1D shape function i at 1D point a
-    dN1::SMatrix{P,Q,Float64}
+struct TPTable{D,Q,P,L}
+    N1::SMatrix{P,Q,Float64,L}      # N1[a, i]: 1D shape function i at 1D point a
+    dN1::SMatrix{P,Q,Float64,L}
     nodeperm::Vector{Int}           # tensor node (i, j[, k]) linear index → table node n
     pointperm::Vector{Int}          # tensor point (a, b[, c]) linear index → quadrature point q
 end
@@ -85,7 +85,7 @@ function TPTable(t::FieldTable{D,T,NN}, xq::AbstractVector) where {D,T,NN}
         used[n] = true
         nodeperm[lin] = n
     end
-    TPTable{D,Q,P}(SMatrix{P,Q}(N1), SMatrix{P,Q}(dN1), nodeperm, pointperm)
+    TPTable{D,Q,P,P * Q}(SMatrix{P,Q,Float64,P * Q}(N1), SMatrix{P,Q,Float64,P * Q}(dN1), nodeperm, pointperm)
 end
 
 # ---------------------------------------------------------------------------------------------
