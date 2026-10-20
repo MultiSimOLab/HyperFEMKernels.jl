@@ -59,3 +59,9 @@ end
 gridap_op(p) = get_algebraic_operator(FEOperator(p.res, p.jac, p.U, p.V))
 randx(U; scale=0.01) = scale .* randn(num_free_dofs(U))
 reldiff(a, b) = norm(a - b) / max(norm(b), eps())
+
+quad_points(dΩ) = HK.uniform_value(get_data(get_cell_points(dΩ)), "points")
+quad_weights(dΩ) = HK.uniform_value(Gridap.CellData.get_cell_quadrature(dΩ).cell_weight, "weights")
+
+"Contraction of a flattened 4th-order tensor C[(iJ),(kL)] with a 2nd-order tensor A[kL] (pointwise)."
+dbl_contract(C::TensorValue{9,9}, A::TensorValue{3,3}) = TensorValue{3,3}(ntuple(i -> sum(C[i, j] * A[j] for j in 1:9), 9))

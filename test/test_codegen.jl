@@ -45,6 +45,7 @@ end
 
 @testset "show_code prints the expression" begin
     pf = pointform(p, :res)
-    s = sprint(io -> redirect_stdout(io) do; HK.show_code(pf); end)
+    s = sprint(show, Base.remove_linenums!(deepcopy(pf.expr)))
     @test occursin("ops", s) && occursin("sv", s)
+    @test HK.show_code(pf) === nothing
 end

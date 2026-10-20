@@ -38,9 +38,9 @@ end
     r2(u, v) = ∫(v * u)dΩ * 4.0
     f2 = HK.capture(r2, HK.probes(p.U, :unknown), HK.probes(p.V, :test))[1]
     @test [t.coef for t in f2.terms] == [4.0]
-    r3(u, v) = -(∫(v * u)dΩ)
+    r3(u, v) = ∫(v)dΩ - ∫(v * u)dΩ * 2.0
     f3 = HK.capture(r3, HK.probes(p.U, :unknown), HK.probes(p.V, :test))[1]
-    @test [t.coef for t in f3.terms] == [-1.0]
+    @test sort([t.coef for t in f3.terms]) == [-2.0, 1.0]
 end
 
 @testset "multi-field capture keeps field indices" begin
