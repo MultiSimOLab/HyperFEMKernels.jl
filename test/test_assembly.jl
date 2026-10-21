@@ -84,6 +84,30 @@ end
     x = randx(p.U)
     @test reldiff(Algebra.residual(op2, x), Algebra.residual(get_algebraic_operator(FEOperator(res(2.0), jac(3.0), p.U, p.V)), x)) < TOL
     @test reldiff(Algebra.jacobian(op2, x), Algebra.jacobian(get_algebraic_operator(FEOperator(res(2.0), jac(3.0), p.U, p.V)), x)) < TOL
+    # Λ is inside the integrand: a parameter, so the generated functions are reused
+    for (g, g2) in zip(vcat(op.rgroups, op.jgroups), vcat(op2.rgroups, op2.jgroups))
+        @test typeof(g2.pf.core) === typeof(g.pf.core)
+        @test (g.lin === nothing) == (g2.lin === nothing)
+        g.lin === nothing || @test typeof(g2.lin.apply) === typeof(g.lin.apply) && typeof(g2.lin.state) === typeof(g.lin.state)
+    end
+end
+
+@testset "update with other numbers in the integrand: same code, nonlinear forms" begin
+    e = elasticity_3d()
+    res(Λ, t) = (u, v) -> ∫(Λ * (∇(v)' ⊙ (P_svk ∘ (Fk ∘ (∇(u)')))) - v ⋅ t)e.dΩ
+    jac(Λ) = (u, du, v) -> ∫(Λ * (∇(v)' ⊙ (dP_svk ∘ (Fk ∘ (∇(u)'), ∇(du)'))))e.dΩ
+    op = KernelOperator(res(1.0, VectorValue(0.0, 0.0, 0.0)), jac(1.0), e.U, e.V)
+    x = randx(e.U)
+    for (Λ, t) in ((0.5, VectorValue(0.1, -0.2, 0.3)), (2.0, VectorValue(1.0, 0.0, 0.0)))
+        op2 = HK.update(op, res(Λ, t), jac(Λ))
+        for (g, g2) in zip(vcat(op.rgroups, op.jgroups), vcat(op2.rgroups, op2.jgroups))
+            @test typeof(g2.pf.core) === typeof(g.pf.core)
+            g.lin === nothing || @test typeof(g2.lin.apply) === typeof(g.lin.apply)
+        end
+        c = check(res(Λ, t), jac(Λ), e.U, e.V, x; op=op2)
+        @test c.res < TOL && c.jac < TOL
+        @test all(a -> a.bytes == 0, allocations(op2, x))
+    end
 end
 
 @testset "auxiliary data: dense materialisation and cache_aux" begin
