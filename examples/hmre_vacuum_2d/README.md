@@ -40,11 +40,12 @@ julia -t auto --project=benchmark dev/prof_hmre_vacuum_solve.jl    # where the s
 
 ## Notes
 
-- HyperFEM regression (commit e161faa, legacy `DirichletCoupling`): the coupling is now a function
+- HyperFEM regression (commit e161faa, legacy `DirichletCoupling`): the coupling became a function
   `x -> evaluate(uh, x)` that Gridap evaluates at every node of the vacuum, where `uh` (an FE function on the
-  interface) is undefined, and the point search fails. The example wraps it (`OnInterface`) to return the
-  field at the interface nodes only, keeping Gridap's search cache: 0.78 s and 1.4 GB per Dirichlet update
-  otherwise. This belongs in HyperFEM; the wrapper is local to the example.
+  interface) is undefined, so the point search fails; and the search cache was rebuilt at every call (0.78 s and
+  1.4 GB per Dirichlet update). Fixed in HyperFEM branch `fix-legacy-coupling` (a `Coupled` prescription applied
+  by mask with a cached point search; the update costs 0.2 ms); the example needs HyperFEM with that fix merged
+  with `kernel-backend`. Report: `docs/regresion_DirichletCoupling_HyperFEM.pdf`.
 - New engine features exercised here (now covered by `test/test_subdomains.jl` and the hMRE + vacuum testset of
   `test/hyperfem/runtests.jl`): FE spaces on a sub-triangulation of the model with integrals on parts of it and
   different constitutive laws per part; the boundary of a subdomain as an internal interface (faces interior to

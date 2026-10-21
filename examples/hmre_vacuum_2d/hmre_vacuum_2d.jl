@@ -8,7 +8,8 @@
 # Perez-Garcia, Ortigosa, Martinez-Frutos, Garcia-Gonzalez, Advanced Materials), with the same weak forms,
 # models, boundary conditions and stepping. Changes: no DrWatson (mesh from test/models, output to
 # results/), the setup wrapped in a function so that it can be built for each backend, and the drivers
-# built with `backend` (HyperFEM branch kernel-backend).
+# built with `backend` (HyperFEM branch kernel-backend). Needs HyperFEM with the fix of the legacy
+# DirichletCoupling (branch fix-legacy-coupling, see docs/regresion_DirichletCoupling_HyperFEM.pdf).
 #
 # Usage (from the repository root, benchmark environment):
 #   julia -t auto --project=benchmark examples/hmre_vacuum_2d/hmre_vacuum_2d.jl [mode=compare|gridap|kernel]
@@ -32,28 +33,6 @@ vtk = get(kw, "vtk", "off") == "on"
 const MESH = normpath(joinpath(@__DIR__, "..", "..", "test", "models", "Short_magnet.msh"))
 const OUT = joinpath(@__DIR__, "results")
 
-# Workaround (local to this example) for a HyperFEM regression (commit e161faa, legacy DirichletCoupling): the
-# coupling is now prescribed as a function x -> evaluate(uh, x), and Gridap interpolates Dirichlet functions on
-# every cell, so `uh` is evaluated at every node of the vacuum, but here `uh` lives only on the interface and
-# Gridap's point search fails off it. `OnInterface` returns the field at the interface nodes and zero elsewhere
-# (those values are discarded: only the Dirichlet dofs tagged "Interface" take them). Same values as before the
-# regression at the interface.
-# It also keeps Gridap's point-search cache: `evaluate(uh, x)` rebuilds it at every call (0.8 s and 1.4 GB per
-# update of the vacuum Dirichlet values on this mesh).
-struct OnInterface{F,T}
-  f::F
-  nodes::Set{NTuple{2,Float64}}
-  zero::T
-  cache::Base.RefValue{Any}
-end
-OnInterface(f, nodes, zero) = OnInterface(f, nodes, zero, Ref{Any}(nothing))
-_key(x) = (round(x[1]; digits=12), round(x[2]; digits=12))
-function Gridap.Arrays.evaluate(s::OnInterface, x::Point)
-  _key(x) in s.nodes || return s.zero
-  s.cache[] === nothing && (s.cache[] = Gridap.Arrays.return_cache(s.f, x))
-  evaluate!(s.cache[], s.f, x)
-end
-Gridap.Arrays.evaluate(s::OnInterface, x::AbstractVector{<:Point}) = map(p -> evaluate(s, p), x)
 
 "Everything of the original script up to the computational problems, with the drivers built for `backend`."
 function build(backend::Symbol; verbose=false)
@@ -113,9 +92,7 @@ function build(backend::Symbol; verbose=false)
   uhsolid_int = interpolate_everywhere(uh_solid⁺, Usolid_int)
   uhair_int = interpolate_everywhere(Interpolable(uhsolid_int), Uair_int)
   uhsolid_int_(Λ) = Interpolable(interpolate_everywhere!(uhsolid(Λ), get_free_dof_values(uhsolid_int), uhsolid_int.dirichlet_values, Usolid_int))
-  interface_nodes = Set(_key(p) for c in get_cell_coordinates(Γair_int) for p in c)
-  uhair_int_(Λ) = OnInterface(interpolate_everywhere!(uhsolid_int_(Λ), get_free_dof_values(uhair_int), uhair_int.dirichlet_values, Uair_int),
-                              interface_nodes, zero(VectorValue{2,Float64}))
+  uhair_int_(Λ) = interpolate_everywhere!(uhsolid_int_(Λ), get_free_dof_values(uhair_int), uhair_int.dirichlet_values, Uair_int)
   InterpolableBC!(Uu_vacuum⁺, Du_vacuum, "Interface", uhair_int_)
 
   # Maxwell stress in the vacuum and traction on the interface
