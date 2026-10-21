@@ -1,5 +1,5 @@
-# Environment for the HyperFEM-dependent tests: HyperFEM.jl and Adv_Mater_Ultra_Soft_Magnet must be
-# cloned next to this package (CI does it; locally they already are in ~/Desktop/repos).
+# Environment for the HyperFEM-dependent tests: the HyperFEM.jl package must be cloned next to this
+# package (CI does it; locally it already is in ~/Desktop/repos). Meshes are in test/models.
 using Pkg
 Pkg.activate(@__DIR__)
 root = normpath(joinpath(@__DIR__, "..", ".."))

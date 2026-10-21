@@ -5,7 +5,7 @@
 # (20 load steps, Newton with LU, atol 1e-8, rtol 1e-2). The Newton loop is
 # instrumented to split residual assembly, Jacobian assembly, LU and the rest.
 #
-# Usage (from the HyperFEMKernels.jl folder; Adv_Mater_Ultra_Soft_Magnet cloned next to it):
+# Usage (from the HyperFEMKernels.jl folder; mesh in test/models):
 #   julia -t auto --project=benchmark benchmark/phase0/hmre2d.jl          # original invU (matrix sqrt)
 #   julia -t auto --project=benchmark benchmark/phase0/hmre2d.jl closed   # closed-form 2D invU
 #   julia -t auto --project=benchmark benchmark/phase0/hmre2d.jl sqrt 4   # refined mesh r = 4 (generate.jl hmre 4)
@@ -19,8 +19,7 @@ using Gridap.Algebra: allocate_residual, allocate_jacobian, residual!, jacobian!
 using GridapSolvers, GridapSolvers.NonlinearSolvers
 using LinearAlgebra, SparseArrays, Printf, Dates
 
-const ADV_DIR = normpath(joinpath(@__DIR__, "..", "..", "..", "Adv_Mater_Ultra_Soft_Magnet"))
-const MESH_ORIG = joinpath(ADV_DIR, "data", "models", "Short_magnet.msh")
+const MESH_ORIG = normpath(joinpath(@__DIR__, "..", "..", "test", "models", "Short_magnet.msh"))
 meshfile(r) = r === nothing ? MESH_ORIG : joinpath(@__DIR__, "..", "meshes", "hmre_short_r$(r).msh")
 
 # Original implementation (hMRE_2D.jl): inverse of the right stretch tensor via matrix sqrt.

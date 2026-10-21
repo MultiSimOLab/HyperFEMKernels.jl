@@ -13,7 +13,7 @@ using Gridap.FESpaces
 using LinearAlgebra, Printf, Serialization
 
 const MESHDIR = joinpath(@__DIR__, "..", "meshes")
-const ADV = normpath(joinpath(@__DIR__, "..", "..", "..", "Adv_Mater_Ultra_Soft_Magnet"))
+const MODELS = normpath(joinpath(@__DIR__, "..", "..", "test", "models"))
 
 function em_model(args)
     if args[1] == "plate"
@@ -49,7 +49,7 @@ function em_solve(model, order, φtop, backend)
 end
 
 function hmre_solve(r, backend)
-    mesh = r == "orig" ? joinpath(ADV, "data", "models", "Short_magnet.msh") : joinpath(MESHDIR, "hmre_short_r$(parse(Float64, r)).msh")
+    mesh = r == "orig" ? joinpath(MODELS, "Short_magnet.msh") : joinpath(MESHDIR, "hmre_short_r$(parse(Float64, r)).msh")
     model = GmshDiscreteModel(mesh)
     params = [10.0, 12480.64495232286, 1.0, 2.0, 5195.545287237134, 0.2602717127043121, 2.0]
     modelmech = NonlinearMooneyRivlin2D(λ=(params[1] + params[2]) * 1e2, μ1=params[1] * 1e3, μ2=params[2], α1=params[3], α2=params[4]) +
