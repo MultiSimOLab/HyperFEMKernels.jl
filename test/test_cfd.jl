@@ -37,10 +37,10 @@ function oseen_channel(; n=(3, 2, 2), seed=1)
     gk = [interpolate(∇(un) ⋅ eks[k], Wlap) for k in 1:3]
     update_lap! = () -> foreach(k -> Gridap.FESpaces.interpolate!(∇(un) ⋅ eks[k], get_free_dof_values(gk[k]), Wlap), 1:3)
     lapn = Operation((a, b, c) -> VectorValue(a, b, c))(∇ ⋅ gk[1], ∇ ⋅ gk[2], ∇ ⋅ gk[3])
-    # outlet: Windkessel pressure as a cell field over a vector (updated in place) and Robin term; backflow
+    # outlet: Windkessel pressure (a number of the integrand, as in the original script) and Robin term; backflow
     Γo = BoundaryTriangulation(model, tags="outlet"); dΓo = Measure(Γo, 4); dΓb = Measure(Γo, 5)
     no = get_normal_vector(Γo)
-    pcv = fill(0.7, num_cells(Γo)); Pcf = CellField(pcv, Γo)
+    Pc = Ref(0.7)
     ZA = 2.3
     negpart(x) = 0.5 * (x - abs(x))
     τsupg(u, h) = ((2 * norm(u) / h)^2 + 9 * (4μ / (ρ * h^2))^2)^(-1 / 2)
@@ -63,11 +63,11 @@ function oseen_channel(; n=(3, 2, 2), seed=1)
         w = wadv(); f = hist()
         τs = τsupg ∘ (un, he); τp = τpspg ∘ (un, he)
         rk = ρ * f + μ * lapn
-        ∫(ρ * (f ⋅ v))dΩ + ∫(τs * ((∇(v)' ⋅ w) ⋅ rk))dΩ - ∫(τp * (∇(q) ⋅ rk))dΩ - ∫(Pcf * (v ⋅ no))dΓo
+        ∫(ρ * (f ⋅ v))dΩ + ∫(τs * ((∇(v)' ⋅ w) ⋅ rk))dΩ - ∫(τp * (∇(q) ⋅ rk))dΩ - ∫(Pc[] * (v ⋅ no))dΓo
     end
     res(x, y) = a(x, y) - l(y)
     jac(x, dx, y) = a(dx, y)
-    (; model, U, V, U⁻, xh⁻, xh⁻⁻, a, l, res, jac, bdf2, pcv, update_lap!)
+    (; model, U, V, U⁻, xh⁻, xh⁻⁻, a, l, res, jac, bdf2, Pc, update_lap!)
 end
 
 "Gridap's linear system of the step (Dirichlet values lifted), as assembled in the example."
@@ -101,26 +101,37 @@ end
     end
 end
 
-@testset "Oseen step: data changed in place between assemblies (time loop)" begin
+"Same generated functions (no recompilation) in every group of two operators."
+same_code(op, op2) = all(zip(vcat(op.rgroups, op.jgroups), vcat(op2.rgroups, op2.jgroups))) do (g, g2)
+    typeof(g2) === typeof(g) && typeof(g2.pf.core) === typeof(g.pf.core) && (g.lin === nothing) == (g2.lin === nothing) &&
+        (g.lin === nothing || (typeof(g2.lin.apply) === typeof(g.lin.apply) && typeof(g2.lin.state) === typeof(g.lin.state)))
+end
+
+@testset "Oseen step: time loop (data in place, numbers through update)" begin
     p = oseen_channel()
     op = KernelOperator(p.res, p.jac, p.U, p.V)
     x0 = zeros(num_free_dofs(p.U))
     r1 = -residual(op, x0)
-    # new step: previous states, Dirichlet values, Laplacian of uⁿ and Windkessel pressure overwritten in place
+    # new step: previous states, Dirichlet values and Laplacian of uⁿ overwritten in place (read at every
+    # assembly); the Windkessel pressure is a number of the integrand (needs `update`, same code)
     get_free_dof_values(p.xh⁻⁻) .= get_free_dof_values(p.xh⁻)
     get_free_dof_values(p.xh⁻) .= randn(num_free_dofs(p.U))
     get_dirichlet_dof_values(p.U[1]) .*= 0.4
     get_dirichlet_dof_values(p.U⁻[1]) .*= 0.7
     p.update_lap!()
-    fill!(p.pcv, -1.3)
+    p.Pc[] = -1.3
+    op1 = HyperFEMKernels.update(op, p.res, p.jac)
+    @test same_code(op, op1)
+    @test op1.A0 === op.A0
     Ag, bg = gridap_system(p)
-    @test reldiff(-residual(op, x0), bg) < TOL
-    @test reldiff(jacobian(op, x0), Ag) < TOL
+    @test reldiff(-residual(op1, x0), bg) < TOL
+    @test reldiff(jacobian(op1, x0), Ag) < TOL
     @test reldiff(r1, bg) > 1e-3                 # the data did change
-    # BDF2 coefficients are numbers of the weak form: `update` after the first step
+    # BDF2 after the backward Euler step: other numbers (c0, c1, c2) and another advecting-velocity expression
+    # (2uⁿ - uⁿ⁻¹ instead of uⁿ: other lazy arrays, same dense types): same group types, same code
     p.bdf2[] = true
-    op2 = HyperFEMKernels.update(op, p.res, p.jac)
-    @test op2.A0 === op.A0
+    op2 = HyperFEMKernels.update(op1, p.res, p.jac)
+    @test same_code(op, op2)
     Ag, bg = gridap_system(p)
     @test reldiff(-residual(op2, x0), bg) < TOL
     @test reldiff(jacobian(op2, x0), Ag) < TOL
