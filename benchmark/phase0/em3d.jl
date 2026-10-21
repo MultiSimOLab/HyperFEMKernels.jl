@@ -19,8 +19,7 @@ using Gridap.Algebra: allocate_residual, allocate_jacobian, residual!, jacobian!
 using GridapSolvers, GridapSolvers.NonlinearSolvers
 using LinearAlgebra, SparseArrays, Printf, Dates
 
-const HYPERFEM_DIR = normpath(joinpath(@__DIR__, "..", "..", "..", "HyperFEM.jl"))
-const MESH = joinpath(HYPERFEM_DIR, "test", "models", "test_static_EM.msh")
+const MESH = normpath(joinpath(@__DIR__, "..", "..", "test", "models", "test_static_EM.msh"))
 
 function build_model(args)
     if isempty(args) || args[1] == "msh"

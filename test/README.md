@@ -27,7 +27,8 @@ Set `HFK_DEBUG_LINEAR=1` to print why the linear-map shortcut is not used for a 
 
 `test/hyperfem/runtests.jl`: EM monolithic, hMRE with masks and auxiliary fields, and a
 visco-hyperelastic dynamic problem with `CellState` internal variables, value+gradient test/trial
-terms and a time-stepping comparison. They need HyperFEM.jl and Adv_Mater_Ultra_Soft_Magnet cloned
-next to this package. The CI job `hyperfem` clones them and runs `test/hyperfem/setup.jl` then the
+terms and a time-stepping comparison. They need the HyperFEM.jl package cloned
+next to this package; the meshes are in `test/models` (see its README). The CI job `hyperfem` clones
+HyperFEM.jl and runs `test/hyperfem/setup.jl` then the
 tests; locally: `julia test/hyperfem/setup.jl` once, then
 `julia -t auto --project=test/hyperfem test/hyperfem/runtests.jl` (or the benchmark environment).

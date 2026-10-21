@@ -7,7 +7,7 @@
 #          HyperFEM test/models/test_static_EM.msh. Divisions (7n, n + n, 19n): n = 1 gives the
 #          original 266 hexahedra; cells grow as n³.
 #          Tags: "Volume", "fixedup" (z = 0), "midsuf" (y = 0.4), "topsuf" (y = 0.8).
-# hmre r : geometry of Adv_Mater_Ultra_Soft_Magnet data/models/Short_magnet.msh (beam 0.05 × 0.002,
+# hmre r : geometry of test/models/Short_magnet.msh (beam 0.05 × 0.002,
 #          magnet, vacuum box and outer box) with all its physical tags. Element sizes ≈ 5e-4 on the
 #          beam, 3e-3 on the vacuum box and magnet, 1e-2 on the outer box, divided by r; r = 1
 #          reproduces the original element counts closely; cells grow as r².

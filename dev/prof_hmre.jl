@@ -2,8 +2,7 @@ using HyperFEMKernels, HyperFEM, Gridap, GridapGmsh
 using Gridap.FESpaces, Gridap.Algebra
 using Printf, Random, Profile
 Random.seed!(1)
-adv = joinpath(@__DIR__, "..", "..", "Adv_Mater_Ultra_Soft_Magnet")
-model = GmshDiscreteModel(joinpath(adv, "data", "models", "Short_magnet.msh"))
+model = GmshDiscreteModel(joinpath(@__DIR__, "..", "test", "models", "Short_magnet.msh"))
 params = [10.0, 12480.64495232286, 1.0, 2.0, 5195.545287237134, 0.2602717127043121, 2.0]
 modelmech = NonlinearMooneyRivlin2D(λ=(params[1] + params[2]) * 1e2, μ1=params[1] * 1e3, μ2=params[2], α1=params[3], α2=params[4]) +
             TransverseIsotropy2D(μ=params[5], α1=params[6], α2=params[7])
