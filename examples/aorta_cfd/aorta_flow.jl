@@ -26,10 +26,11 @@
 # Output (examples/aorta_cfd/results/<mesh>_<mode>/): history.csv (flow rates per step), timings.csv (seconds
 # per phase and step) and, in compare mode, diffs.csv.
 #
-# Writing note: values that change at every step (the compliance pressures of the Windkessel outlets) enter
-# the weak form as cell fields over a vector updated in place, not as Julia numbers: HyperFEMKernels folds
-# numbers into the generated code when the operator is built. The BDF2 coefficients change once (after the
-# first, backward Euler step) and the kernel operator is rebuilt then with `update`.
+# Writing note: the weak form is written as in the original script. Fields (previous states, Laplacian of
+# uⁿ, Dirichlet values) are overwritten in place and read at every assembly; numbers that change (the
+# Windkessel compliance pressures at every step, the BDF2 coefficients after the first step) reach the
+# kernel operator through `update`, which re-reads the weak form and reuses the compiled code (numbers of
+# the integrand are runtime parameters).
 # =============================================================================
 using Gridap, GridapGmsh, HyperFEMKernels, LinearAlgebra, SparseArrays, Printf
 using GridapGmsh: gmsh
@@ -253,17 +254,12 @@ gk = [interpolate(∇(un) ⋅ eks[k], Wlap) for k in 1:3]
 update_lap!() = foreach(k -> Gridap.FESpaces.interpolate!(∇(un) ⋅ eks[k], get_free_dof_values(gk[k]), Wlap), 1:3)
 lapn = Operation((a, b, c) -> VectorValue(a, b, c))(∇ ⋅ gk[1], ∇ ⋅ gk[2], ∇ ⋅ gk[3])
 
-# Windkessel outlets (Robin coupling): traction -(Pc + Z A u·n) n, Pc from the flow of the previous step.
-# Pc enters the weak form as a cell field over the vector pcv[i], overwritten at every step.
+# Windkessel outlets (Robin coupling): traction -(Pc + Z A u·n) n, Pc from the flow of the previous step
 Γw = [BoundaryTriangulation(model, tags=w.tag) for w in wk]
 dΓw = [Measure(Γ, 4) for Γ in Γw]
 nΓw = [get_normal_vector(Γ) for Γ in Γw]
 wkPc = [w.Pc0 for w in wk]
-pcv = [fill(wkPc[i], num_cells(Γw[i])) for i in eachindex(wk)]
-Pcf = [CellField(pcv[i], Γw[i]) for i in eachindex(wk)]
 wkZA = [w.Z * sum(∫(1.0)dΓw[i]) for (i, w) in enumerate(wk)]
-fill!(pcv[1], 1.0); @assert sum(∫(Pcf[1])dΓw[1]) ≈ sum(∫(1.0)dΓw[1]) "Pc cell field does not follow its vector"
-fill!(pcv[1], wkPc[1])
 
 # Backflow stabilization (Bazilevs et al. 2009; Esmaily-Moghadam et al. 2011): -β ρ ∫ (w·n)₋ (u·v) dΓ
 β_bf = 1.0
@@ -303,7 +299,7 @@ function l((v, q))
   rk = ρ * f + μ * lapn
   r = ∫(ρ * (f ⋅ v))dΩ + ∫(τs * ((∇(v)' ⋅ w) ⋅ rk))dΩ - ∫(τp * (∇(q) ⋅ rk))dΩ
   for i in eachindex(wk)
-    r = r - ∫(Pcf[i] * (v ⋅ nΓw[i]))dΓw[i]
+    r = r - ∫(wkPc[i] * (v ⋅ nΓw[i]))dΓw[i]
   end
   r
 end
@@ -360,9 +356,14 @@ for n in 1:N
     for i in eachindex(wk)
       w = wk[i]; Q = sum(∫(un ⋅ nΓw[i])dΓw[i])
       wkPc[i] = (wkPc[i] + dt * Q / w.C + dt * w.Pv / (w.R * w.C)) / (1 + dt / (w.R * w.C))
-      fill!(pcv[i], wkPc[i])
     end
     dvals(U⁺) .= Qin(t) .* gD
+  end
+  # new numbers in the weak form (Pc; the BDF2 coefficients and advecting velocity from step 2): update the
+  # kernel operators (re-reads the weak form, reuses tables, pattern and compiled code)
+  tupd = @elapsed begin
+    usek && (op = HyperFEMKernels.update(op, kres, kjac))
+    use1 && (op1 = HyperFEMKernels.update(op1, kres, kjac))
   end
   tg = tk = tk1 = 0.0
   if useg
@@ -405,15 +406,7 @@ for n in 1:N
     dvals(U⁻) .= dvals(U⁺)
     update_lap!()
   end
-  # after the backward Euler step: BDF2 coefficients (numbers of the weak form) → rebuild the kernel operators
-  tupd = 0.0
-  if n == 1
-    bdf2[] = true
-    tupd = @elapsed begin
-      usek && (op = HyperFEMKernels.update(op, kres, kjac))
-      use1 && (op1 = HyperFEMKernels.update(op1, kres, kjac))
-    end
-  end
+  bdf2[] = true
   ttot = time() - tstep
   r = (step=n, t=t, bc=tbc, asm_gridap=tg, asm_kernel=tk, asm_kernel1=tk1, update=tupd, lu=tlu, solve=tsol, post=tpost, total=ttot)
   push!(rows, r); println(tio, join(values(r), ",")); flush(tio)
@@ -430,14 +423,15 @@ mean_(v) = isempty(v) ? NaN : sum(v) / length(v)
 rs = length(rows) > 2 ? rows[3:end] : rows
 avg(k) = mean_([getfield(r, k) for r in rs])
 @printf("\nSUMMARY %s mode %s | %d DOFs | mean over steps %d-%d (s/step):\n", meshname, mode, nfree, rs[1].step, rs[end].step)
-@printf("  bc %.3f | assembly: gridap %.3f, kernel %d thr %.3f, kernel 1 thr %.3f | LU %.3f | solve %.3f | post %.3f | total %.3f\n",
-        avg(:bc), avg(:asm_gridap), Threads.nthreads(), avg(:asm_kernel), avg(:asm_kernel1), avg(:lu), avg(:solve), avg(:post), avg(:total))
+@printf("  bc %.3f | update %.3f | assembly: gridap %.3f, kernel %d thr %.3f, kernel 1 thr %.3f | LU %.3f | solve %.3f | post %.3f | total %.3f\n",
+        avg(:bc), avg(:update), avg(:asm_gridap), Threads.nthreads(), avg(:asm_kernel), avg(:asm_kernel1), avg(:lu), avg(:solve), avg(:post), avg(:total))
 if mode == "compare"
   @printf("  assembly speed-up vs Gridap: %.1fx (%d threads), %.1fx (1 thread)\n",
           avg(:asm_gridap) / avg(:asm_kernel), Threads.nthreads(), avg(:asm_gridap) / avg(:asm_kernel1))
   gstep = avg(:bc) + avg(:asm_gridap) + avg(:lu) + avg(:solve) + avg(:post)
   kstep = avg(:bc) + avg(:asm_kernel) + avg(:lu) + avg(:solve) + avg(:post)
-  @printf("  step time (estimated from the phases): gridap %.3f s, kernel %.3f s (%.2fx); first steps (compilation): kernel %.2f / %.2f s, update %.2f s\n",
-          gstep, kstep, gstep / kstep, rows[1].asm_kernel, length(rows) > 1 ? rows[2].asm_kernel : NaN, rows[1].update)
+  kstep += avg(:update)
+  @printf("  step time (estimated from the phases): gridap %.3f s, kernel %.3f s incl. update (%.2fx); first steps: kernel %.2f / %.2f s, update at step 2 %.2f s\n",
+          gstep, kstep, gstep / kstep, rows[1].asm_kernel, length(rows) > 1 ? rows[2].asm_kernel : NaN, length(rows) > 1 ? rows[2].update : NaN)
 end
 println(ok ? "FIN AORTA" : "FIN AORTA (non-finite solution)")
