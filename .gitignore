@@ -19,3 +19,4 @@ benchmark/meshes/*.msh
 !README.md
 test/hyperfem/Manifest.toml
 test/hyperfem/Project.toml
+examples/*/results/
