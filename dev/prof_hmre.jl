@@ -9,8 +9,8 @@ modelmech = NonlinearMooneyRivlin2D(λ=(params[1] + params[2]) * 1e2, μ1=params
 μ0 = 4π * 1e-7; Banorm = 80.0E-9; αr = 10e-3 / μ0
 reffeu = ReferenceFE(lagrangian, VectorValue{2,Float64}, 1)
 Ωs = Triangulation(model, tags=["Beam"]); dΩs = Measure(Ωs, 2)
-Du = DirichletBC(["Fixed_Solid", "Fixed_Solid_x"], [[0.0, 0.0], [0.0, 0.0]])
-V = TestFESpace(Ωs, reffeu, Du, conformity=:H1, dirichlet_masks=[(true, true), (true, false)])
+Du = BoundaryConditions(BoundaryCondition("Fixed_Solid", [0.0, 0.0]), BoundaryCondition("Fixed_Solid_x", [0.0, 0.0]; mask=(true, false)))
+V = TestFESpace(Ωs, reffeu, Du, conformity=:H1)
 U = TrialFESpace(V, Du); U⁻ = TrialFESpace(V, Du)
 uh⁻ = FEFunction(U⁻, 1e-4 .* randn(num_free_dofs(U⁻)))
 _, ∂Ψs∂F, ∂Ψs∂FF = modelmech()

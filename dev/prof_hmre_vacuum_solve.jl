@@ -13,7 +13,7 @@ t = @elapsed @profile solve!(s.comp_model; stepping=(nsteps=4, nsubsteps=2, maxb
 data = Profile.fetch(include_meta=false); lidict = Profile.getdict(data)
 # split samples (each sample ends with a 0 separator), inclusive count of frames matching each pattern
 cats = ["dirichlet_preconditioning!" => r"^dirichlet_preconditioning!$", "AffineFEOperator (Gridap)" => r"^AffineFEOperator$",
-        "TrialFESpace! (Dirichlet values)" => r"^TrialFESpace!$", "InterpolableBC / point search" => r"_point_to_cell!|^InterpolableBC$",
+        "TrialFESpace! (Dirichlet values)" => r"^TrialFESpace!$", "point search (Dirichlet coupling)" => r"_point_to_cell!",
         "res builder (res_mech side effects)" => r"^res_mech$", "assemble_vector! (Maxwell stress)" => r"^assemble_vector!$",
         "build_operator / update (kernel)" => r"^build_operator$|^update$", "KernelOperator residual!/jacobian!" => r"^run_cells!$|^fallback_",
         "Gridap residual!/jacobian! (FEOperator)" => r"^numeric_loop_vector!$|^numeric_loop_matrix!$|^numeric_loop_matrix_and_vector!$",
