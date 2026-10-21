@@ -20,3 +20,4 @@ benchmark/meshes/*.msh
 test/hyperfem/Manifest.toml
 test/hyperfem/Project.toml
 examples/*/results/
+dev/env110/

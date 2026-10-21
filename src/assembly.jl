@@ -441,14 +441,15 @@ end
 function materialize_aux(g::Group{NSV,NSU,PF,TT,AUX}, nthreads::Int) where {NSV,NSU,PF,TT,AUX}
     np, ncells = g.geo.np, size(g.geo.coords, 2)
     chunks = collect(Iterators.partition(1:ncells, cld(ncells, max(1, nthreads))))
-    AUX(ntuple(length(g.aux)) do k
+    vals = ntuple(length(g.aux)) do k
         a = g.aux[k]                                   # not inferred: function barrier below
         M = Matrix{eltype(eltype(a))}(undef, np, ncells)
         @sync for ch in chunks
             Threads.@spawn _materialize!(M, a, ch, np)
         end
         M
-    end)
+    end
+    AUX(vals)::AUX                                     # the assertion keeps the callers' inference precise (Julia 1.10)
 end
 function _materialize!(M::Matrix, a, cells, np::Int)
     cache = array_cache(a)
@@ -461,10 +462,10 @@ function _materialize!(M::Matrix, a, cells, np::Int)
     M
 end
 
-function aux_data(op::KernelOperator, g::Group)
+function aux_data(op::KernelOperator, g::Group{NSV,NSU,PF,TT,AUX}) where {NSV,NSU,PF,TT,AUX}
     if op.cache_aux
         g.auxcache[] === nothing && (g.auxcache[] = materialize_aux(g, op.nthreads))
-        return g.auxcache[]
+        return g.auxcache[]::AUX
     end
     materialize_aux(g, op.nthreads)
 end
