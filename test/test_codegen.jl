@@ -39,7 +39,8 @@ end
     pf = pointform(e, :jac)
     body = string(Base.remove_linenums!(deepcopy(pf.expr)))
     # Fk ∘ ∇u' appears in the Jacobian once per term; ops are deduplicated
-    @test length(pf.ops) == length(unique(objectid.(collect(pf.ops))))
+    fops = [o for (i, o) in enumerate(pf.ops) if !(i in pf.consts)]
+    @test length(fops) == length(unique(objectid.(fops)))
     @test count("ops[", body) ≥ length(pf.ops)
 end
 
@@ -48,4 +49,19 @@ end
     s = sprint(show, Base.remove_linenums!(deepcopy(pf.expr)))
     @test occursin("ops", s) && occursin("sv", s)
     @test HK.show_code(pf) === nothing
+end
+
+@testset "numbers of the integrand are parameters, not literals" begin
+    r(Λ) = (u, v) -> ∫(∇(v) ⋅ ∇(u) + Λ * v * u - 2.0 * v)p.dΩ
+    f(Λ) = HK.capture(r(Λ), HK.probes(p.U, :unknown), HK.probes(p.V, :test))[1][1]
+    pf1 = HK.PointForm(f(1.5).terms); pf2 = HK.PointForm(f(-3.0).terms)
+    @test length(pf1.consts) == 2 && sort([pf1.ops[i] for i in pf1.consts]) == [1.5, 2.0]
+    @test pf1.expr == pf2.expr && typeof(pf1.core) === typeof(pf2.core)      # same code for other values
+    @test !occursin("1.5", string(pf1.expr))
+    FV = ((0.2, VectorValue(0.3, -0.2)),); sv = SVector(1.5, 0.4, -0.1)
+    @test pf1.core(pf1.ops, pf1.coefs, FV, (), sv, SVector{0,Float64}()) ≈ 0.4 * 0.3 + 0.1 * 0.2 + 1.5 * 1.5 * 0.2 - 2.0 * 1.5
+    @test pf2.core(pf2.ops, pf2.coefs, FV, (), sv, SVector{0,Float64}()) ≈ 0.4 * 0.3 + 0.1 * 0.2 - 3.0 * 1.5 * 0.2 - 2.0 * 1.5
+    # equal values are not merged into one slot (the code would depend on the values)
+    pf3 = HK.PointForm(f(2.0).terms)
+    @test length(pf3.consts) == 2 && pf3.expr == pf1.expr
 end
