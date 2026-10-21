@@ -8,15 +8,14 @@
 # Perez-Garcia, Ortigosa, Martinez-Frutos, Garcia-Gonzalez, Advanced Materials), with the same weak forms,
 # models, boundary conditions and stepping. Changes: no DrWatson (mesh from test/models, output to
 # results/), the setup wrapped in a function so that it can be built for each backend, and the drivers
-# built with `backend` (HyperFEM branch kernel-backend). Needs HyperFEM with the fix of the legacy
-# DirichletCoupling (branch fix-legacy-coupling, see docs/regresion_DirichletCoupling_HyperFEM.pdf).
+# built with `backend` (HyperFEM branch kernel-backend). The Dirichlet conditions are written through
+# BoundaryConditions, and the solid–vacuum coupling prescribes the interface field itself,
+# BoundaryCondition("Interface", Parametric(uhair_int_)) (HyperFEM branch fix-legacy-coupling, which also
+# fixed the regression of the former DirichletCoupling: docs/regresion_DirichletCoupling_HyperFEM.pdf).
 #
 # Usage (from the repository root, benchmark environment):
 #   julia -t auto --project=benchmark examples/hmre_vacuum_2d/hmre_vacuum_2d.jl [mode=compare|gridap|kernel]
-#        [nsteps=20] [nsubsteps=2] [vtk=off] [bc=legacy|new]
-#   bc=legacy: Dirichlet conditions as in the original script (DirichletBC, DirichletCoupling + InterpolableBC!);
-#   bc=new: the same conditions through BoundaryConditions, the coupling as Parametric(uhair_int_). In compare
-#   mode the kernel backend is also run with the other interface and the final solutions compared.
+#        [nsteps=20] [nsubsteps=2] [vtk=off]
 #   mode=compare : after a one-step warm-up of both backends, runs the whole staggered simulation with Gridap and with HyperFEMKernels, compares the final
 #                  solutions of the three problems, and checks residual and Jacobian of each problem against
 #                  Gridap at the final state (HyperFEMKernels.check).
@@ -33,13 +32,12 @@ mode = get(kw, "mode", "compare")
 nsteps = parse(Int, get(kw, "nsteps", "20"))
 nsubsteps = parse(Int, get(kw, "nsubsteps", "2"))
 vtk = get(kw, "vtk", "off") == "on"
-bcmode = Symbol(get(kw, "bc", "legacy"))
 const MESH = normpath(joinpath(@__DIR__, "..", "..", "test", "models", "Short_magnet.msh"))
 const OUT = joinpath(@__DIR__, "results")
 
 
 "Everything of the original script up to the computational problems, with the drivers built for `backend`."
-function build(backend::Symbol; verbose=false, bc::Symbol=bcmode)
+function build(backend::Symbol; verbose=false)
   geomodel = GmshDiscreteModel(MESH)
 
   # Constitutive models
@@ -74,21 +72,15 @@ function build(backend::Symbol; verbose=false, bc::Symbol=bcmode)
   # Dirichlet boundary conditions
   evolφ(Λ) = Λ
   evolu(Λ) = 1.0
-  if bc === :legacy
-    Dφ = DirichletBC(["phibot", "phitop"], [0.2 * 5200, 0.0], [evolφ, evolφ])
-    Du_solid = DirichletBC(["Fixed_Solid", "Fixed_Solid_x"], [[0.0, 0.0], [0.0, 0.0]], [evolu, evolu])
-    Du_vacuum = DirichletBC(["Fixed_Air", "Fixed_Air_x", "Interface"], [[0.0, 0.0], [0.0, 0.0], DirichletCoupling], [evolu, evolu, evolu])
-  else
-    Dφ = BoundaryConditions(BoundaryCondition("phibot", 0.2 * 5200, evolφ), BoundaryCondition("phitop", 0.0, evolφ))
-    Du_solid = BoundaryConditions(BoundaryCondition("Fixed_Solid", [0.0, 0.0]), BoundaryCondition("Fixed_Solid_x", [0.0, 0.0]; mask=(true, false)))
-    # Du_vacuum below: its coupling needs the interface spaces, built from the solid spaces
-  end
+  Dφ = BoundaryConditions(BoundaryCondition("phibot", 0.2 * 5200, evolφ), BoundaryCondition("phitop", 0.0, evolφ))
+  Du_solid = BoundaryConditions(BoundaryCondition("Fixed_Solid", [0.0, 0.0]), BoundaryCondition("Fixed_Solid_x", [0.0, 0.0]; mask=(true, false)))
+  # Du_vacuum below: its coupling needs the interface spaces, built from the solid spaces
 
   # FE spaces and state variables ((⁺) current stage, (⁻) previous stage)
   Vφ = TestFESpace(Ωdomain, reffeφ, Dφ, conformity=:H1)
   Uφ⁺ = TrialFESpace(Vφ, Dφ); Uφ⁻ = TrialFESpace(Vφ, Dφ)
   φh⁺ = FEFunction(Uφ⁺, zero_free_values(Uφ⁺)); φh⁻ = FEFunction(Uφ⁻, zero_free_values(Uφ⁻))
-  Vu_solid = TestFESpace(Ωsolid, reffeu, Du_solid, conformity=:H1, dirichlet_masks=[(true, true), (true, false)])
+  Vu_solid = TestFESpace(Ωsolid, reffeu, Du_solid, conformity=:H1)
   Uu_solid⁺ = TrialFESpace(Vu_solid, Du_solid); Uu_solid⁻ = TrialFESpace(Vu_solid, Du_solid)
   uh_solid⁺ = FEFunction(Uu_solid⁺, zero_free_values(Uu_solid⁺)); uh_solid⁻ = FEFunction(Uu_solid⁻, zero_free_values(Uu_solid⁻))
   # Solid–vacuum coupling: staggered solid displacement interpolated to the vacuum interface
@@ -99,15 +91,11 @@ function build(backend::Symbol; verbose=false, bc::Symbol=bcmode)
   uhair_int = interpolate_everywhere(Interpolable(uhsolid_int), Uair_int)
   uhsolid_int_(Λ) = Interpolable(interpolate_everywhere!(uhsolid(Λ), get_free_dof_values(uhsolid_int), uhsolid_int.dirichlet_values, Usolid_int))
   uhair_int_(Λ) = interpolate_everywhere!(uhsolid_int_(Λ), get_free_dof_values(uhair_int), uhair_int.dirichlet_values, Uair_int)
-  if bc !== :legacy
-    Du_vacuum = BoundaryConditions(BoundaryCondition("Fixed_Air", [0.0, 0.0]), BoundaryCondition("Fixed_Air_x", [0.0, 0.0]; mask=(true, false)),
-                                   BoundaryCondition("Interface", Parametric(uhair_int_)))     # the field itself: no InterpolableBC!
-  end
-  Vu_vacuum = TestFESpace(Ωvacuum, reffeu_vacuum, Du_vacuum, conformity=:H1, dirichlet_masks=[(true, true), (true, false), (true, true)])
+  Du_vacuum = BoundaryConditions(BoundaryCondition("Fixed_Air", [0.0, 0.0]), BoundaryCondition("Fixed_Air_x", [0.0, 0.0]; mask=(true, false)),
+                                 BoundaryCondition("Interface", Parametric(uhair_int_)))       # the interface field itself
+  Vu_vacuum = TestFESpace(Ωvacuum, reffeu_vacuum, Du_vacuum, conformity=:H1)
   Uu_vacuum⁺ = TrialFESpace(Vu_vacuum, Du_vacuum); Uu_vacuum⁻ = TrialFESpace(Vu_vacuum, Du_vacuum)
   uh_vacuum⁺ = FEFunction(Uu_vacuum⁺, zero_free_values(Uu_vacuum⁺)); uh_vacuum⁻ = FEFunction(Uu_vacuum⁻, zero_free_values(Uu_vacuum⁻))
-
-  bc === :legacy && InterpolableBC!(Uu_vacuum⁺, Du_vacuum, "Interface", uhair_int_)
 
   # Maxwell stress in the vacuum and traction on the interface
   V_maxwell = TestFESpace(Ωvacuum, reffeu_vacuum)
@@ -159,13 +147,13 @@ function build(backend::Symbol; verbose=false, bc::Symbol=bcmode)
   (; comp_model, problems, Ωsolid, Ωvacuum, φh⁺, uh_solid⁺, uh_vacuum⁺)
 end
 
-function simulate(backend::Symbol; nsteps=nsteps, nsubsteps=nsubsteps, quiet=false, bc=bcmode)
-  tb = @elapsed (s = build(backend; bc))
+function simulate(backend::Symbol; nsteps=nsteps, nsubsteps=nsubsteps, quiet=false)
+  tb = @elapsed (s = build(backend))
   args = (Dict(:stepping => (nsteps=1, maxbisec=5), :ProjectDirichlet => true),
           Dict(:stepping => (nsteps=1, maxbisec=5)),
           Dict(:stepping => (nsteps=1, maxbisec=5), :ProjectDirichlet => true))
   ts = @elapsed solve!(s.comp_model; stepping=(nsteps=nsteps, nsubsteps=nsubsteps, maxbisec=1), kargsolve=args, verbose=false)
-  quiet || @printf("%-6s (bc=%s): %d DOFs (φ %d, u solid %d, u vacuum %d) | build %.1f s | staggered solve %.1f s\n", backend, bc,
+  quiet || @printf("%-6s: %d DOFs (φ %d, u solid %d, u vacuum %d) | build %.1f s | staggered solve %.1f s\n", backend,
           sum(p -> num_free_dofs(p.U), s.problems), (num_free_dofs(p.U) for p in s.problems)..., tb, ts)
   flush(stdout)
   if vtk && !quiet
@@ -187,13 +175,6 @@ if mode == "compare"
   for (pg, pk) in zip(sg.problems, sk.problems)
     xg, xk = get_free_dof_values(pg.xh), get_free_dof_values(pk.xh)
     @printf("  %-17s ‖Δx‖/‖x‖ = %.2e   (‖x‖ = %.3e)\n", pg.name, norm(xk - xg) / norm(xg), norm(xg))
-  end
-  other = bcmode === :legacy ? :new : :legacy
-  so, _ = simulate(:kernel; bc=other)
-  println("Final solutions, kernel with bc=$other vs bc=$bcmode (relative difference):")
-  for (pk, po) in zip(sk.problems, so.problems)
-    xk, xo = get_free_dof_values(pk.xh), get_free_dof_values(po.xh)
-    @printf("  %-17s ‖Δx‖/‖x‖ = %.2e\n", pk.name, norm(xo - xk) / norm(xk))
   end
   # at the converged state the residual is ~0 and its relative difference is meaningless: perturb it by 0.1 %
   println("Residual and Jacobian of each problem near the final state (HyperFEMKernels.check vs Gridap, Λ = 1):")

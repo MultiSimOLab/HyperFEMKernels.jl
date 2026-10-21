@@ -8,7 +8,7 @@ on the mesh `test/models/Short_magnet.msh` (8 637 nodes, 25 375 DOFs in all):
 2. mechanics of the solid beam (`NonlinearMooneyRivlin2D + TransverseIsotropy2D`), loaded on the interface by
    the Maxwell traction of the vacuum (an FE function on the interface, projected with a mass matrix);
 3. fictitious mechanics of the vacuum (`HessianRegularization(NonlinearMooneyRivlin2D_CV)`), driven by the solid
-   displacement interpolated on the interface (`DirichletCoupling` / `InterpolableBC!`).
+   displacement interpolated on the interface (`BoundaryCondition("Interface", Parametric(Λ -> field))`).
 
 Same weak forms, models, boundary conditions and stepping as the original; no DrWatson (mesh from `test/models`,
 output to `results/`), the setup is a function so that it runs for each backend, and the drivers take
@@ -43,9 +43,10 @@ julia -t auto --project=benchmark dev/prof_hmre_vacuum_solve.jl    # where the s
 - HyperFEM regression (commit e161faa, legacy `DirichletCoupling`): the coupling became a function
   `x -> evaluate(uh, x)` that Gridap evaluates at every node of the vacuum, where `uh` (an FE function on the
   interface) is undefined, so the point search fails; and the search cache was rebuilt at every call (0.78 s and
-  1.4 GB per Dirichlet update). Fixed in HyperFEM branch `fix-legacy-coupling` (a `Coupled` prescription applied
-  by mask with a cached point search; the update costs 0.2 ms); the example needs HyperFEM with that fix merged
-  with `kernel-backend`. Report: `docs/regresion_DirichletCoupling_HyperFEM.pdf`.
+  1.4 GB per Dirichlet update). Fixed in HyperFEM branch `fix-legacy-coupling` (a `DirichletApplicator` evaluates
+  the prescriptions at the Dirichlet nodes of their tag with a cached point search; the update costs 4 ms), which
+  also retires the legacy `DirichletBC`/`DirichletCoupling`/`InterpolableBC!`; the example needs HyperFEM with
+  that branch merged with `kernel-backend`. Report: `docs/regresion_DirichletCoupling_HyperFEM.pdf`.
 - New engine features exercised here (now covered by `test/test_subdomains.jl` and the hMRE + vacuum testset of
   `test/hyperfem/runtests.jl`): FE spaces on a sub-triangulation of the model with integrals on parts of it and
   different constitutive laws per part; the boundary of a subdomain as an internal interface (faces interior to
