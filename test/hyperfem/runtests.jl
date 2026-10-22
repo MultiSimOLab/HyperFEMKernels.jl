@@ -5,7 +5,7 @@ using Test
 using HyperFEMKernels, HyperFEM
 using Gridap, GridapGmsh, Gridap.FESpaces, Gridap.Algebra, Gridap.CellData
 using GridapSolvers, GridapSolvers.NonlinearSolvers
-using LinearAlgebra, Random
+using LinearAlgebra, Random, SparseArrays
 
 const HK = HyperFEMKernels
 const TOL = 1e-12
@@ -191,6 +191,66 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
             @test isempty(op.fallback.rtrians) && isempty(op.fallback.jtrians)
             c = check(res, jac, U, V, x; op)
             @test c.res < TOL && c.jac < TOL
+        end
+    end
+
+    @testset "drivers with backend=:kernel: Dirichlet projection (ProjectDirichlet=true)" begin
+        CM = HyperFEM.ComputationalModels
+        if !isdefined(CM, :dirichlet_projection)
+            @info "HyperFEM without the kernel backend of the drivers (branch kernel-backend): driver tests skipped"
+        else
+            # 1. The projection increment of a step, kernel vs Gridap, at a nonzero state; twice, so that the
+            #    second call reuses the kernel operator of the first (`update`).
+            geometry = CartesianDiscreteModel((0, 0.05, 0, 0.005, 0, 0.002), (5, 2, 2))
+            labels = get_face_labeling(geometry)
+            add_tag_from_tags!(labels, "fixed", CartesianTags.face0YZ⁺)
+            add_tag_from_tags!(labels, "moving", CartesianTags.face1YZ⁺)
+            physmodel = MooneyRivlin3D(λ=3.0, μ1=1.0, μ2=0.0, ρ=1.0)
+            Ω = Triangulation(geometry); dΩ = Measure(Ω, 2)
+            D_bc = BoundaryConditions(BoundaryCondition("fixed", [0.0, 0.0, 0.0]),
+                                      BoundaryCondition("moving", [0.08, 0.0, 0.0], EvolutionFunctions.ramp()))
+            reffeu = ReferenceFE(lagrangian, VectorValue{3,Float64}, 1)
+            k = Kinematics(Mechano, Solid)
+            res(Λ) = (u, v) -> residual(physmodel, k, u, v, dΩ)
+            jac(Λ) = (u, du, v) -> jacobian(physmodel, k, u, du, v, dΩ)
+            models = map((:gridap, :kernel)) do backend
+                V = TestFESpace(Ω, reffeu, D_bc, conformity=:H1); U = TrialFESpace(V, D_bc, 0.0)
+                StaticNonlinearModel(res, jac, U, V, D_bc; nls=NewtonSolver(LUSolver(); verbose=false), backend=backend)
+            end
+            Random.seed!(3)
+            x = 1e-3 .* randn(num_free_dofs(models[1].spaces[1]))
+            for (Λ, ∆Λ) in ((0.1, 0.1), (0.3, 0.2))
+                duhs = map(models) do m
+                    m.caches[3] .= x
+                    CM.get_dirichlet_preconditioner(m, Λ, ∆Λ)
+                end
+                dg, dk = map(get_free_dof_values, duhs)
+                @test norm(dg) > 0
+                @test reldiff(dk, dg) < 1e-9     # two LU solves of the same stiff system (rounding of the LU)
+                # the linear systems themselves: Gridap's AffineFEOperator vs the kernel operator at du = 0
+                mg, mk = models
+                uh = FEFunction(mg.spaces[1], x)
+                ∆Ug, ∆Uk = mg.spaces[3], mk.spaces[3]
+                aop = AffineFEOperator((du, v) -> jac(Λ - ∆Λ)(uh, du, v), v -> -1.0 * res(Λ - ∆Λ)(uh, v), ∆Ug, mg.spaces[2])
+                kop = mk.caches[8][]
+                z = zero_initial_guess(kop)
+                @test reldiff(nonzeros(jacobian(kop, z)), nonzeros(get_matrix(aop))) < TOL
+                @test reldiff(-residual(kop, z), get_vector(aop)) < TOL
+                @test reldiff(get_dirichlet_dof_values(get_fe_space(duhs[2])), get_dirichlet_dof_values(get_fe_space(duhs[1]))) < TOL
+            end
+            @test models[2].caches[8][] isa KernelOperator
+            @test isempty(models[2].caches[8][].fallback.rtrians) && isempty(models[2].caches[8][].fallback.jtrians)
+
+            # 2. HyperFEM's own simulations with the projection, with both backends (final solution).
+            sims = normpath(joinpath(@__DIR__, "..", "..", "..", "HyperFEM.jl", "test", "SimulationsTests"))
+            include(joinpath(sims, "StaticMechanicalDirichletSimulation.jl"))
+            include(joinpath(sims, "ViscoElasticSimulation.jl"))
+            xg = static_mechanical_dirichlet_simulation()
+            xk = static_mechanical_dirichlet_simulation(backend=:kernel)
+            @test reldiff(xk, xg) < 1e-10
+            xg, _ = visco_elastic_simulation()
+            xk, _ = visco_elastic_simulation(backend=:kernel)
+            @test reldiff(xk, xg) < 1e-10
         end
     end
 end
