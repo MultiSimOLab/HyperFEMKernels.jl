@@ -1,5 +1,5 @@
 # Jacobian assembly vs size of the quadrature-point block of the matrix-product path.
-#   julia -t auto --project=benchmark dev/bench_qblock.jl
+#   julia -t auto --project=benchmark benchmark/bench_qblock.jl
 using HyperFEMKernels, HyperFEM, Gridap, GridapGmsh, Gridap.FESpaces, Gridap.Algebra
 using LinearAlgebra, SparseArrays, Random, Printf
 const HK = HyperFEMKernels

@@ -2,7 +2,7 @@ using HyperFEMKernels, HyperFEM, Gridap, Gridap.FESpaces, Gridap.Algebra
 using LinearAlgebra, Random, Printf, Profile
 const HK = HyperFEMKernels
 Random.seed!(1)
-include(joinpath(@__DIR__, "bench_cases.jl"))
+include(joinpath(@__DIR__, "..", "benchmark", "bench_cases.jl"))
 order = parse(Int, get(ARGS, 1, "3"))
 res, jac, U, V = em_box(14, 3, 3, order)
 x = 1e-5 .* randn(num_free_dofs(U)); dx = randn(num_free_dofs(U))

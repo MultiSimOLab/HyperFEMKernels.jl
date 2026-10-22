@@ -2,7 +2,7 @@
 using HyperFEMKernels, HyperFEM, Gridap
 using Gridap.FESpaces, Gridap.Algebra
 using Profile, Printf, Random
-include(joinpath(@__DIR__, "bench_cases.jl"))
+include(joinpath(@__DIR__, "..", "benchmark", "bench_cases.jl"))
 res, jac, U, V = em_box(20, 4, 4, 2)
 x = 0.01 .* randn(num_free_dofs(U))
 t = @elapsed (kop = KernelOperator(res, jac, U, V; nthreads=1)); @printf("build %.2f s\n", t)

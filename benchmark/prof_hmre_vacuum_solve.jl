@@ -1,5 +1,5 @@
 # Time breakdown of the staggered solve of the hMRE + vacuum example (sampling profiler, inclusive samples).
-#   julia -t auto --project=benchmark dev/prof_hmre_vacuum_solve.jl [backend=kernel|gridap]
+#   julia -t auto --project=benchmark benchmark/prof_hmre_vacuum_solve.jl [backend=kernel|gridap]
 using Profile, Printf
 const B = Symbol(get(Dict(split(a, "=")[1] => split(a, "=")[2] for a in ARGS if occursin("=", a)), "backend", "kernel"))
 empty!(ARGS); append!(ARGS, ["mode=none"])

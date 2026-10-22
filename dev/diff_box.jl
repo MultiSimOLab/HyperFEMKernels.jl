@@ -2,7 +2,7 @@ using HyperFEMKernels, HyperFEM, Gridap
 using Gridap.FESpaces, Gridap.Algebra
 using LinearAlgebra, SparseArrays, Printf, Random
 Random.seed!(1)
-include(joinpath(@__DIR__, "bench_cases.jl"))
+include(joinpath(@__DIR__, "..", "benchmark", "bench_cases.jl"))
 res, jac, U, V = em_box(20, 4, 4, 2)
 x = parse(Float64, get(ENV, "XSCALE", "1e-5")) .* randn(num_free_dofs(U))
 gop = get_algebraic_operator(FEOperator(res, jac, U, V))
