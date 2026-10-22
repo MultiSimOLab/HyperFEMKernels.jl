@@ -17,8 +17,8 @@ output to `results/`), the setup is a function so that it runs for each backend,
 ```
 julia -t auto --project=benchmark examples/hmre_vacuum_2d/hmre_vacuum_2d.jl mode=compare   # both backends, 20 × 2 steps
 julia -t auto --project=benchmark examples/hmre_vacuum_2d/hmre_vacuum_2d.jl mode=kernel vtk=on
-julia -t auto --project=benchmark dev/prof_hmre_vacuum.jl          # per problem: assembly times, allocations per element
-julia -t auto --project=benchmark dev/prof_hmre_vacuum_solve.jl    # where the staggered solve spends its time
+julia -t auto --project=benchmark benchmark/prof_hmre_vacuum.jl          # per problem: assembly times, allocations per element
+julia -t auto --project=benchmark benchmark/prof_hmre_vacuum_solve.jl    # where the staggered solve spends its time
 ```
 
 ## Results (our measurement, Mac M5 Max, 18 threads)
@@ -36,7 +36,7 @@ julia -t auto --project=benchmark dev/prof_hmre_vacuum_solve.jl    # where the s
   (see ESTADO.md, "adaptar HyperFEM").
 - Allocations in the element kernels come from HyperFEM's constitutive functions, not from the engine:
   `MagnetoMechModel(HardMagnetic2D + MR + TI)` 1.4–8 kB per call, `HessianRegularization` tangent 2.4 kB
-  (`IdealMagnetic2D` and `MR2D + TI2D` allocate nothing). Measured with `dev/prof_hmre_vacuum.jl`.
+  (`IdealMagnetic2D` and `MR2D + TI2D` allocate nothing). Measured with `benchmark/prof_hmre_vacuum.jl`.
 
 ## Notes
 

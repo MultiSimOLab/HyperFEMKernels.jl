@@ -20,4 +20,6 @@ benchmark/meshes/*.msh
 test/hyperfem/Manifest.toml
 test/hyperfem/Project.toml
 examples/*/results/
-dev/env110/
+
+# Local scratch scripts (debugging, watcher launchers): not versioned
+dev/
