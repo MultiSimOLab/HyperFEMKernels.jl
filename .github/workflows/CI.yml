@@ -44,10 +44,6 @@ jobs:
         with:
           repository: MultiSimOLab/HyperFEM
           path: HyperFEM.jl
-      - uses: actions/checkout@v4
-        with:
-          repository: MultiSimOLab/Adv_Mater_Ultra_Soft_Magnet
-          path: Adv_Mater_Ultra_Soft_Magnet
       - uses: julia-actions/setup-julia@v2
         with:
           version: ${{ matrix.version }}

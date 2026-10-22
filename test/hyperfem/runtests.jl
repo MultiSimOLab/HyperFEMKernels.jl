@@ -16,12 +16,12 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
     Random.seed!(1)
 
     @testset "EM 3D monolithic (README), test_static_EM.msh" begin
-        model = GmshDiscreteModel(joinpath(@__DIR__, "..", "..", "..", "HyperFEM.jl", "test", "models", "test_static_EM.msh"))
+        model = GmshDiscreteModel(joinpath(@__DIR__, "..", "models", "test_static_EM.msh"))
         physmodel = ElectroMechModel(IdealDielectric(ε=1.0), NeoHookean3D(λ=10.0, μ=1.0))
         k = (Kinematics(Mechano, Solid), Kinematics(Electro, Solid))
         Ω = Triangulation(model); dΩ = Measure(Ω, 2)
-        Du = DirichletBC(["fixedup"], [[0.0, 0.0, 0.0]], [Λ -> 1.0])
-        Dφ = DirichletBC(["midsuf", "topsuf"], [0.0, 0.1], [Λ -> Λ, Λ -> Λ])
+        Du = BoundaryConditions(BoundaryCondition("fixedup", [0.0, 0.0, 0.0]))
+        Dφ = BoundaryConditions(BoundaryCondition("midsuf", 0.0, Λ -> Λ), BoundaryCondition("topsuf", 0.1, Λ -> Λ))
         Vu = TestFESpace(model, ReferenceFE(lagrangian, VectorValue{3,Float64}, 1), Du, conformity=:H1)
         Vφ = TestFESpace(model, ReferenceFE(lagrangian, Float64, 1), Dφ, conformity=:H1)
         V = MultiFieldFESpace([Vu, Vφ])
@@ -36,17 +36,16 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
         @test all(a -> a.bytes == 0, allocations(op, x))
     end
 
-    @testset "hMRE 2D (Adv_Mater_Ultra_Soft_Magnet), Short_magnet.msh" begin
-        adv = joinpath(@__DIR__, "..", "..", "..", "Adv_Mater_Ultra_Soft_Magnet")
-        model = GmshDiscreteModel(joinpath(adv, "data", "models", "Short_magnet.msh"))
+    @testset "hMRE 2D, Short_magnet.msh" begin
+        model = GmshDiscreteModel(joinpath(@__DIR__, "..", "models", "Short_magnet.msh"))
         params = [10.0, 12480.64495232286, 1.0, 2.0, 5195.545287237134, 0.2602717127043121, 2.0]
         modelmech = NonlinearMooneyRivlin2D(λ=(params[1] + params[2]) * 1e2, μ1=params[1] * 1e3, μ2=params[2], α1=params[3], α2=params[4]) +
                     TransverseIsotropy2D(μ=params[5], α1=params[6], α2=params[7])
         μ0 = 4π * 1e-7; Banorm = 80.0E-9; αr = 10e-3 / μ0
         reffeu = ReferenceFE(lagrangian, VectorValue{2,Float64}, 1)
         Ωs = Triangulation(model, tags=["Beam"]); dΩs = Measure(Ωs, 2)
-        Du = DirichletBC(["Fixed_Solid", "Fixed_Solid_x"], [[0.0, 0.0], [0.0, 0.0]])
-        V = TestFESpace(Ωs, reffeu, Du, conformity=:H1, dirichlet_masks=[(true, true), (true, false)])
+        Du = BoundaryConditions(BoundaryCondition("Fixed_Solid", [0.0, 0.0]), BoundaryCondition("Fixed_Solid_x", [0.0, 0.0]; mask=(true, false)))
+        V = TestFESpace(Ωs, reffeu, Du, conformity=:H1)
         U = TrialFESpace(V, Du); U⁻ = TrialFESpace(V, Du)
         uh⁻ = FEFunction(U⁻, 1e-4 .* randn(num_free_dofs(U⁻)))
         _, ∂Ψs∂F, ∂Ψs∂FF = modelmech()
@@ -139,5 +138,59 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
         xg = copy(x); xk = copy(x)
         Algebra.solve!(xg, nls, gop(resΓ, jac, Uu, Vu)); Algebra.solve!(xk, nls, opΓ)
         @test reldiff(xk, xg) < 1e-10
+    end
+    @testset "hMRE + vacuum 2D (staggered problems of examples/hmre_vacuum_2d), Short_magnet.msh" begin
+        # The three weak forms of the example at random states, without HyperFEM's drivers: spaces on a
+        # sub-triangulation (magnetic potential on solid + vacuum), integrals on its parts with different
+        # constitutive models (HardMagnetic2D in MagnetoMechModel, IdealMagnetic2D, HessianRegularization of
+        # NonlinearMooneyRivlin2D_CV), interface traction from an FE function on the interface.
+        geomodel = GmshDiscreteModel(joinpath(@__DIR__, "..", "models", "Short_magnet.msh"))
+        μ0 = 4π * 1e-7
+        params = [10.0, 12480.64495232286, 1.0, 2.0, 5195.545287237134, 0.2602717127043121, 2.0]
+        modelmech = NonlinearMooneyRivlin2D(λ=(params[1] + params[2]) * 1e2, μ1=params[1] * 1e3, μ2=params[2], α1=params[3], α2=params[4]) +
+                    TransverseIsotropy2D(μ=params[5], α1=params[6], α2=params[7])
+        model_solid = MagnetoMechModel(magneto=HardMagnetic2D(μ0=μ0, αr=10e-3 / μ0, χe=0.0, χr=8.0), mechano=modelmech)
+        model_vacuum_mag = IdealMagnetic2D(μ0=μ0, χe=0.0)
+        model_vacuum_mech = HessianRegularization(mechano=NonlinearMooneyRivlin2D_CV(λ=1.0, μ1=1.0, μ2=0.0, α1=6.0, α2=1.0, γ=6.0), δ=1e-6)
+        reffeφ = ReferenceFE(lagrangian, Float64, 1); reffeu = ReferenceFE(lagrangian, VectorValue{2,Float64}, 1)
+        Ωdomain = Triangulation(geomodel, tags=["vacuumb", "Beam"])
+        Ωvacuum = Triangulation(geomodel, tags=["vacuumb"]); Ωsolid = Triangulation(geomodel, tags=["Beam"])
+        dΩsolid = Measure(Ωsolid, 2); dΩvacuum = Measure(Ωvacuum, 2)
+        Γsolid_int = BoundaryTriangulation(Ωsolid, tags="Interface"); dΓs = Measure(Γsolid_int, 4)
+        Vφ = TestFESpace(Ωdomain, reffeφ; dirichlet_tags=["phibot", "phitop"])
+        Uφ = TrialFESpace(Vφ, [0.3 * 1040.0, 0.0])
+        Vs = TestFESpace(Ωsolid, reffeu; dirichlet_tags=["Fixed_Solid", "Fixed_Solid_x"], dirichlet_masks=[(true, true), (true, false)])
+        Us = TrialFESpace(Vs, [VectorValue(0.0, 0.0), VectorValue(0.0, 0.0)])
+        Vv = TestFESpace(Ωvacuum, reffeu; dirichlet_tags=["Fixed_Air", "Fixed_Air_x", "Interface"], dirichlet_masks=[(true, true), (true, false), (true, true)])
+        Uv = TrialFESpace(Vv, [VectorValue(0.0, 0.0), VectorValue(0.0, 0.0), x -> VectorValue(1e-4 * x[2], 0.0)])
+        # states of the other problems (auxiliary data), random but small
+        uh_solid = FEFunction(Us, 1e-4 .* randn(num_free_dofs(Us)))
+        uh_vacuum = FEFunction(Uv, 1e-4 .* randn(num_free_dofs(Uv)))
+        φh = FEFunction(Uφ, 50.0 .* randn(num_free_dofs(Uφ)))
+        Nh = interpolate_everywhere(x -> VectorValue(1.0, 0.0), TestFESpace(Ωsolid, reffeu))
+        tmaxw = interpolate_everywhere(x -> VectorValue(0.1, -0.3 * x[1]), FESpace(Γsolid_int, reffeu))
+        _, ∂Ψs∂F, ∂Ψs∂H0, ∂Ψs∂FF, _, ∂Ψs∂H0H0 = model_solid()
+        _, _, ∂Ψv∂H0, _, _, ∂Ψv∂H0H0 = model_vacuum_mag()
+        _, ∂Ψvm∂F, ∂Ψvm∂FF = model_vacuum_mech()
+        F, _, _ = get_Kinematics(Kinematics(Mechano, Solid)); ℋ₀ = get_Kinematics(Kinematics(Magneto, Solid))
+        Λ = 0.4
+        uhs = uh_solid * Λ; uhv = uh_vacuum * Λ               # staggered interpolation of the states (auxiliary expressions)
+        res_mag(φ, vφ) = -1.0 * ∫((∇(vφ) ⋅ (∂Ψs∂H0 ∘ (F ∘ (∇(uhs)'), ℋ₀ ∘ (∇(φ)), Nh))))dΩsolid -
+                         ∫((∇(vφ) ⋅ (∂Ψv∂H0 ∘ (F ∘ (∇(uhv)'), ℋ₀ ∘ (∇(φ))))))dΩvacuum
+        jac_mag(φ, dφ, vφ) = ∫(∇(vφ)' ⋅ ((∂Ψs∂H0H0 ∘ (F ∘ (∇(uhs)'), ℋ₀ ∘ (∇(φ)), Nh)) ⋅ ∇(dφ)))dΩsolid +
+                             ∫(∇(vφ)' ⋅ ((∂Ψv∂H0H0 ∘ (F ∘ (∇(uhv)'), ℋ₀ ∘ (∇(φ)))) ⋅ ∇(dφ)))dΩvacuum
+        res_mech(u, v) = ∫((∇(v)' ⊙ (∂Ψs∂F ∘ (F ∘ (∇(u)'), ℋ₀ ∘ (∇(φh)), Nh))))dΩsolid + ∫((v ⋅ tmaxw))dΓs
+        jac_mech(u, du, v) = ∫(∇(v)' ⊙ ((∂Ψs∂FF ∘ (F ∘ (∇(u)'), ℋ₀ ∘ (∇(φh)), Nh)) ⊙ (∇(du)')))dΩsolid
+        res_vac(u, v) = ∫((∇(v)' ⊙ (∂Ψvm∂F ∘ (F ∘ (∇(u)')))))dΩvacuum
+        jac_vac(u, du, v) = ∫(∇(v)' ⊙ ((∂Ψvm∂FF ∘ (F ∘ (∇(u)'))) ⊙ (∇(du)')))dΩvacuum
+        for (name, res, jac, U, V, scale) in (("magnetic", res_mag, jac_mag, Uφ, Vφ, 50.0),
+                                              ("solid", res_mech, jac_mech, Us, Vs, 1e-4),
+                                              ("vacuum", res_vac, jac_vac, Uv, Vv, 1e-4))
+            x = scale .* randn(num_free_dofs(U))
+            op = KernelOperator(res, jac, U, V)
+            @test isempty(op.fallback.rtrians) && isempty(op.fallback.jtrians)
+            c = check(res, jac, U, V, x; op)
+            @test c.res < TOL && c.jac < TOL
+        end
     end
 end

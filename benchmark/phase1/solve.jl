@@ -13,7 +13,7 @@ using Gridap.FESpaces
 using LinearAlgebra, Printf, Serialization
 
 const MESHDIR = joinpath(@__DIR__, "..", "meshes")
-const ADV = normpath(joinpath(@__DIR__, "..", "..", "..", "Adv_Mater_Ultra_Soft_Magnet"))
+const MODELS = normpath(joinpath(@__DIR__, "..", "..", "test", "models"))
 
 function em_model(args)
     if args[1] == "plate"
@@ -33,8 +33,8 @@ function em_solve(model, order, φtop, backend)
     physmodel = ElectroMechModel(IdealDielectric(ε=1.0), NeoHookean3D(λ=10.0, μ=1.0))
     k = (Kinematics(Mechano, Solid), Kinematics(Electro, Solid))
     Ω = Triangulation(model); dΩ = Measure(Ω, 2order)
-    Du = DirichletBC(["fixedup"], [[0.0, 0.0, 0.0]], [Λ -> 1.0])
-    Dφ = DirichletBC(["midsuf", "topsuf"], [0.0, φtop], [Λ -> Λ, Λ -> Λ])
+    Du = BoundaryConditions(BoundaryCondition("fixedup", [0.0, 0.0, 0.0]))
+    Dφ = BoundaryConditions(BoundaryCondition("midsuf", 0.0, Λ -> Λ), BoundaryCondition("topsuf", φtop, Λ -> Λ))
     D = MultiFieldBC([Du, Dφ])
     Vu = TestFESpace(model, ReferenceFE(lagrangian, VectorValue{3,Float64}, order), Du, conformity=:H1)
     Vφ = TestFESpace(model, ReferenceFE(lagrangian, Float64, order), Dφ, conformity=:H1)
@@ -49,7 +49,7 @@ function em_solve(model, order, φtop, backend)
 end
 
 function hmre_solve(r, backend)
-    mesh = r == "orig" ? joinpath(ADV, "data", "models", "Short_magnet.msh") : joinpath(MESHDIR, "hmre_short_r$(parse(Float64, r)).msh")
+    mesh = r == "orig" ? joinpath(MODELS, "Short_magnet.msh") : joinpath(MESHDIR, "hmre_short_r$(parse(Float64, r)).msh")
     model = GmshDiscreteModel(mesh)
     params = [10.0, 12480.64495232286, 1.0, 2.0, 5195.545287237134, 0.2602717127043121, 2.0]
     modelmech = NonlinearMooneyRivlin2D(λ=(params[1] + params[2]) * 1e2, μ1=params[1] * 1e3, μ2=params[2], α1=params[3], α2=params[4]) +
@@ -57,8 +57,8 @@ function hmre_solve(r, backend)
     μ0 = 4π * 1e-7; Banorm = 80.0E-9; αr = 10e-3 / μ0
     reffeu = ReferenceFE(lagrangian, VectorValue{2,Float64}, 1)
     Ωs = Triangulation(model, tags=["Beam"]); dΩs = Measure(Ωs, 2)
-    Du = DirichletBC(["Fixed_Solid", "Fixed_Solid_x"], [[0.0, 0.0], [0.0, 0.0]])
-    V = TestFESpace(Ωs, reffeu, Du, conformity=:H1, dirichlet_masks=[(true, true), (true, false)])
+    Du = BoundaryConditions(BoundaryCondition("Fixed_Solid", [0.0, 0.0]), BoundaryCondition("Fixed_Solid_x", [0.0, 0.0]; mask=(true, false)))
+    V = TestFESpace(Ωs, reffeu, Du, conformity=:H1)
     U = TrialFESpace(V, Du); U⁻ = TrialFESpace(V, Du)
     uh = FEFunction(U, zero_free_values(U)); uh⁻ = FEFunction(U⁻, zero_free_values(U⁻))
     _, ∂Ψs∂F, ∂Ψs∂FF = modelmech()
