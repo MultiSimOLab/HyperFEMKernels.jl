@@ -1,7 +1,6 @@
 # Tests
 
-`julia --project -e 'using Pkg; Pkg.test()'` (or `julia -t auto --project=benchmark dev/runtests.jl`
-in the benchmark environment). Every test compares against Gridap or against explicit sums; the
+`julia --project -e 'using Pkg; Pkg.test()'`. Every test compares against Gridap or against explicit sums; the
 tolerance is 1e-12 relative.
 
 | File | What it checks |
