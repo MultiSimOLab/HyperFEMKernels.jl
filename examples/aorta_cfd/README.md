@@ -15,7 +15,7 @@ The script only depends on Gridap, GridapGmsh and HyperFEMKernels (the helpers `
 julia -t auto --project=benchmark examples/aorta_cfd/aorta_flow.jl mode=compare steps=10
 julia -t auto --project=benchmark examples/aorta_cfd/aorta_flow.jl mode=kernel      # 2 cycles, 400 steps
 julia -t auto --project=benchmark examples/aorta_cfd/aorta_flow.jl mode=gridap      # 2 cycles, 400 steps
-julia -t auto --project=benchmark dev/prof_cfd.jl                                   # breakdown per group
+julia -t auto --project=benchmark benchmark/prof_cfd.jl                                   # breakdown per group
 ```
 
 Mesh: `aorta_fluido_h1p5_3p0.msh` (coarse, 33 643 tetrahedra, 99 141 free DOFs). The production mesh of
