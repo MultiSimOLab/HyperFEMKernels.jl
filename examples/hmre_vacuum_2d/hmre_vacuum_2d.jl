@@ -9,9 +9,10 @@
 # models, boundary conditions and stepping. Changes: no DrWatson (mesh from test/models, output to
 # results/), the setup wrapped in a function so that it can be built for each backend, and the drivers
 # built with `backend` (HyperFEM branch kernel-backend). The Dirichlet conditions are written through
-# BoundaryConditions, and the solid–vacuum coupling prescribes the interface field itself,
-# BoundaryCondition("Interface", Parametric(uhair_int_)) (HyperFEM branch fix-legacy-coupling, which also
-# fixed the regression of the former DirichletCoupling: docs/regresion_DirichletCoupling_HyperFEM.pdf).
+# BoundaryConditions, and the solid–vacuum coupling prescribes the state of the solid on the interface,
+# BoundaryCondition("Interface", Coupling(uhair_int_)), a function of the stage parameter of the solver
+# (HyperFEM PR #249 fixed the regression of the former DirichletCoupling, see
+# docs/regresion_DirichletCoupling_HyperFEM.pdf; the Coupling prescription comes with the next PR).
 #
 # Usage (from the repository root, benchmark environment):
 #   julia -t auto --project=benchmark examples/hmre_vacuum_2d/hmre_vacuum_2d.jl [mode=compare|gridap|kernel]
@@ -92,7 +93,7 @@ function build(backend::Symbol; verbose=false)
   uhsolid_int_(Λ) = Interpolable(interpolate_everywhere!(uhsolid(Λ), get_free_dof_values(uhsolid_int), uhsolid_int.dirichlet_values, Usolid_int))
   uhair_int_(Λ) = interpolate_everywhere!(uhsolid_int_(Λ), get_free_dof_values(uhair_int), uhair_int.dirichlet_values, Uair_int)
   Du_vacuum = BoundaryConditions(BoundaryCondition("Fixed_Air", [0.0, 0.0]), BoundaryCondition("Fixed_Air_x", [0.0, 0.0]; mask=(true, false)),
-                                 BoundaryCondition("Interface", Parametric(uhair_int_)))       # the interface field itself
+                                 BoundaryCondition("Interface", Coupling(uhair_int_)))         # the state of the solid, a function of the stage parameter
   Vu_vacuum = TestFESpace(Ωvacuum, reffeu_vacuum, Du_vacuum, conformity=:H1)
   Uu_vacuum⁺ = TrialFESpace(Vu_vacuum, Du_vacuum); Uu_vacuum⁻ = TrialFESpace(Vu_vacuum, Du_vacuum)
   uh_vacuum⁺ = FEFunction(Uu_vacuum⁺, zero_free_values(Uu_vacuum⁺)); uh_vacuum⁻ = FEFunction(Uu_vacuum⁻, zero_free_values(Uu_vacuum⁻))

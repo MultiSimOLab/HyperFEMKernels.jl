@@ -8,7 +8,7 @@ on the mesh `test/models/Short_magnet.msh` (8 637 nodes, 25 375 DOFs in all):
 2. mechanics of the solid beam (`NonlinearMooneyRivlin2D + TransverseIsotropy2D`), loaded on the interface by
    the Maxwell traction of the vacuum (an FE function on the interface, projected with a mass matrix);
 3. fictitious mechanics of the vacuum (`HessianRegularization(NonlinearMooneyRivlin2D_CV)`), driven by the solid
-   displacement interpolated on the interface (`BoundaryCondition("Interface", Parametric(Λ -> field))`).
+   displacement interpolated on the interface (`BoundaryCondition("Interface", Coupling(τ -> field))`, the state of the solid as a function of the stage parameter).
 
 Same weak forms, models, boundary conditions and stepping as the original; no DrWatson (mesh from `test/models`,
 output to `results/`), the setup is a function so that it runs for each backend, and the drivers take
