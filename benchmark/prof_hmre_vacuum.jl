@@ -1,5 +1,5 @@
 # Where the time goes in the hMRE + vacuum example, and what allocates in its kernels.
-#   julia -t auto --project=benchmark dev/prof_hmre_vacuum.jl
+#   julia -t auto --project=benchmark benchmark/prof_hmre_vacuum.jl
 using Printf
 const HV_ARGS = copy(ARGS)
 empty!(ARGS); append!(ARGS, ["mode=kernel", "nsteps=1", "nsubsteps=1"])

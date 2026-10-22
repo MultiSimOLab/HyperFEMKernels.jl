@@ -1,6 +1,6 @@
 # Breakdown of the kernel assembly of the aorta CFD example per compiled group: auxiliary data
 # (Gridap evaluation into dense arrays) and element kernels, 1 thread and N threads.
-#   julia -t auto --project=benchmark dev/prof_cfd.jl [mesh=...]
+#   julia -t auto --project=benchmark benchmark/prof_cfd.jl [mesh=...]
 using Printf
 const HK_ARGS = copy(ARGS)
 empty!(ARGS); append!(ARGS, ["mode=kernel", "steps=3"]); append!(ARGS, HK_ARGS)

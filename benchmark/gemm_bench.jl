@@ -2,7 +2,7 @@
 # (A = G buffer, 4D; B = test weights). Current `gemm_add!` vs register-tiled variants with
 # vectorised remainders, and OpenBLAS on the same shapes.
 #
-#   julia -t 1 --project=benchmark dev/gemm_bench.jl
+#   julia -t 1 --project=benchmark benchmark/gemm_bench.jl
 using HyperFEMKernels, LinearAlgebra, Printf, Random
 const HK = HyperFEMKernels
 const SVector = HK.StaticArrays.SVector

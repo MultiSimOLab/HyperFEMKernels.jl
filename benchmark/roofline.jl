@@ -2,7 +2,7 @@
 # peak) vs measured kernels (GFLOP/s of the element matrix products, GB/s of scatter, matrix-free
 # apply and SpMV), plus OpenBLAS on the same small products as a "compiled library" reference.
 #
-#   julia -t auto --project=benchmark dev/roofline.jl
+#   julia -t auto --project=benchmark benchmark/roofline.jl
 using HyperFEMKernels, HyperFEM, Gridap, GridapGmsh, Gridap.FESpaces, Gridap.Algebra
 using LinearAlgebra, SparseArrays, Random, Printf
 const HK = HyperFEMKernels
