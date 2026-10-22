@@ -19,8 +19,7 @@ using Gridap.Algebra: allocate_residual, allocate_jacobian, residual!, jacobian!
 using GridapSolvers, GridapSolvers.NonlinearSolvers
 using LinearAlgebra, SparseArrays, Printf, Dates
 
-const HYPERFEM_DIR = normpath(joinpath(@__DIR__, "..", "..", "..", "HyperFEM.jl"))
-const MESH = joinpath(HYPERFEM_DIR, "test", "models", "test_static_EM.msh")
+const MESH = normpath(joinpath(@__DIR__, "..", "..", "test", "models", "test_static_EM.msh"))
 
 function build_model(args)
     if isempty(args) || args[1] == "msh"
@@ -49,8 +48,8 @@ function setup(model, order; φtop = 0.1)
     k = (Kinematics(Mechano, Solid), Kinematics(Electro, Solid))
     Ω = Triangulation(model)
     dΩ = Measure(Ω, 2order)
-    Du = DirichletBC(["fixedup"], [[0.0, 0.0, 0.0]], [Λ -> 1.0])
-    Dφ = DirichletBC(["midsuf", "topsuf"], [0.0, φtop], [Λ -> Λ, Λ -> Λ])
+    Du = BoundaryConditions(BoundaryCondition("fixedup", [0.0, 0.0, 0.0]))
+    Dφ = BoundaryConditions(BoundaryCondition("midsuf", 0.0, Λ -> Λ), BoundaryCondition("topsuf", φtop, Λ -> Λ))
     D = MultiFieldBC([Du, Dφ])
     reffeu = ReferenceFE(lagrangian, VectorValue{3,Float64}, order)
     reffeφ = ReferenceFE(lagrangian, Float64, order)

@@ -40,12 +40,12 @@ end
 
 # 3. EM 3D monolithic (HyperFEM README), test_static_EM.msh
 let
-    model = GmshDiscreteModel(joinpath(@__DIR__, "..", "..", "HyperFEM.jl", "test", "models", "test_static_EM.msh"))
+    model = GmshDiscreteModel(joinpath(@__DIR__, "..", "test", "models", "test_static_EM.msh"))
     physmodel = ElectroMechModel(IdealDielectric(ε=1.0), NeoHookean3D(λ=10.0, μ=1.0))
     k = (Kinematics(Mechano, Solid), Kinematics(Electro, Solid))
     Ω = Triangulation(model); dΩ = Measure(Ω, 2)
-    Du = DirichletBC(["fixedup"], [[0.0, 0.0, 0.0]], [Λ -> 1.0])
-    Dφ = DirichletBC(["midsuf", "topsuf"], [0.0, 0.1], [Λ -> Λ, Λ -> Λ])
+    Du = BoundaryConditions(BoundaryCondition("fixedup", [0.0, 0.0, 0.0]))
+    Dφ = BoundaryConditions(BoundaryCondition("midsuf", 0.0, Λ -> Λ), BoundaryCondition("topsuf", 0.1, Λ -> Λ))
     Vu = TestFESpace(model, ReferenceFE(lagrangian, VectorValue{3,Float64}, 1), Du, conformity=:H1)
     Vφ = TestFESpace(model, ReferenceFE(lagrangian, Float64, 1), Dφ, conformity=:H1)
     V = MultiFieldFESpace([Vu, Vφ])
@@ -59,16 +59,15 @@ end
 
 # 4. hMRE 2D (Adv_Mater_Ultra_Soft_Magnet hMRE_2D.jl): Dirichlet masks, auxiliary fields, Λ * ∫
 let
-    adv = joinpath(@__DIR__, "..", "..", "Adv_Mater_Ultra_Soft_Magnet")
-    model = GmshDiscreteModel(joinpath(adv, "data", "models", "Short_magnet.msh"))
+    model = GmshDiscreteModel(joinpath(@__DIR__, "..", "test", "models", "Short_magnet.msh"))
     params = [10.0, 12480.64495232286, 1.0, 2.0, 5195.545287237134, 0.2602717127043121, 2.0]
     modelmech = NonlinearMooneyRivlin2D(λ=(params[1] + params[2]) * 1e2, μ1=params[1] * 1e3, μ2=params[2], α1=params[3], α2=params[4]) +
                 TransverseIsotropy2D(μ=params[5], α1=params[6], α2=params[7])
     μ0 = 4π * 1e-7; Banorm = 80.0E-9; αr = 10e-3 / μ0
     reffeu = ReferenceFE(lagrangian, VectorValue{2,Float64}, 1)
     Ωs = Triangulation(model, tags=["Beam"]); dΩs = Measure(Ωs, 2)
-    Du = DirichletBC(["Fixed_Solid", "Fixed_Solid_x"], [[0.0, 0.0], [0.0, 0.0]])
-    V = TestFESpace(Ωs, reffeu, Du, conformity=:H1, dirichlet_masks=[(true, true), (true, false)])
+    Du = BoundaryConditions(BoundaryCondition("Fixed_Solid", [0.0, 0.0]), BoundaryCondition("Fixed_Solid_x", [0.0, 0.0]; mask=(true, false)))
+    V = TestFESpace(Ωs, reffeu, Du, conformity=:H1)
     U = TrialFESpace(V, Du); U⁻ = TrialFESpace(V, Du)
     uh⁻ = FEFunction(U⁻, 1e-4 .* randn(num_free_dofs(U⁻)))
     _, ∂Ψs∂F, ∂Ψs∂FF = modelmech()

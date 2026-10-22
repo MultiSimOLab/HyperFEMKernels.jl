@@ -2,16 +2,15 @@ using HyperFEMKernels, HyperFEM, Gridap, GridapGmsh
 using Gridap.FESpaces, Gridap.Algebra
 using Printf, Random, Profile
 Random.seed!(1)
-adv = joinpath(@__DIR__, "..", "..", "Adv_Mater_Ultra_Soft_Magnet")
-model = GmshDiscreteModel(joinpath(adv, "data", "models", "Short_magnet.msh"))
+model = GmshDiscreteModel(joinpath(@__DIR__, "..", "test", "models", "Short_magnet.msh"))
 params = [10.0, 12480.64495232286, 1.0, 2.0, 5195.545287237134, 0.2602717127043121, 2.0]
 modelmech = NonlinearMooneyRivlin2D(λ=(params[1] + params[2]) * 1e2, μ1=params[1] * 1e3, μ2=params[2], α1=params[3], α2=params[4]) +
             TransverseIsotropy2D(μ=params[5], α1=params[6], α2=params[7])
 μ0 = 4π * 1e-7; Banorm = 80.0E-9; αr = 10e-3 / μ0
 reffeu = ReferenceFE(lagrangian, VectorValue{2,Float64}, 1)
 Ωs = Triangulation(model, tags=["Beam"]); dΩs = Measure(Ωs, 2)
-Du = DirichletBC(["Fixed_Solid", "Fixed_Solid_x"], [[0.0, 0.0], [0.0, 0.0]])
-V = TestFESpace(Ωs, reffeu, Du, conformity=:H1, dirichlet_masks=[(true, true), (true, false)])
+Du = BoundaryConditions(BoundaryCondition("Fixed_Solid", [0.0, 0.0]), BoundaryCondition("Fixed_Solid_x", [0.0, 0.0]; mask=(true, false)))
+V = TestFESpace(Ωs, reffeu, Du, conformity=:H1)
 U = TrialFESpace(V, Du); U⁻ = TrialFESpace(V, Du)
 uh⁻ = FEFunction(U⁻, 1e-4 .* randn(num_free_dofs(U⁻)))
 _, ∂Ψs∂F, ∂Ψs∂FF = modelmech()
