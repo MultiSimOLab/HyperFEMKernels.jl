@@ -63,7 +63,7 @@ HyperFEMKernels is not yet in the General registry. From the Julia REPL:
 pkg> add https://github.com/MultiSimOLab/HyperFEMKernels.jl
 ```
 
-It requires Gridap 0.19.9 (the same version as HyperFEM).
+It requires Julia ≥ 1.12 and Gridap 0.19.9 (the same version as HyperFEM).
 
 ## Usage
 
