@@ -162,7 +162,10 @@ function compile_groups(forms::Vector{Form}, U, locs, D::Int, colors, previous=A
     for form in forms
         fgroups = Any[]
         try
-            cmap = integration_cells(form.trian, strian)
+            # the cell map and the colouring of a triangulation only depend on the triangulation: reuse those of
+            # a previous operator (`update`) instead of recomputing them (both are O(cells))
+            prev = findfirst(g -> g.trian === form.trian, previous)
+            cmap = prev === nothing ? integration_cells(form.trian, strian) : previous[prev].cellmap
             bykey = Dict{UInt,Vector{Term}}()
             order = UInt[]
             for t in form.terms
@@ -171,7 +174,7 @@ function compile_groups(forms::Vector{Form}, U, locs, D::Int, colors, previous=A
                 push!(bykey[k], t)
             end
             if num_cell_dims(form.trian) == D
-                gcolors = group_colors(colors, cmap, num_cells(strian))
+                gcolors = prev === nothing ? group_colors(colors, cmap, num_cells(strian)) : previous[prev].colors
                 for k in order
                     push!(fgroups, Group(bykey[k], form.trian, Us, locs, D, cmap, gcolors, previous; linear_maps))
                 end
