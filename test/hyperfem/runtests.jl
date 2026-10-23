@@ -139,6 +139,83 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
         Algebra.solve!(xg, nls, gop(resΓ, jac, Uu, Vu)); Algebra.solve!(xk, nls, opΓ)
         @test reldiff(xk, xg) < 1e-10
     end
+    @testset "visco-hyperelastic internal variables updated by the engine (CellState and KernelState)" begin
+        # Same plate as above. The states of the GeneralizedMaxwell branches (Cv per branch) and the stress of
+        # the previous step are updated with update_states! from the same updaters HyperFEM uses, and compared
+        # with Gridap's update_state!; then two time steps with kernel operator + kernel states against Gridap.
+        width, thick, xdiv, order = 0.2, 0.001, 3, 2
+        geometry = CartesianDiscreteModel((-0.5width, 0.5width, -0.5width, 0.5width, 0.0, thick), (xdiv, xdiv, 1))
+        model = GeneralizedMaxwell(NeoHookean3D(μ=13446.1, λ=0.0) + VolumetricEnergy(λ=2.5e6),
+                                   ViscousPolyconvex(μ=11053.7, τ=151.68), ViscousPolyconvex(μ=30480.1, τ=7.0731))
+        F, H, J = get_Kinematics(Kinematics(Mechano, Solid))
+        Δt = 0.2 * thick / (order * 0.1)
+        Ω = Triangulation(geometry); dΩ = Measure(Ω, 2order)
+        reffe = ReferenceFE(lagrangian, VectorValue{3,Float64}, order)
+        Vu = TestFESpace(geometry, reffe, conformity=:H1)
+        Uu = TrialFESpace(Vu); Uu⁻ = TrialFESpace(Vu); Uυ = TrialFESpace(Vu)
+        uh⁺ = FEFunction(Uu, 1e-5 .* randn(num_free_dofs(Uu)))
+        uh⁻ = FEFunction(Uu⁻, 1e-5 .* randn(num_free_dofs(Uu)))
+        υh = FEFunction(Uυ, 1e-3 .* randn(num_free_dofs(Uυ)))
+        Fh = F ∘ ∇(uh⁺)'; Fh⁻ = F ∘ ∇(uh⁻)'
+        update_time_step!(model, Δt)
+        Ψ, ∂Ψ∂F, ∂∂Ψ∂FF = model()
+        T33 = TensorValue{3,3,Float64,9}
+        P_updater(P, F, Fn, A...) = (true, ∂Ψ∂F(F, Fn, A...))
+        branch_updater(b) = (A, F, Fn) -> (true, HyperFEM.return_mapping(b, F, Fn, A))   # what update_state!(b, A, F, Fn) does
+        branches = model.branches.branches                                                # NVisco holds the tuple
+        dense(s::CellState) = reduce(hcat, s.values); dense(s::KernelState) = s.values
+        same(a, b) = maximum(norm, dense(a) - dense(b)) <= 1e-12 * max(1.0, maximum(norm, dense(b)))
+        ρ₀ = 960.0
+        function forms(Ah, Ph⁻)
+            res(u, v) = begin
+                a_mid = 2 / Δt^2 * (u - uh⁻) - 2 / Δt * υh
+                P_mid = 1 / 2 * (∂Ψ∂F ∘ (F ∘ ∇(u)', Fh⁻, Ah...) + Ph⁻)
+                ∫(ρ₀ * a_mid ⋅ v + ∇(v)' ⊙ P_mid)dΩ
+            end
+            jac(u, du, v) = begin
+                Da = 2 / Δt^2 * du
+                DP = 1 / 2 * (∂∂Ψ∂FF ∘ (F ∘ ∇(u)', Fh⁻, Ah...)) ⊙ ∇(du)'
+                ∫(ρ₀ * Da ⋅ v + ∇(v)' ⊙ DP)dΩ
+            end
+            res, jac
+        end
+        for storage in (CellState, KernelState)
+            x = get_cell_points(dΩ)
+            Ah = Tuple(storage(one(T33), x) for _ in branches); Ph⁻ = storage(zero(T33), x)
+            Ahg = CellState(model, dΩ); Pg = CellState(zero(T33), dΩ)
+            # one update at the random state
+            update_state!(P_updater, Pg, Fh, Fh⁻, Ahg...); update_state!(model, Ahg, Fh, Fh⁻)
+            suP = update_states!(P_updater, Ph⁻, Fh, Fh⁻, Ah...)
+            sus = [update_states!(branch_updater(b), A, Fh, Fh⁻) for (b, A) in zip(branches, Ah)]
+            @test same(Ph⁻, Pg) && all(same(A, Ag) for (A, Ag) in zip(Ah, Ahg))
+            @test isempty(suP.aux) && length(suP.fes) == 2 && HK.nwritten(suP) == 3 && length(suP.states) == 3
+            @test all(su -> isempty(su.aux) && length(su.fes) == 2 && HK.nwritten(su) == 1, sus)
+            # ∂Ψ∂F and the return mapping of ViscousPolyconvex do not allocate (∂∂Ψ∂FF does, see above): the update must not
+            @test allocations(suP) == 0 && all(su -> allocations(su) == 0, sus)
+            # the weak form with the updated states, both storages, against Gridap
+            resk, jack = forms(Ah, Ph⁻); resg, jacg = forms(Ahg, Pg)
+            x0 = 1e-5 .* randn(num_free_dofs(Uu))
+            opk = KernelOperator(resk, jack, Uu, Vu)
+            @test reldiff(Algebra.residual(opk, x0), Algebra.residual(gop(resg, jacg, Uu, Vu), x0)) < TOL
+            # two time steps: kernel operator + kernel states vs Gridap operator + Gridap states
+            nls = NewtonSolver(LUSolver(); maxiter=20, atol=1e-10, rtol=1e-10, verbose=false)
+            xg = copy(x0); xk = copy(x0)
+            for step in 1:2
+                Algebra.solve!(xg, nls, gop(resg, jacg, Uu, Vu))
+                Algebra.solve!(xk, nls, HK.update(opk, resk, jack))
+                Fg = F ∘ ∇(FEFunction(Uu, xg))'; Fkh = F ∘ ∇(FEFunction(Uu, xk))'
+                update_state!(P_updater, Pg, Fg, Fh⁻, Ahg...); update_state!(model, Ahg, Fg, Fh⁻)
+                suP2 = update_states!(P_updater, Ph⁻, Fkh, Fh⁻, Ah...)
+                @test suP2.expr == suP.expr                       # same generated function every step
+                for (b, A) in zip(branches, Ah)
+                    update_states!(branch_updater(b), A, Fkh, Fh⁻)
+                end
+                @test reldiff(xk, xg) < 1e-10
+                @test maximum(norm, dense(Ph⁻) - dense(Pg)) <= 1e-9 * maximum(norm, dense(Pg))
+                @test all(maximum(norm, dense(A) - dense(Ag)) <= 1e-9 * maximum(norm, dense(Ag)) for (A, Ag) in zip(Ah, Ahg))
+            end
+        end
+    end
     @testset "hMRE + vacuum 2D (staggered problems of examples/hmre_vacuum_2d), Short_magnet.msh" begin
         # The three weak forms of the example at random states, without HyperFEM's drivers: spaces on a
         # sub-triangulation (magnetic potential on solid + vacuum), integrals on its parts with different

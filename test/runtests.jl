@@ -24,5 +24,6 @@ include("common.jl")
     @testset "boundary"         begin include("test_boundary.jl") end
     @testset "CFD (Oseen step)" begin include("test_cfd.jl") end
     @testset "subdomains, interface" begin include("test_subdomains.jl") end
+    @testset "states"           begin include("test_states.jl") end
     @testset "Gridap equality"  begin include("test_gridap_equality.jl") end
 end
