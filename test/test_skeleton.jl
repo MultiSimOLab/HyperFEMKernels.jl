@@ -259,10 +259,54 @@ end
     @test c2.res < TOL && c2.jac < TOL
 end
 
-@testset "errors: matrix-free with skeleton integrals; a trace without side" begin
+@testset "matrix-free Jacobian with skeleton groups: facets apply the increments of both cells" begin
+    # interior penalty (scalar, linear maps), quads and triangles
+    for order in (1, 2), simplex in (false, true)
+        s = ip_poisson(; order, simplex, n=(6, 5))
+        op = KernelOperator(s.res, s.jac, s.p.U, s.p.V)
+        x = randx(s.p.U); dx = randn(num_free_dofs(s.p.U))
+        A = Algebra.jacobian(op, x)
+        mf = MatrixFreeJacobian(op); prepare!(mf, x)
+        @test reldiff(mf * dx, A * dx) < 1e-11
+        # new state: prepare! again (the tangent of the volume part changes, the skeleton part is linear)
+        x2 = randx(s.p.U); prepare!(mf, x2)
+        @test reldiff(mf * dx, Algebra.jacobian(op, x2) * dx) < 1e-11
+    end
+    # weighted jump of ∇u (dual numbers, non-symmetric tangent, vector field), both thread counts
+    w = weighted_jump_problem(; simplex=true)
+    op = KernelOperator(w.res, w.jac, w.U, w.V)
+    x = randx(w.U; scale=0.1); dx = randn(num_free_dofs(w.U))
+    A = Algebra.jacobian(op, x)
+    for nthreads in (1, Threads.nthreads())
+        mf = MatrixFreeJacobian(KernelOperator(w.res, w.jac, w.U, w.V; nthreads)); prepare!(mf, x)
+        @test reldiff(mf * dx, A * dx) < 1e-11
+    end
+    # 3D vector field with mean, jump(v ⊗ n) and mean(∇u) on tetrahedra; multi-field
+    model = simplexify(CartesianDiscreteModel((0, 1, 0, 1, 0, 1), (2, 2, 2)))
+    Ω = Triangulation(model); dΩ = Measure(Ω, 2)
+    V = TestFESpace(model, ReferenceFE(lagrangian, VectorValue{3,Float64}, 1), dirichlet_tags=[1, 3, 5, 7])
+    U = TrialFESpace(V, x -> VectorValue(0.01, 0.0, 0.0))
+    Λ = SkeletonTriangulation(model); dΛ = Measure(Λ, 2)
+    n = get_normal_vector(Λ)
+    res3(u, v) = ∫(∇(v)' ⊙ (P_svk ∘ (Fk ∘ (∇(u)'))))dΩ + ∫(mean(v) ⋅ mean(u) + 0.3 * (jump(v ⊗ n) ⊙ jump(u ⊗ n)) + (mean(∇(v)) ⊙ mean(∇(u))))dΛ
+    jac3(u, du, v) = ∫(∇(v)' ⊙ (dP_svk ∘ (Fk ∘ (∇(u)'), ∇(du)')))dΩ + ∫(mean(v) ⋅ mean(du) + 0.3 * (jump(v ⊗ n) ⊙ jump(du ⊗ n)) + (mean(∇(v)) ⊙ mean(∇(du))))dΛ
+    op3 = KernelOperator(res3, jac3, U, V)
+    x = randx(U); dx = randn(num_free_dofs(U))
+    mf = MatrixFreeJacobian(op3); prepare!(mf, x)
+    @test reldiff(mf * dx, Algebra.jacobian(op3, x) * dx) < 1e-11
+    p = coupled_3d(; n=(2, 2, 2))
+    Λc = SkeletonTriangulation(p.model); dΛc = Measure(Λc, 2)
+    resc((u, φ), (v, vφ)) = p.res((u, φ), (v, vφ)) + ∫(jump(vφ) * jump(φ) + 0.1 * (mean(v) ⋅ mean(u)) * mean(φ))dΛc
+    jacc((u, φ), (du, dφ), (v, vφ)) = p.jac((u, φ), (du, dφ), (v, vφ)) +
+        ∫(jump(vφ) * jump(dφ) + 0.1 * (mean(v) ⋅ mean(du)) * mean(φ) + 0.1 * (mean(v) ⋅ mean(u)) * mean(dφ))dΛc
+    opc = KernelOperator(resc, jacc, p.U, p.V)
+    x = randx(p.U); dx = randn(num_free_dofs(p.U))
+    mf = MatrixFreeJacobian(opc); prepare!(mf, x)
+    @test reldiff(mf * dx, Algebra.jacobian(opc, x) * dx) < 1e-11
+end
+
+@testset "errors: a trace without side" begin
     s = ip_poisson()
-    op = KernelOperator(s.res, s.jac, s.p.U, s.p.V)
-    @test_throws ErrorException MatrixFreeJacobian(op)
     # a function used on the skeleton without plus/minus: that integral goes to the fallback with a clear reason
     # (Gridap itself rejects it when it assembles with real bases)
     bad(u, v) = ∫(∇(v) ⋅ ∇(u))s.p.dΩ + ∫(v * u)s.dΛ

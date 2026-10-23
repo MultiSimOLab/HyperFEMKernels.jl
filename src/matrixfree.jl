@@ -5,6 +5,8 @@
 # then applies the Jacobian without forming it: per cell, interpolate dx to the points (sum
 # factorisation on n-cubes, dense weights otherwise), multiply by T, contract back. Dirichlet dofs
 # carry zero increments and their rows are not written, so the operator acts on free dofs only.
+# Skeleton groups do the same per facet with the increments of both cells (dense weights, the
+# Jt⁻¹ of each side; the T and dS arrays are shared by the two `GroupData` of a class).
 
 struct GroupData{D}
     T::Array{Float64,3}          # nsv*nsu × np × ncells (column-major: T[sv + (su-1)*nsv, q, cell])
@@ -29,23 +31,31 @@ mutable struct MatrixFreeJacobian{OP,TP,GD}
 end
 
 function MatrixFreeJacobian(op::KernelOperator)
-    any(g -> g isa SkeletonGroup, op.jgroups) &&
-        error("HyperFEMKernels: MatrixFreeJacobian with skeleton integrals is not supported yet")
     tps = map(op.jgroups) do g
-        map(t -> TPTable(t, g.xq), g.tables)
+        g isa SkeletonGroup ? map(_ -> nothing, g.tables) : map(t -> TPTable(t, g.xq), g.tables)
     end
     data = map(op.jgroups) do g
-        np, nc = g.geo.np, length(g.cellmap)
+        np = g.geo.np
         D = group_dim(g)
         nsv, nsu = nslots(g)
-        GroupData{D}(zeros(nsv * nsu, np, nc), zeros(D * D, np, nc), zeros(np, nc))
+        if g isa SkeletonGroup
+            # one tangent and measure per facet of the class; Jt⁻¹ of the plus and of the minus cell
+            n = length(g.facets)
+            T, dV = zeros(nsv * nsu, np, n), zeros(np, n)
+            (GroupData{D}(T, zeros(D * D, np, n), dV), GroupData{D}(T, zeros(D * D, np, n), dV))
+        else
+            nc = length(g.cellmap)
+            GroupData{D}(zeros(nsv * nsu, np, nc), zeros(D * D, np, nc), zeros(np, nc))
+        end
     end
     Afb = isempty(op.fallback.jtrians) ? nothing : fallback_pattern(op.fallback, op.U, op.V, op.jac)
     MatrixFreeJacobian(op, Tuple(tps), Tuple(data), op.nthreads, Afb)
 end
 
 nslots(::Group{NSV,NSU}) where {NSV,NSU} = (NSV, NSU)
+nslots(::SkeletonGroup{NSV,NSU}) where {NSV,NSU} = (NSV, NSU)
 group_dim(::Group{NSV,NSU,PF,TT,AUX,SV,SU,D}) where {NSV,NSU,PF,TT,AUX,SV,SU,D} = D
+group_dim(::SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D}) where {NSV,NSU,PF,TT,AUX,SV,SU,D} = D
 
 Base.size(mf::MatrixFreeJacobian) = size(mf.op.A0)
 Base.size(mf::MatrixFreeJacobian, i::Int) = size(mf.op.A0, i)
@@ -70,6 +80,43 @@ function prepare!(mf::MatrixFreeJacobian, x::AbstractVector)
         fallback_jacobian!(mf.Afb, op, x)
     end
     mf
+end
+
+function prepare_cells!(gds::Tuple{GroupData{D},GroupData{D}}, g::SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D,NF2,LF}, op, x, dvals, auxd,
+                        lfacets) where {D,NSV,NSU,PF,TT,AUX,SV,SU,NF2,LF}
+    gp, gm = gds
+    tables, locs, pf = g.tables, g.locs, g.pf
+    ndl = op.ndl
+    xl = zeros(2ndl)
+    Wb = map(t -> zeros(t.nn, D + 1), tables)
+    zsv = zero(SVector{NSV,Float64}); zsu = zero(SVector{NSU,Float64})
+    for lf in lfacets
+        f = g.facets[lf]
+        gather_cell!(xl, op.fields, x, dvals, g.skel.cells[1, f])
+        gather_cell!(xl, op.fields, x, dvals, g.skel.cells[2, f], ndl)
+        for q in 1:g.geo.np
+            dS, iJp = point_geometry(g.geo, q, lf)
+            _, iJm = point_geometry(g.geom, q, lf)
+            iJs = side_tuple(iJp, iJm, Val(NF2))
+            map((t, W, iJ) -> point_weights!(W, t, q, iJ), tables, Wb, iJs)
+            FV = map((t, l, W) -> field_point_values(t, xl, l, W), tables, locs, Wb)
+            Aq = map(a -> @inbounds(a[q, lf]), auxd)
+            T = if LF === Nothing
+                ForwardDiff.jacobian(r -> ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsv), zsu)
+            else
+                SMatrix{NSV,NSU,Float64,NSV * NSU}(apply_maps(g.lin, g.lin.state(g.lin.ops, FV, Aq), Val(NSV * NSU)))
+            end
+            @inbounds for i in 1:NSV*NSU
+                gp.T[i, q, lf] = T[i]
+            end
+            @inbounds for i in 1:D*D
+                gp.iJt[i, q, lf] = iJp[i]
+                gm.iJt[i, q, lf] = iJm[i]
+            end
+            gp.dV[q, lf] = dS
+        end
+    end
+    nothing
 end
 
 function prepare_cells!(gd::GroupData{D}, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}, op, x, dvals, auxd, cells) where {D,NSV,NSU,PF,TT,AUX,SV,SU,NF,LF,JF}
@@ -126,6 +173,75 @@ function apply_buffers(g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D}, tps, ndl::Int) where
      uc=map(t -> zeros(t.nn), g.tables), rc=map(t -> zeros(t.nn), g.tables),
      pts=map(t -> zeros(np, D + 1), g.tables), coef=map(t -> zeros(np, D + 1), g.tables),
      tmp=map(tp -> tp === nothing ? zeros(0, 0) : tp_scratch(tp), tps))
+end
+
+"Scratch buffers for the apply of one skeleton class (dense weights, element vector of both cells)."
+function apply_buffers(g::SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D}, tps, ndl::Int) where {NSV,NSU,PF,TT,AUX,SV,SU,D}
+    np = g.geo.np
+    (xl=zeros(2ndl), re=zeros(2ndl),
+     su=zeros(NSU, np), sv=zeros(NSV, np),
+     Wb=map(t -> zeros(t.nn, D + 1), g.tables),
+     uc=map(t -> zeros(t.nn), g.tables), rc=map(t -> zeros(t.nn), g.tables),
+     pts=map(t -> zeros(np, D + 1), g.tables), coef=map(t -> zeros(np, D + 1), g.tables),
+     tmp=map(_ -> zeros(0, 0), g.tables))
+end
+
+"Gather the increment of `cell` (zero at Dirichlet dofs) from position `shift` of `xl`."
+@inline function gather_increment!(xl, fields::Vector{FieldLayout}, dx, cell::Integer, shift::Int=0)
+    for fl in fields
+        @inbounds for j in 1:fl.nd
+            id = fl.trial_ids[j, cell]
+            xl[shift+fl.loc+j] = id > 0 ? dx[fl.trial_off+id] : 0.0
+        end
+    end
+    xl
+end
+
+"Add the free test rows of `re` (from position `shift`) of `cell` to `y`."
+@inline function scatter_increment!(y, fields::Vector{FieldLayout}, re, cell::Integer, shift::Int=0)
+    for fl in fields
+        @inbounds for j in 1:fl.nd
+            id = fl.test_ids[j, cell]
+            id > 0 && (y[fl.test_off+id] += re[shift+fl.loc+j])
+        end
+    end
+    y
+end
+
+function apply_cells!(y, gds::Tuple{GroupData{D},GroupData{D}}, tps, g::SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D,NF2}, op, dx,
+                      lfacets) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF2}
+    b = apply_buffers(g, tps, op.ndl)
+    tables, locs = g.tables, g.locs
+    np = g.geo.np
+    ndl = op.ndl
+    gp = gds[1]
+    gdsides = side_tuple(gds[1], gds[2], Val(NF2))
+    for lf in lfacets
+        f = g.facets[lf]
+        cp, cm = g.skel.cells[1, f], g.skel.cells[2, f]
+        gather_increment!(b.xl, op.fields, dx, cp)
+        gather_increment!(b.xl, op.fields, dx, cm, ndl)
+        fill!(b.su, 0.0)
+        map(tables, locs, g.smu, tps, b.uc, b.pts, b.Wb, b.tmp, gdsides) do t, loc, sp, tp, uc, pts, W, tmp, gd
+            interpolate_slots!(b.su, t, loc, sp, tp, b.xl, uc, pts, W, tmp, gd, lf, np)
+        end
+        @inbounds for q in 1:np
+            for i in 1:NSV
+                s = 0.0
+                for j in 1:NSU
+                    s += gp.T[i+(j-1)*NSV, q, lf] * b.su[j, q]
+                end
+                b.sv[i, q] = s * gp.dV[q, lf]
+            end
+        end
+        fill!(b.re, 0.0)
+        map(tables, locs, g.smv, tps, b.rc, b.coef, b.Wb, b.tmp, gdsides) do t, loc, sp, tp, rc, coef, W, tmp, gd
+            contract_slots!(b.re, t, loc, sp, tp, b.sv, rc, coef, W, tmp, gd, lf, np)
+        end
+        scatter_increment!(y, op.fields, b.re, cp)
+        scatter_increment!(y, op.fields, b.re, cm, ndl)
+    end
+    nothing
 end
 
 function apply_cells!(y, gd::GroupData{D}, tps, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D}, op, dx, cells) where {NSV,NSU,PF,TT,AUX,SV,SU,D}
