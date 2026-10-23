@@ -23,3 +23,4 @@ examples/*/results/
 
 # Local scratch scripts (debugging, watcher launchers): not versioned
 dev/
+benchmark/simulations/env_official/
