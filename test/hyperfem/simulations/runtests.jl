@@ -16,7 +16,7 @@ end
         @info "HyperFEM without the kernel backend (branch kernel-backend): simulation tests skipped"
     else
         for f in ("ViscoElastic", "StaticMechanicalDirichlet", "StaticMechanicalNeumann", "StaggeredElectroMechanical",
-                  "StaggeredViscoElectric", "Stokes", "MeshMovement")
+                  "StaggeredViscoElectric", "Stokes", "MeshMovement", "TurekNavierStokes", "HMREVacuum")
             include(joinpath(@__DIR__, f * "Simulation.jl"))
         end
         TOLS = 1e-10          # kernel vs Gridap: same problem, two LU solves
@@ -77,6 +77,25 @@ end
             @test reldiff(xk, xg) < TOLS
             xki = mesh_movement_simulation(backend=:kernel, interface_field=true)
             @test reldiff(xki, xg) < TOLS
+        end
+
+        # Simulation tests of this repository (not copies of HyperFEM's)
+        @testset "Turek DFG 2D-1 Navier-Stokes (StaticLinearModel per time step, SUPG/PSPG/LSIC, BDF2 Oseen)" begin
+            rg = turek_navier_stokes_simulation()
+            @test isapprox(norm(rg.x), 13.67687986714, rtol=1e-8)       # measured with Gridap (12 steps of 0.5 s, h = 0.02)
+            @test isapprox(rg.cD, 5.5795, rtol=0.03) && isapprox(rg.Δp, 0.1175, rtol=0.02)   # DFG reference values (fine meshes, P2-P1)
+            rk = turek_navier_stokes_simulation(backend=:kernel)
+            @test reldiff(rk.x, rg.x) < TOLS
+            @test reldiff(rk.cD_history, rg.cD_history) < TOLS
+        end
+
+        @testset "hMRE + vacuum 2D (StaggeredModel of three problems, Coupling prescription, Maxwell traction)" begin
+            rg = hmre_vacuum_simulation()
+            @test isapprox(norm(rg.φ), 2.0940145799e4, rtol=1e-6)         # measured with Gridap (φbot = 520 V, 4 steps)
+            @test isapprox(norm(rg.u_solid), 1.0426282896e-1, rtol=1e-6)
+            @test isapprox(norm(rg.u_vacuum), 2.4014448097e-1, rtol=1e-6)
+            rk = hmre_vacuum_simulation(backend=:kernel)
+            @test reldiff(rk.φ, rg.φ) < TOLS && reldiff(rk.u_solid, rg.u_solid) < TOLS && reldiff(rk.u_vacuum, rg.u_vacuum) < TOLS
         end
     end
 end

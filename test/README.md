@@ -39,3 +39,7 @@ HyperFEM.jl) with a `backend` keyword, run with `:gridap` (checked against Hyper
 and with `:kernel` (checked against the Gridap run). They need HyperFEM on the branch `kernel-backend`
 (drivers, states and linear models with `backend`); with another HyperFEM they are skipped with a
 message. Keep the copies in sync with HyperFEM when the originals change.
+Two more simulation tests of this repository live there: `TurekNavierStokesSimulation.jl` (DFG 2D-1 flow around a
+cylinder at Re = 20, P1-P1 SUPG/PSPG/LSIC, BDF2 Oseen time stepping with `StaticLinearModel`, compared with the
+benchmark's C_D and Δp) and `HMREVacuumSimulation.jl` (the staggered magneto-mechanical example
+`examples/hmre_vacuum_2d` with half the applied potential and four steps).
