@@ -43,6 +43,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: MultiSimOLab/HyperFEM
+          ref: kernel-backend          # branch of the integration with HyperFEMKernels (simulation tests with both backends)
           path: HyperFEM.jl
       - uses: julia-actions/setup-julia@v2
         with:
