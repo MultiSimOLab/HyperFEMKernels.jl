@@ -32,6 +32,16 @@ dκa(g, dg) = (1 + g ⋅ g) * dg + 2 * (g ⋅ dg) * g
         @test length(op.jgroups) == 2 && sort([length(g.cellmap) for g in op.jgroups]) == sort([num_cells(s.Ωa), num_cells(s.Ωb)])
         c = check(res, jac, U, V, randx(U; scale=0.5); op)
         @test c.res < TOL && c.jac < TOL
+        # update: the cell maps and colourings of the sub-triangulations are reused, not recomputed
+        res2(φ, v) = ∫(∇(v) ⋅ (κa ∘ ∇(φ)))dΩa + ∫(3.0 * (∇(v) ⋅ ∇(φ)))dΩb
+        jac2(φ, dφ, v) = ∫(∇(v) ⋅ (dκa ∘ (∇(φ), ∇(dφ))))dΩa + ∫(3.0 * (∇(v) ⋅ ∇(dφ)))dΩb
+        op2 = HK.update(op, res2, jac2)
+        for g2 in vcat(op2.rgroups, op2.jgroups)
+            g = vcat(op.rgroups, op.jgroups)[findfirst(g -> g.trian === g2.trian, vcat(op.rgroups, op.jgroups))]
+            @test g2.cellmap === g.cellmap && g2.colors === g.colors
+        end
+        c = check(res2, jac2, U, V, randx(U; scale=0.5); op=op2)
+        @test c.res < TOL && c.jac < TOL
     end
 end
 
