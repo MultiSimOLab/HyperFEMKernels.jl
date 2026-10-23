@@ -30,16 +30,18 @@ electro-mechanical, magneto-mechanical and visco-hyperelastic weak forms. Volume
 Lagrangian spaces (single/multi-field, Dirichlet masks, subdomains), threads, matrix-free.
 
 Phase 2 (in progress): boundary integrals in the engine (Neumann, Robin, surface and follower
-loads with the normal, on any `BoundaryTriangulation`), a hybrid fallback — contributions the
-engine cannot translate (skeleton terms, differential operators on products with the unknown)
-are assembled by Gridap and added, with a warning, so the engine never blocks a simulation —
-and the update of internal variables (`update_state!`) by the same kind of kernels.
+loads with the normal, on any `BoundaryTriangulation`), skeleton integrals (interior facets:
+`plus`/`minus`, `jump`, `mean` of the unknown and of the test/trial functions, with facet kernels
+that see both cells), a hybrid fallback — contributions the engine cannot translate (differential
+operators on products with the unknown) are assembled by Gridap and added, with a warning, so
+the engine never blocks a simulation — and the update of internal variables (`update_state!`) by
+the same kind of kernels.
 
 ## Roadmap
 
 - **Phase 0** — profile HyperFEM EM 3D and hMRE 2D; continue only if assembly is > 50 % of runtime.
 - **Phase 1** — minimal engine (volume integrals, Lagrange, single/multi-field, masked Dirichlet, threads) and HyperFEM adapter; continue if total speed-up ≥ ×5.
-- **Phase 2** — hybrid fallback to Gridap (done), boundary integrals (done), state writes (done), mixed meshes, iterative solver on the matrix-free Jacobian, KernelAbstractions (GPU).
+- **Phase 2** — hybrid fallback to Gridap (done), boundary integrals (done), state writes (done), skeleton integrals (done), mixed meshes, iterative solver on the matrix-free Jacobian, KernelAbstractions (GPU).
 - **Phase 3** — GridapDistributed (MPI), DG, Piola spaces.
 
 ## Usage

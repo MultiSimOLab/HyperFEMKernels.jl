@@ -31,15 +31,15 @@ function SlotLayout(ls::Vector{Leaf})
 end
 
 """
-    slot_map(layout, field, nc, D) -> Matrix{Int}
+    slot_map(layout, field, nc, D; side = :cell) -> Matrix{Int}
 
 `m[c, J+1]` = slot of component `c` of the value (`J = 0`) or of derivative ∂/∂x_J (`J ≥ 1`)
-of `field` in `layout`, or 0 if that leaf does not appear.
+of `field` (taken from `side` on a skeleton) in `layout`, or 0 if that leaf does not appear.
 """
-function slot_map(layout::SlotLayout, field::Int, nc::Int, D::Int)
+function slot_map(layout::SlotLayout, field::Int, nc::Int, D::Int; side::Symbol=:cell)
     m = zeros(Int, nc, D + 1)
     for (l, off) in zip(layout.leaves, layout.offsets)
-        l.field == field || continue
+        (l.field == field && l.side === side) || continue
         if l.deriv == 0
             for c in 1:nc
                 m[c, 1] = off + c
@@ -71,15 +71,19 @@ struct CodegenState
     aux::Vector{Aux}
     subst::IdDict{Any,Any}   # nodes replaced by a given expression (e.g. a symbol)
     consts::Vector{Int}      # positions in `ops` that hold numbers of the integrand (parameters)
+    nf::Int                  # number of fields: on a skeleton FV holds the plus cells first, then the minus cells
 end
-CodegenState(test, trial, aux) = CodegenState(Any[], Expr[], Dict{Any,Symbol}(), test, trial, aux, IdDict{Any,Any}(), Int[])
+CodegenState(test, trial, aux, nf::Int=0) = CodegenState(Any[], Expr[], Dict{Any,Symbol}(), test, trial, aux, IdDict{Any,Any}(), Int[], nf)
 
 "Emit a node, honouring substitutions."
 emit_node!(st::CodegenState, n::Node) = haskey(st.subst, n) ? st.subst[n] : emit!(st, n)
 
+"Position of the values of a leaf's field in `FV`: `field`, or `nf + field` for the minus side of a skeleton."
+fv_index(n::Leaf, nf::Int) = n.side === :minus ? nf + n.field : n.field
+
 function emit!(st::CodegenState, n::Leaf)
     if n.role === :unknown
-        return :(FV[$(n.field)][$(n.deriv + 1)])
+        return :(FV[$(fv_index(n, st.nf))][$(n.deriv + 1)])
     end
     layout, v = n.role === :test ? (st.test, :sv) : (st.trial, :su)
     k = findfirst(==(n), layout.leaves)
@@ -129,13 +133,14 @@ struct PointForm{F,O,C}
     aux::Vector{Aux}
     consts::Vector{Int}   # positions of the parameters (numbers of the integrand) in `ops`
     expr::Expr
+    nf::Int               # number of fields (layout of FV, see `fv_index`)
 end
 
-function PointForm(terms::Vector{Term})
+function PointForm(terms::Vector{Term}; nf::Int=0)
     test = SlotLayout(leaves(terms, :test))
     trial = SlotLayout(leaves(terms, :trial))
     aux = aux_nodes(terms)
-    st = CodegenState(test, trial, aux)
+    st = CodegenState(test, trial, aux, nf)
     results = [emit_node!(st, t.expr) for t in terms]
     total = Expr(:call, :+, [:(C[$i] * $(r)) for (i, r) in enumerate(results)]...)
     ex = :((ops, C, FV, A, sv, su) -> begin
@@ -144,7 +149,7 @@ function PointForm(terms::Vector{Term})
     end)
     core = RuntimeGeneratedFunction(@__MODULE__, @__MODULE__, ex)
     coefs = Tuple(t.coef for t in terms)
-    PointForm(core, Tuple(st.ops), coefs, test, trial, aux, st.consts, ex)
+    PointForm(core, Tuple(st.ops), coefs, test, trial, aux, st.consts, ex, nf)
 end
 
 "Show the generated pointwise integrand (debugging)."
