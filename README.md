@@ -30,15 +30,16 @@ electro-mechanical, magneto-mechanical and visco-hyperelastic weak forms. Volume
 Lagrangian spaces (single/multi-field, Dirichlet masks, subdomains), threads, matrix-free.
 
 Phase 2 (in progress): boundary integrals in the engine (Neumann, Robin, surface and follower
-loads with the normal, on any `BoundaryTriangulation`), and a hybrid fallback — contributions the
+loads with the normal, on any `BoundaryTriangulation`), a hybrid fallback — contributions the
 engine cannot translate (skeleton terms, differential operators on products with the unknown)
-are assembled by Gridap and added, with a warning, so the engine never blocks a simulation.
+are assembled by Gridap and added, with a warning, so the engine never blocks a simulation —
+and the update of internal variables (`update_state!`) by the same kind of kernels.
 
 ## Roadmap
 
 - **Phase 0** — profile HyperFEM EM 3D and hMRE 2D; continue only if assembly is > 50 % of runtime.
 - **Phase 1** — minimal engine (volume integrals, Lagrange, single/multi-field, masked Dirichlet, threads) and HyperFEM adapter; continue if total speed-up ≥ ×5.
-- **Phase 2** — hybrid fallback to Gridap (done), boundary integrals (done), state writes, mixed meshes, iterative solver on the matrix-free Jacobian, KernelAbstractions (GPU).
+- **Phase 2** — hybrid fallback to Gridap (done), boundary integrals (done), state writes (done), mixed meshes, iterative solver on the matrix-free Jacobian, KernelAbstractions (GPU).
 - **Phase 3** — GridapDistributed (MPI), DG, Piola spaces.
 
 ## Usage
@@ -55,6 +56,21 @@ allocations(op, x)                           # bytes per element call (0 = GPU-r
 
 mf = MatrixFreeJacobian(op); prepare!(mf, x) # partial assembly (sum factorisation on n-cubes)
 y  = mf * dx                                 # Jacobian–vector product without the matrix
+```
+
+Internal variables (visco-elasticity, plasticity): Gridap's `update_state!(updater, states..., fields...)`
+executed by the engine, with the same updater and arguments. The FE functions in the arguments are
+evaluated from their dof values, the states are read and written in place and the loop over cells
+is threaded; anything else is evaluated by Gridap.
+
+```julia
+A = CellState(I3, dΩ)                        # Gridap's storage (one vector per cell), or
+A = KernelState(I3, dΩ)                      # dense np × ncells matrix (the layout for GPU/MPI); usable in weak forms
+upd(A, F, Fn) = (true, return_mapping(F, Fn, A))
+su = update_states!(upd, A, F ∘ ∇(uh)', F ∘ ∇(uh⁻)')   # = update_state!(upd, A, ...) with the engine
+update_state!(KernelUpdater(upd), A, F ∘ ∇(uh)', F ∘ ∇(uh⁻)')   # same, through Gridap's name
+update_state!(upd, A::KernelState, ...)      # a KernelState first also selects the engine
+allocations(su)                              # bytes per cell (0 unless the updater allocates)
 ```
 
 With HyperFEM (branch `kernel-backend`): `StaticNonlinearModel(res, jac, U, V, D; backend = :kernel)`.
