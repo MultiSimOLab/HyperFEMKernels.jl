@@ -391,6 +391,25 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
             @test reldiff(xk, xg) < 1e-10
             @test reldiff(nonzeros(Kk), nonzeros(Kg)) < TOL
 
+            # 2b. the functor with an FEFunction: its right-hand side is ∫(xh * v)dΩ (scalar space), the matrix
+            #     is re-assembled with the backend and the solution overwrites the free values of xh
+            reffes = ReferenceFE(lagrangian, Float64, 1)
+            Ds = BoundaryConditions(BoundaryCondition("fixed", 0.0), BoundaryCondition("moving", 1.0))
+            κ(∇u) = 2.0 * ∇u
+            as(u, v) = ∫((κ ∘ ∇(u)) ⋅ ∇(v))dΩ
+            mg, mk = map((:gridap, :kernel)) do backend
+                Vs = TestFESpace(Ω, reffes, Ds, conformity=:H1)
+                StaticLinearModel(as, TrialFESpace(Vs, Ds, 1.0), Vs, Ds; backend)
+            end
+            Random.seed!(7)
+            r = randn(num_free_dofs(mg.spaces[1]))
+            xg = copy(mg(FEFunction(mg.spaces[1], copy(r)); Measure=dΩ, Assembly=true))
+            xk = copy(mk(FEFunction(mk.spaces[1], copy(r)); Measure=dΩ, Assembly=true))
+            @test norm(xg) > 0 && reldiff(xk, xg) < 1e-10
+            @test reldiff(nonzeros(mk.caches[2]), nonzeros(mg.caches[2])) < TOL
+            @test reldiff(mk.caches[3], mg.caches[3]) < TOL
+            @test mk.caches[7][] isa KernelOperator
+
             # 3. several linear forms on repeated spaces (load vectors without Dirichlet lift)
             mg, mk = map((:gridap, :kernel)) do backend
                 StaticLinearModel([l, l2], a, spaces()..., D_bc; backend)
