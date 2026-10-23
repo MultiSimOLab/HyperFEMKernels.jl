@@ -446,6 +446,7 @@ function materialize_aux(g::Group{NSV,NSU,PF,TT,AUX}, nthreads::Int) where {NSV,
     chunks = collect(Iterators.partition(1:ncells, cld(ncells, max(1, nthreads))))
     vals = ntuple(length(g.aux)) do k
         a = g.aux[k]                                   # not inferred: function barrier below
+        a isa StateColumns && return a.M               # a KernelState: its matrix is the dense value
         M = Matrix{eltype(eltype(a))}(undef, np, ncells)
         @sync for ch in chunks
             Threads.@spawn _materialize!(M, a, ch, np)

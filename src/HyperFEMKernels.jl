@@ -8,7 +8,8 @@ post-processing. The weak form is captured by calling the user's `res`/`jac` wit
 and reading the lazy tree Gridap builds (`probes.jl`, `tree.jl`); it is translated into a
 pointwise Julia function (`codegen.jl`) evaluated by fused kernels (`tables.jl`, `kernels.jl`)
 and assembled in parallel with a precomputed sparsity pattern (`assembly.jl`, `coloring.jl`).
-`check` compares with Gridap (`verify.jl`).
+Internal variables (`CellState`/`KernelState`) are updated by the same kind of kernels
+(`states.jl`). `check` compares with Gridap (`verify.jl`).
 """
 module HyperFEMKernels
 
@@ -34,10 +35,12 @@ import Gridap.CellData: CellField, CellPoint, DomainContribution, ReferenceDomai
 import Gridap.TensorValues: MultiValue, meas, outer
 import Gridap.MultiField: MultiFieldStyle, ConsecutiveMultiFieldStyle
 import Gridap.Algebra: NonlinearOperator
+import Gridap.Helpers: first_and_tail
 
 RuntimeGeneratedFunctions.init(@__MODULE__)
 
 export KernelOperator, update, check, allocations, MatrixFreeJacobian, prepare!
+export KernelState, KernelUpdater, update_states!
 
 include("probes.jl")
 include("tree.jl")
@@ -49,6 +52,7 @@ include("assembly.jl")
 include("coloring.jl")
 include("tensorproduct.jl")
 include("matrixfree.jl")
+include("states.jl")
 include("verify.jl")
 
 end # module
