@@ -17,7 +17,7 @@
 #          2.2 × 0.41 with a circle of radius 0.05 centred at (0.2, 0.2); element size h on the channel and
 #          h/5 on the cylinder. Tags: "fluid", "inlet" (x = 0), "outlet" (x = 2.2), "wall" (y = 0, 0.41),
 #          "cylinder" (points included; the corners of the inlet/outlet belong to the wall too).
-#          The test mesh test/models/turek2d.msh is `turek 0.02`.
+#          The test mesh of HyperFEM (test/models/turek2d.msh, TurekNavierStokes simulation) is `turek 0.02`.
 #
 # Output: benchmark/meshes/em_plate_n<n>.msh, hmre_short_r<r>.msh or turek_h<h>.msh (git-ignored).
 

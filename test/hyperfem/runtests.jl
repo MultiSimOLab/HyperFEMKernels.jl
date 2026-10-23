@@ -452,6 +452,21 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
             @test_throws ErrorException update_state!(model, Ac, Fh, Fh⁻; backend=:other)
         end
     end
+end
 
-    include(joinpath(@__DIR__, "simulations", "runtests.jl"))
+# HyperFEM's simulation tests (test/SimulationsTests of HyperFEM.jl, branch kernel-backend), with both backends:
+# every simulation runs with :gridap and :kernel, the reference values are checked with each one and the kernel
+# results are compared with Gridap's. They live in HyperFEM (their final place) and are included here, at top
+# level (they load packages and define constants). Skipped when the HyperFEM next to this package has no kernel
+# backend (e.g. main).
+let CM = HyperFEM.ComputationalModels, PM = HyperFEM.PhysicalModels
+    global hyperfem_sims = joinpath(pkgdir(HyperFEM), "test", "SimulationsTests", "runtests.jl")
+    global hyperfem_has_backend = isdefined(CM, :dirichlet_projection) && isdefined(CM, :linear_system) &&
+                                  isdefined(PM, :new_state) && isfile(hyperfem_sims) &&
+                                  occursin("run_backends", read(hyperfem_sims, String))
+end
+if hyperfem_has_backend
+    include(hyperfem_sims)
+else
+    @info "HyperFEM without the kernel backend (branch kernel-backend): HyperFEM's simulation tests skipped"
 end
