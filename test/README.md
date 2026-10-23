@@ -34,12 +34,9 @@ HyperFEM.jl and runs `test/hyperfem/setup.jl` then the
 tests; locally: `julia test/hyperfem/setup.jl` once, then
 `julia -t auto --project=test/hyperfem test/hyperfem/runtests.jl` (or the benchmark environment).
 
-`test/hyperfem/simulations/`: copies of HyperFEM's seven simulation tests (`test/SimulationsTests` of
-HyperFEM.jl) with a `backend` keyword, run with `:gridap` (checked against HyperFEM's reference values)
-and with `:kernel` (checked against the Gridap run). They need HyperFEM on the branch `kernel-backend`
-(drivers, states and linear models with `backend`); with another HyperFEM they are skipped with a
-message. Keep the copies in sync with HyperFEM when the originals change.
-Two more simulation tests of this repository live there: `TurekNavierStokesSimulation.jl` (DFG 2D-1 flow around a
-cylinder at Re = 20, P1-P1 SUPG/PSPG/LSIC, BDF2 Oseen time stepping with `StaticLinearModel`, compared with the
-benchmark's C_D and Δp) and `HMREVacuumSimulation.jl` (the staggered magneto-mechanical example
-`examples/hmre_vacuum_2d` with half the applied potential and four steps).
+HyperFEM's simulation tests (`test/SimulationsTests` of HyperFEM.jl, branch `kernel-backend`) are included at the
+end of `test/hyperfem/runtests.jl`: nine simulations (HyperFEM's seven, a Turek DFG 2D-1 Navier-Stokes test and the
+hMRE + vacuum staggered example reduced to half the potential and four steps), each one run with `:gridap` and
+`:kernel`, reference values checked with both and the kernel compared with Gridap. They live in HyperFEM, their
+final place; with a HyperFEM without the kernel backend they are skipped with a message. The CI job `hyperfem`
+clones HyperFEM's `kernel-backend`.
