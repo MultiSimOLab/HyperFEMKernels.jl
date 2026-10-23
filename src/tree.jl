@@ -7,16 +7,21 @@
 
 abstract type Node end
 
-"Unknown/test/trial function of `field`, value (`deriv = 0`) or gradient (`deriv = 1`)."
+"""
+Unknown/test/trial function of `field`, value (`deriv = 0`) or gradient (`deriv = 1`). On a
+skeleton `side` is `:plus` or `:minus` (the cell the trace is taken from); `:cell` elsewhere.
+"""
 struct Leaf <: Node
     role::Symbol
     field::Int
     deriv::Int
     T::DataType
     points::CellPoint
+    side::Symbol
 end
-Base.:(==)(a::Leaf, b::Leaf) = a.role == b.role && a.field == b.field && a.deriv == b.deriv
-Base.hash(a::Leaf, h::UInt) = hash((a.role, a.field, a.deriv), h)
+Leaf(role, field, deriv, T, points) = Leaf(role, field, deriv, T, points, :cell)
+Base.:(==)(a::Leaf, b::Leaf) = a.role == b.role && a.field == b.field && a.deriv == b.deriv && a.side == b.side
+Base.hash(a::Leaf, h::UInt) = hash((a.role, a.field, a.deriv, a.side), h)
 
 "Data that does not depend on the unknown, test or trial functions: evaluated by Gridap per cell."
 struct Aux <: Node
@@ -106,7 +111,7 @@ collect_terms(a, coef) = error("HyperFEMKernels: unsupported contribution of typ
 is_constant_value(v) = v isa Real || v isa MultiValue
 
 function to_node(a::AbstractArray)
-    a isa ProbeArray && return Leaf(a.probe.role, a.probe.field, a.probe.deriv, probe_valtype(a.probe), a.points)
+    a isa ProbeArray && return Leaf(a.probe.role, a.probe.field, a.probe.deriv, probe_valtype(a.probe), a.points, a.probe.side)
     if a isa LazyArray && a.maps isa Fill && a.maps.value isa Fields.ConstantField && is_constant_value(a.maps.value.value)
         return Const(a.maps.value.value)          # a Number turned into a CellField by Gridap
     end
@@ -131,7 +136,7 @@ function leaves(terms::Vector{Term}, role::Symbol)
     for t in terms
         _walk_leaves!(found, role, t.expr)
     end
-    sort!(found, by = l -> (l.field, l.deriv))
+    sort!(found, by = l -> (l.field, l.deriv, l.side))
 end
 _walk_leaves!(found, role, n::Leaf) = (n.role === role && !(n in found)) && push!(found, n)
 _walk_leaves!(found, role, n::Op) = foreach(c -> _walk_leaves!(found, role, c), n.args)
@@ -154,7 +159,7 @@ _walk_aux!(found, n::Const) = nothing
 function show_tree(io::IO, n::Node, depth=0)
     pad = "  "^depth
     if n isa Leaf
-        println(io, pad, n.role, "[", n.field, "]", n.deriv == 1 ? " ∇" : "", " :: ", n.T)
+        println(io, pad, n.role, "[", n.field, "]", n.deriv == 1 ? " ∇" : "", n.side === :cell ? "" : " $(n.side)", " :: ", n.T)
     elseif n isa Aux
         println(io, pad, "aux :: ", eltype(eltype(n.array)))
     elseif n isa Const

@@ -9,11 +9,13 @@
 const ROLES = (:unknown, :test, :trial)
 
 """
-    ProbeField(role, field, deriv, T, D, trian)
+    ProbeField(role, field, deriv, T, D, trian, side = :cell)
 
 Placeholder for the unknown (`role = :unknown`), a test function (`:test`) or a trial function
 (`:trial`) of field `field`, differentiated `deriv` times (0 or 1). `T` is the value type of the
-field (e.g. `Float64`, `VectorValue{3,Float64}`) and `D` the spatial dimension.
+field (e.g. `Float64`, `VectorValue{3,Float64}`) and `D` the spatial dimension. On a skeleton
+`side` is the cell the trace is taken from (`:plus` or `:minus`, from `u.plus` / `u.minus`);
+`:cell` elsewhere.
 """
 struct ProbeField <: CellField
     role::Symbol
@@ -22,30 +24,43 @@ struct ProbeField <: CellField
     T::DataType
     D::Int
     trian::Triangulation
+    side::Symbol
 end
+ProbeField(role, field, deriv, T, D, trian) = ProbeField(role, field, deriv, T, D, trian, :cell)
 
 CellData.get_triangulation(p::ProbeField) = p.trian
 CellData.DomainStyle(::Type{ProbeField}) = ReferenceDomain()
 # moved to another triangulation (e.g. a boundary) the probe reports that triangulation, as a
 # real basis would, so that Gridap picks the right common domain in e.g. ∇(u) ⋅ n
-CellData.change_domain(p::ProbeField, t::Triangulation, ::ReferenceDomain) = ProbeField(p.role, p.field, p.deriv, p.T, p.D, t)
-CellData.change_domain(p::ProbeField, ::ReferenceDomain, t::Triangulation, ::ReferenceDomain) = ProbeField(p.role, p.field, p.deriv, p.T, p.D, t)
+CellData.change_domain(p::ProbeField, t::Triangulation, ::ReferenceDomain) = ProbeField(p.role, p.field, p.deriv, p.T, p.D, t, p.side)
+CellData.change_domain(p::ProbeField, ::ReferenceDomain, t::Triangulation, ::ReferenceDomain) = ProbeField(p.role, p.field, p.deriv, p.T, p.D, t, p.side)
+
+# Skeleton: `u.plus` / `u.minus` wrap the probe in Gridap's `CellFieldAt{:plus/:minus}`. When the
+# integrand is moved to the skeleton, Gridap restricts each side with the glue of that side and
+# would read the cell-wise data of the probe; the probe is instead relabelled with the side (the
+# kernels evaluate it in the plus or minus cell of the facet, see `skeleton.jl`).
+function CellData.change_domain_ref_ref(a::CellData.CellFieldAt{S,ProbeField}, ttrian::Triangulation,
+                                        sglue::Geometry.FaceToFaceGlue, tglue::Geometry.FaceToFaceGlue) where {S}
+    S in (:plus, :minus) || error("HyperFEMKernels: unknown skeleton side $S")
+    p = a.parent
+    ProbeField(p.role, p.field, p.deriv, p.T, p.D, ttrian, S)
+end
 
 function Fields.gradient(p::ProbeField)
     p.deriv == 0 || error("HyperFEMKernels: second derivatives of the unknown/test/trial functions are not supported yet")
-    ProbeField(p.role, p.field, 1, p.T, p.D, p.trian)
+    ProbeField(p.role, p.field, 1, p.T, p.D, p.trian, p.side)
 end
 Fields.symmetric_gradient(p::ProbeField) = Operation(symmetric_part)(gradient(p))
 Fields.divergence(p::ProbeField) = Operation(tr)(gradient(p))
 
-# A differential operator applied to an expression with probes (∇(u*w)), or plus/minus on a
-# skeleton, makes Gridap ask for the cell-wise data of the probe. There is none: the whole weak
-# form then goes to the hybrid fallback (see `capture`). Returning mock cell data instead was
-# tried and rejected: Gridap then builds a tree the reader misparses silently.
+# A differential operator applied to an expression with probes (∇(u*w)), or a probe used on a
+# skeleton without choosing a side, makes Gridap ask for the cell-wise data of the probe. There is
+# none: the whole weak form then goes to the hybrid fallback (see `capture`). Returning mock cell
+# data instead was tried and rejected: Gridap then builds a tree the reader misparses silently.
 CellData.get_data(p::ProbeField) = error("""
     HyperFEMKernels: a differential operator was applied to an expression that contains the
-    unknown, test or trial function (e.g. ∇(u*w)), or the expression is restricted to one side of
-    a skeleton (plus/minus/jump/mean). Write it in terms of ∇(u), or let the hybrid fallback
+    unknown, test or trial function (e.g. ∇(u*w)), or the function is used on a skeleton without
+    a side (use plus/minus, jump or mean). Write it in terms of ∇(u), or let the hybrid fallback
     assemble it with Gridap.""")
 
 "Value type of a probe at a quadrature point (Gridap's convention for gradients)."
