@@ -326,8 +326,44 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
             xk = static_mechanical_dirichlet_simulation(backend=:kernel)
             @test reldiff(xk, xg) < 1e-10
             xg, _ = visco_elastic_simulation()
-            xk, _ = visco_elastic_simulation(backend=:kernel)
+            xk, _ = visco_elastic_simulation(backend=:kernel)        # kernel operator + KernelStates updated by the engine
             @test reldiff(xk, xg) < 1e-10
+        end
+    end
+
+    @testset "HyperFEM's state interface with backend=:kernel (CellState(model, dΩ; backend), update_state!(model, ...; backend))" begin
+        PM = HyperFEM.PhysicalModels
+        if !isdefined(PM, :new_state)
+            @info "HyperFEM without the kernel backend of the states (branch kernel-backend): state interface tests skipped"
+        else
+            geometry = CartesianDiscreteModel((0, 0.05, 0, 0.005, 0, 0.002), (5, 2, 2))
+            model = GeneralizedMaxwell(NeoHookean3D(μ=13446.1, λ=0.0) + VolumetricEnergy(λ=2.5e6),
+                                       ViscousPolyconvex(μ=11053.7, τ=151.68), ViscousPolyconvex(μ=30480.1, τ=7.0731))
+            em = ElectroMechModel(IdealDielectric(ε=1.0), model)          # the kwarg goes through the composed models
+            update_time_step!(model, 0.01)
+            Ω = Triangulation(geometry); dΩ = Measure(Ω, 2)
+            F, _, _ = get_Kinematics(Kinematics(Mechano, Solid))
+            V = TestFESpace(geometry, ReferenceFE(lagrangian, VectorValue{3,Float64}, 1), conformity=:H1)
+            uh = FEFunction(V, 1e-3 .* randn(num_free_dofs(V))); uh⁻ = FEFunction(V, 1e-3 .* randn(num_free_dofs(V)))
+            Fh = F ∘ ∇(uh)'; Fh⁻ = F ∘ ∇(uh⁻)'
+            dense(s::CellState) = reduce(hcat, s.values); dense(s::KernelState) = s.values
+            same(a, b) = maximum(norm, dense(a) - dense(b)) <= 1e-12 * max(1.0, maximum(norm, dense(b)))
+            Ag = CellState(model, dΩ)                                    # Gridap's storage and loop (reference)
+            Ak = CellState(model, dΩ; backend=:kernel)                   # KernelStates: the engine, with any backend
+            Ac = CellState(model, dΩ)                                    # Gridap's storage, the engine's loop
+            Ae = CellState(em, dΩ; backend=:kernel)
+            @test all(s -> s isa KernelState, Ak) && all(s -> s isa KernelState, Ae) && all(s -> s isa CellState, Ac)
+            @test_throws ErrorException CellState(model, dΩ; backend=:other)
+            for _ in 1:2
+                update_state!(model, Ag, Fh, Fh⁻)
+                update_state!(model, Ak, Fh, Fh⁻)
+                update_state!(model, Ac, Fh, Fh⁻; backend=:kernel)
+                update_state!(em, Ae, Fh, nothing, Fh⁻; backend=:kernel)        # (state, F, E, Fn)
+                @test all(same(a, g) for (a, g) in zip(Ak, Ag))
+                @test all(same(a, g) for (a, g) in zip(Ac, Ag))
+                @test all(same(a, g) for (a, g) in zip(Ae, Ag))
+            end
+            @test_throws ErrorException update_state!(model, Ac, Fh, Fh⁻; backend=:other)
         end
     end
 end
