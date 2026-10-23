@@ -8,8 +8,9 @@ post-processing. The weak form is captured by calling the user's `res`/`jac` wit
 and reading the lazy tree Gridap builds (`probes.jl`, `tree.jl`); it is translated into a
 pointwise Julia function (`codegen.jl`) evaluated by fused kernels (`tables.jl`, `kernels.jl`)
 and assembled in parallel with a precomputed sparsity pattern (`assembly.jl`, `coloring.jl`).
-Internal variables (`CellState`/`KernelState`) are updated by the same kind of kernels
-(`states.jl`). `check` compares with Gridap (`verify.jl`).
+Integrals on a skeleton (interior facets, plus/minus/jump/mean) are assembled by facet kernels
+that see both cells (`skeleton.jl`). Internal variables (`CellState`/`KernelState`) are updated by
+the same kind of kernels (`states.jl`). `check` compares with Gridap (`verify.jl`).
 """
 module HyperFEMKernels
 
@@ -50,6 +51,7 @@ include("linearmaps.jl")
 include("kernels.jl")
 include("assembly.jl")
 include("coloring.jl")
+include("skeleton.jl")
 include("tensorproduct.jl")
 include("matrixfree.jl")
 include("states.jl")
