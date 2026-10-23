@@ -331,6 +331,109 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
         end
     end
 
+    @testset "StaticLinearModel with backend=:kernel (matrix, load, Dirichlet lift, re-assembly, several loads, Stokes)" begin
+        CM = HyperFEM.ComputationalModels
+        if !isdefined(CM, :linear_system)
+            @info "HyperFEM without the kernel backend of StaticLinearModel (branch kernel-backend): linear driver tests skipped"
+        else
+            # Linear elasticity, Dirichlet lift (nonzero displacement on "moving") and body load.
+            geometry = CartesianDiscreteModel((0, 1.0, 0, 0.2, 0, 0.2), (5, 2, 2))
+            labels = get_face_labeling(geometry)
+            add_tag_from_tags!(labels, "fixed", CartesianTags.face0YZ⁺)
+            add_tag_from_tags!(labels, "moving", CartesianTags.face1YZ⁺)
+            Ω = Triangulation(geometry); dΩ = Measure(Ω, 2)
+            D_bc = BoundaryConditions(BoundaryCondition("fixed", [0.0, 0.0, 0.0]),
+                                      BoundaryCondition("moving", [0.01, 0.002, 0.0], EvolutionFunctions.ramp()))
+            reffe = ReferenceFE(lagrangian, VectorValue{3,Float64}, 1)
+            λ, μ = 3.0, 1.0
+            ε(∇u) = 0.5 * (∇u + ∇u')
+            σ(e) = λ * tr(e) * one(e) + 2μ * e
+            a(u, v) = ∫((σ ∘ (ε ∘ ∇(u))) ⊙ (ε ∘ ∇(v)))dΩ
+            f = VectorValue(0.0, 0.0, -1.0)
+            l(v) = ∫(f ⋅ v)dΩ
+            l2(v) = ∫(VectorValue(0.3, 0.0, 0.1) ⋅ v)dΩ
+            spaces(Λ=1.0) = (V = TestFESpace(Ω, reffe, D_bc, conformity=:H1); (TrialFESpace(V, D_bc, Λ), V))
+            system(m) = (m.caches[2], m.caches[3])
+            @test_throws ErrorException StaticLinearModel(l, a, spaces()..., D_bc; backend=:other)
+
+            # 1. lf + bf: K and b at construction, solution, re-assembly with other Dirichlet values
+            mg, mk = map((:gridap, :kernel)) do backend
+                StaticLinearModel(l, a, spaces()..., D_bc; backend)
+            end
+            Kg, bg = system(mg); Kk, bk = system(mk)
+            @test norm(bg) > 0
+            @test reldiff(nonzeros(Kk), nonzeros(Kg)) < TOL
+            @test reldiff(bk, bg) < TOL
+            @test mk.caches[7][] isa KernelOperator
+            @test isempty(mk.caches[7][].fallback.rtrians) && isempty(mk.caches[7][].fallback.jtrians)
+            xg = solve!(mg; Assembly=false); xk = solve!(mk; Assembly=false)
+            @test norm(xg) > 0 && reldiff(xk, xg) < 1e-10
+            for m in (mg, mk)
+                TrialFESpace!(m.spaces[1], D_bc, 0.5)       # the lift of the new Dirichlet values is re-read
+            end
+            xg = copy(solve!(mg; Assembly=true)); xk = copy(solve!(mk; Assembly=true))
+            @test reldiff(bk, bg) < TOL && reldiff(nonzeros(Kk), nonzeros(Kg)) < TOL
+            @test reldiff(xk, xg) < 1e-10
+            @test mk.caches[7][] isa KernelOperator
+
+            # 2. bf only: the matrix, the right-hand side given to solve! and the functor (Assembly=true)
+            mg, mk = map((:gridap, :kernel)) do backend
+                StaticLinearModel(a, spaces()..., D_bc; backend)
+            end
+            Kg, bg = system(mg); Kk, bk = system(mk)
+            @test reldiff(nonzeros(Kk), nonzeros(Kg)) < TOL
+            @test iszero(bg) && iszero(bk)
+            Random.seed!(5)
+            r = randn(length(bg))
+            xg = copy(solve!(mg, copy(r))); xk = copy(solve!(mk, copy(r)))
+            @test reldiff(xk, xg) < 1e-10
+            xg = copy(mg(copy(r); Assembly=true)); xk = copy(mk(copy(r); Assembly=true))
+            @test reldiff(xk, xg) < 1e-10
+            @test reldiff(nonzeros(Kk), nonzeros(Kg)) < TOL
+
+            # 2b. the functor with an FEFunction: its right-hand side is ∫(xh * v)dΩ (scalar space), the matrix
+            #     is re-assembled with the backend and the solution overwrites the free values of xh
+            reffes = ReferenceFE(lagrangian, Float64, 1)
+            Ds = BoundaryConditions(BoundaryCondition("fixed", 0.0), BoundaryCondition("moving", 1.0))
+            κ(∇u) = 2.0 * ∇u
+            as(u, v) = ∫((κ ∘ ∇(u)) ⋅ ∇(v))dΩ
+            mg, mk = map((:gridap, :kernel)) do backend
+                Vs = TestFESpace(Ω, reffes, Ds, conformity=:H1)
+                StaticLinearModel(as, TrialFESpace(Vs, Ds, 1.0), Vs, Ds; backend)
+            end
+            Random.seed!(7)
+            r = randn(num_free_dofs(mg.spaces[1]))
+            xg = copy(mg(FEFunction(mg.spaces[1], copy(r)); Measure=dΩ, Assembly=true))
+            xk = copy(mk(FEFunction(mk.spaces[1], copy(r)); Measure=dΩ, Assembly=true))
+            @test norm(xg) > 0 && reldiff(xk, xg) < 1e-10
+            @test reldiff(nonzeros(mk.caches[2]), nonzeros(mg.caches[2])) < TOL
+            @test reldiff(mk.caches[3], mg.caches[3]) < TOL
+            @test mk.caches[7][] isa KernelOperator
+
+            # 3. several linear forms on repeated spaces (load vectors without Dirichlet lift)
+            mg, mk = map((:gridap, :kernel)) do backend
+                StaticLinearModel([l, l2], a, spaces()..., D_bc; backend)
+            end
+            xg = solve!(mg); xk = solve!(mk)
+            @test all(norm.(CM.blocks(xg)) .> 0)
+            @test reldiff(xk, xg) < 1e-10
+            @test reldiff(mk.caches[3], mg.caches[3]) < TOL     # last load vector (l2), no lift
+            xg = solve!(mg; Assembly=false); xk = solve!(mk; Assembly=false)
+            @test reldiff(xk, xg) < 1e-10
+
+            # 4. HyperFEM's Stokes simulation (multi-field, linear form returning 0.0) with both backends.
+            #    K and b agree to 1e-16 (measured with dev/dbg_stokes.jl), but the saddle-point system is ill
+            #    conditioned and the LU solutions differ at 1e-7: the kernel pattern stores the (empty) p-p block,
+            #    which changes the pivoting (Gridap's solution has residual 5e-8, the kernel's 4e-11).
+            sims = normpath(joinpath(@__DIR__, "..", "..", "..", "HyperFEM.jl", "test", "SimulationsTests"))
+            include(joinpath(sims, "StokesSimulation.jl"))
+            xg = stokes_simulation()
+            xk = stokes_simulation(backend=:kernel)
+            @test norm(xg) ≈ 4199.925167995936
+            @test reldiff(xk, xg) < 1e-6
+        end
+    end
+
     @testset "HyperFEM's state interface with backend=:kernel (CellState(model, dΩ; backend), update_state!(model, ...; backend))" begin
         PM = HyperFEM.PhysicalModels
         if !isdefined(PM, :new_state)
