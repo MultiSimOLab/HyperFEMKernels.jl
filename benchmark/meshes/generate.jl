@@ -2,6 +2,7 @@
 #
 #   julia --project=benchmark benchmark/meshes/generate.jl em n      # EM plate, structured hexahedra
 #   julia --project=benchmark benchmark/meshes/generate.jl hmre r    # hMRE Short_magnet, triangles
+#   julia --project=benchmark benchmark/meshes/generate.jl turek h   # DFG flow around a cylinder 2D, triangles
 #
 # em n   : plate 8 × 0.8 × 40 (x, y, z) in two layers y ∈ [0, 0.4] and [0.4, 0.8], like
 #          HyperFEM test/models/test_static_EM.msh. Divisions (7n, n + n, 19n): n = 1 gives the
@@ -12,7 +13,13 @@
 #          beam, 3e-3 on the vacuum box and magnet, 1e-2 on the outer box, divided by r; r = 1
 #          reproduces the original element counts closely; cells grow as r².
 #
-# Output: benchmark/meshes/em_plate_n<n>.msh or hmre_short_r<r>.msh (git-ignored).
+# turek h: channel of the DFG benchmark "flow around a cylinder" 2D (Schäfer & Turek 1996): rectangle
+#          2.2 × 0.41 with a circle of radius 0.05 centred at (0.2, 0.2); element size h on the channel and
+#          h/5 on the cylinder. Tags: "fluid", "inlet" (x = 0), "outlet" (x = 2.2), "wall" (y = 0, 0.41),
+#          "cylinder" (points included; the corners of the inlet/outlet belong to the wall too).
+#          The test mesh test/models/turek2d.msh is `turek 0.02`.
+#
+# Output: benchmark/meshes/em_plate_n<n>.msh, hmre_short_r<r>.msh or turek_h<h>.msh (git-ignored).
 
 using GridapGmsh: gmsh
 
@@ -89,6 +96,29 @@ function hmre_short(r::Real)
     finish(file)
 end
 
+function turek(h::Real)
+    file = joinpath(OUTDIR, "turek_h$(h).msh")
+    gmsh.initialize(); gmsh.option.setNumber("General.Terminal", 0)
+    gmsh.model.add("turek")
+    geo = gmsh.model.geo
+    L, H, cx, cy, r = 2.2, 0.41, 0.2, 0.2, 0.05
+    hc = h / 5
+    p1 = geo.addPoint(0, 0, 0, h); p2 = geo.addPoint(L, 0, 0, h); p3 = geo.addPoint(L, H, 0, h); p4 = geo.addPoint(0, H, 0, h)
+    bottom = geo.addLine(p1, p2); outlet = geo.addLine(p2, p3); top = geo.addLine(p3, p4); inlet = geo.addLine(p4, p1)
+    c0 = geo.addPoint(cx, cy, 0, hc)
+    cp = [geo.addPoint(cx + r * cos(θ), cy + r * sin(θ), 0, hc) for θ in (0, π / 2, π, 3π / 2)]
+    arcs = [geo.addCircleArc(cp[i], c0, cp[mod1(i + 1, 4)]) for i in 1:4]
+    s = geo.addPlaneSurface([geo.addCurveLoop([bottom, outlet, top, inlet]), geo.addCurveLoop(arcs)])
+    geo.synchronize()
+    gmsh.model.addPhysicalGroup(2, [s], 1, "fluid")
+    gmsh.model.addPhysicalGroup(1, [inlet], 2, "inlet"); gmsh.model.addPhysicalGroup(0, [p1, p4], 2, "inlet")
+    gmsh.model.addPhysicalGroup(1, [outlet], 3, "outlet"); gmsh.model.addPhysicalGroup(0, [p2, p3], 3, "outlet")
+    gmsh.model.addPhysicalGroup(1, [bottom, top], 4, "wall"); gmsh.model.addPhysicalGroup(0, [p1, p2, p3, p4], 4, "wall")
+    gmsh.model.addPhysicalGroup(1, arcs, 5, "cylinder"); gmsh.model.addPhysicalGroup(0, cp, 5, "cylinder")
+    gmsh.model.mesh.generate(2)
+    finish(file)
+end
+
 function finish(file)
     gmsh.option.setNumber("Mesh.MshFileVersion", 4.1)
     for d in 1:3
@@ -110,4 +140,5 @@ end
 
 kind = ARGS[1]
 kind == "em" ? em_plate(parse(Int, ARGS[2])) :
-kind == "hmre" ? hmre_short(parse(Float64, ARGS[2])) : error("usage: generate.jl em n | hmre r")
+kind == "hmre" ? hmre_short(parse(Float64, ARGS[2])) :
+kind == "turek" ? turek(parse(Float64, ARGS[2])) : error("usage: generate.jl em n | hmre r | turek h")
