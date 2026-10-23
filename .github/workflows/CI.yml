@@ -9,8 +9,31 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
 jobs:
+  # Pull requests that only touch documentation (Markdown, docs/, LICENSE) skip the Julia tests.
+  # Pushes, tags and manual runs always run them.
+  changes:
+    name: Changed files
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      code: ${{ github.event_name != 'pull_request' || steps.filter.outputs.code == 'true' }}
+    steps:
+      - uses: dorny/paths-filter@v3
+        id: filter
+        if: github.event_name == 'pull_request'
+        with:
+          predicate-quantifier: every
+          filters: |
+            code:
+              - '**'
+              - '!**/*.md'
+              - '!docs/**'
+              - '!LICENSE'
   test:
     name: Julia ${{ matrix.version }} - ${{ matrix.os }}
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -30,6 +53,8 @@ jobs:
           JULIA_NUM_THREADS: 2
   hyperfem:
     name: HyperFEM weak forms - Julia ${{ matrix.version }}
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -53,3 +78,21 @@ jobs:
         run: julia HyperFEMKernels.jl/test/hyperfem/setup.jl
       - name: Run HyperFEM weak-form tests
         run: julia -t 2 --project=HyperFEMKernels.jl/test/hyperfem HyperFEMKernels.jl/test/hyperfem/runtests.jl
+  # Single required check for the protection of main: passes when the tests passed, or when they
+  # were skipped because the pull request only changes documentation.
+  ci:
+    name: CI
+    if: always()
+    needs: [changes, test, hyperfem]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check results
+        run: |
+          echo "code changed: ${{ needs.changes.outputs.code }}"
+          echo "test: ${{ needs.test.result }}, hyperfem: ${{ needs.hyperfem.result }}"
+          [ "${{ needs.changes.result }}" = success ] || exit 1
+          if [ "${{ needs.changes.outputs.code }}" = true ]; then
+            [ "${{ needs.test.result }}" = success ] && [ "${{ needs.hyperfem.result }}" = success ] || exit 1
+          else
+            [ "${{ needs.test.result }}" = skipped ] && [ "${{ needs.hyperfem.result }}" = skipped ] || exit 1
+          fi
