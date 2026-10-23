@@ -33,3 +33,9 @@ next to this package; the meshes are in `test/models` (see its README). The CI j
 HyperFEM.jl and runs `test/hyperfem/setup.jl` then the
 tests; locally: `julia test/hyperfem/setup.jl` once, then
 `julia -t auto --project=test/hyperfem test/hyperfem/runtests.jl` (or the benchmark environment).
+
+`test/hyperfem/simulations/`: copies of HyperFEM's seven simulation tests (`test/SimulationsTests` of
+HyperFEM.jl) with a `backend` keyword, run with `:gridap` (checked against HyperFEM's reference values)
+and with `:kernel` (checked against the Gridap run). They need HyperFEM on the branch `kernel-backend`
+(drivers, states and linear models with `backend`); with another HyperFEM they are skipped with a
+message. Keep the copies in sync with HyperFEM when the originals change.

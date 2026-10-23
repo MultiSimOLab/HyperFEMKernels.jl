@@ -318,16 +318,7 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
             @test models[2].caches[8][] isa KernelOperator
             @test isempty(models[2].caches[8][].fallback.rtrians) && isempty(models[2].caches[8][].fallback.jtrians)
 
-            # 2. HyperFEM's own simulations with the projection, with both backends (final solution).
-            sims = normpath(joinpath(@__DIR__, "..", "..", "..", "HyperFEM.jl", "test", "SimulationsTests"))
-            include(joinpath(sims, "StaticMechanicalDirichletSimulation.jl"))
-            include(joinpath(sims, "ViscoElasticSimulation.jl"))
-            xg = static_mechanical_dirichlet_simulation()
-            xk = static_mechanical_dirichlet_simulation(backend=:kernel)
-            @test reldiff(xk, xg) < 1e-10
-            xg, _ = visco_elastic_simulation()
-            xk, _ = visco_elastic_simulation(backend=:kernel)        # kernel operator + KernelStates updated by the engine
-            @test reldiff(xk, xg) < 1e-10
+            # 2. HyperFEM's own simulations with the projection, with both backends: simulations/runtests.jl
         end
     end
 
@@ -421,16 +412,8 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
             xg = solve!(mg; Assembly=false); xk = solve!(mk; Assembly=false)
             @test reldiff(xk, xg) < 1e-10
 
-            # 4. HyperFEM's Stokes simulation (multi-field, linear form returning 0.0) with both backends.
-            #    K and b agree to 1e-16 (measured with dev/dbg_stokes.jl), but the saddle-point system is ill
-            #    conditioned and the LU solutions differ at 1e-7: the kernel pattern stores the (empty) p-p block,
-            #    which changes the pivoting (Gridap's solution has residual 5e-8, the kernel's 4e-11).
-            sims = normpath(joinpath(@__DIR__, "..", "..", "..", "HyperFEM.jl", "test", "SimulationsTests"))
-            include(joinpath(sims, "StokesSimulation.jl"))
-            xg = stokes_simulation()
-            xk = stokes_simulation(backend=:kernel)
-            @test norm(xg) ≈ 4199.925167995936
-            @test reldiff(xk, xg) < 1e-6
+            # 4. HyperFEM's Stokes simulation (multi-field, linear form returning 0.0) with both backends:
+            #    simulations/runtests.jl
         end
     end
 
@@ -469,4 +452,6 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
             @test_throws ErrorException update_state!(model, Ac, Fh, Fh⁻; backend=:other)
         end
     end
+
+    include(joinpath(@__DIR__, "simulations", "runtests.jl"))
 end
