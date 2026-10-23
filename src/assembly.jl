@@ -21,8 +21,22 @@ struct Fallback
     assem::SparseMatrixAssembler
 end
 
+"""
+Facets of a skeleton triangulation: the FE-space cells on each side, the facet colouring and the
+positions of the facet matrices (2ndl × 2ndl) in the nonzeros of the global matrix (see `skeleton.jl`).
+"""
+mutable struct SkeletonData
+    trian::Triangulation
+    cells::Matrix{Int32}            # 2 × nfacets: cell of the plus and of the minus side
+    colors::Vector{Vector{Int32}}   # facets per colour (two facets of a colour share no free test dof)
+    nzpos::Matrix{Int32}            # (2ndl)² × nfacets, filled by `sparsity`
+end
+
+"A compiled group of terms (volume or boundary cells: `Group`; skeleton facets: `SkeletonGroup`)."
+abstract type AbstractGroup end
+
 "A compiled group of terms: same triangulation and quadrature."
-struct Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}
+struct Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF} <: AbstractGroup
     pf::PF
     lin::LF               # LinearForm (no dual numbers) or nothing
     locs::NTuple{NF,Int}  # offset of each field in the element vector
@@ -42,14 +56,15 @@ end
 
 function Group(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int, cellmap, colors, previous=Any[];
                linear_maps::Bool=true, boundary=nothing)
-    pf = PointForm(terms)
+    pf = PointForm(terms; nf=length(Uspaces))
     ls = vcat(pf.test.leaves, pf.trial.leaves, leaves(terms, :unknown))
     isempty(ls) && error("HyperFEMKernels: integral without unknown, test or trial functions")
+    all(l -> l.side === :cell, ls) || error("HyperFEMKernels: plus/minus traces outside a skeleton triangulation")
     w = uniform_value(terms[1].weights, "the quadrature weights")
     # quadrature points in the reference cell (for a boundary group: the face points mapped to the cell)
     xq = boundary === nothing ? uniform_value(get_data(ls[1].points), "the quadrature points") : boundary.xq
     # reuse geometry and shape-function tables of a previous operator with the same quadrature
-    k = findfirst(g -> g.trian === trian && g.xq == xq && g.geo.w == w, previous)
+    k = findfirst(g -> g isa Group && g.trian === trian && g.xq == xq && g.geo.w == w, previous)
     if k === nothing
         strian = get_triangulation(Uspaces[1])
         geo = boundary === nothing ? GeoTable(strian, xq, w; cells=cellmap) : GeoTable(strian, xq, w; cells=cellmap, Jf=boundary.Jf)
@@ -100,7 +115,14 @@ struct KernelOperator{R,J,US,VS} <: NonlinearOperator
     cache_aux::Bool
     linear_maps::Bool
     fallback::Fallback
+    skel::Vector{SkeletonData}       # skeleton triangulations with groups (facet cells, colours, positions)
 end
+
+"A skeleton (interior facets with a plus and a minus cell): its glue to the cells is a `SkeletonPair`."
+is_skeleton(trian::Triangulation, D::Int) = num_cell_dims(trian) == D - 1 && Geometry.get_glue(trian, Val(D)) isa Geometry.SkeletonPair
+
+"Skeletons that have Jacobian groups (their facets enter the sparsity pattern)."
+jacobian_skeletons(skel::Vector{SkeletonData}, jgroups) = filter(sd -> any(g -> g isa SkeletonGroup && g.skel === sd, jgroups), skel)
 
 """
     integration_cells(trian, space_trian) -> Vector{Int32}
@@ -155,16 +177,43 @@ Compile the groups of the forms; forms whose compilation fails (unsupported tria
 quadrature or operation) are added to `fallback` with the reason and are assembled by Gridap.
 """
 function compile_groups(forms::Vector{Form}, U, locs, D::Int, colors, previous=Any[];
-                        linear_maps::Bool=true, fallback=Tuple{Any,String}[])
+                        linear_maps::Bool=true, fallback=Tuple{Any,String}[],
+                        skel::Vector{SkeletonData}=SkeletonData[], previous_skel::Vector{SkeletonData}=SkeletonData[],
+                        fields::Vector{FieldLayout}=FieldLayout[], nrows::Int=0, ndl::Int=0)
     groups = Any[]
     Us = field_spaces(U)
     strian = get_triangulation(Us[1])
     for form in forms
         fgroups = Any[]
         try
+            if is_skeleton(form.trian, D)
+                # facets with two cells: the data of the skeleton (cells per facet, colouring) is shared by the
+                # classes of all the forms on it and reused from a previous operator (`update`)
+                k = findfirst(s -> s.trian === form.trian, skel)
+                if k === nothing
+                    kp = findfirst(s -> s.trian === form.trian, previous_skel)
+                    sd = kp === nothing ? skeleton_data(form.trian, strian, fields, nrows) :
+                         SkeletonData(form.trian, previous_skel[kp].cells, previous_skel[kp].colors, previous_skel[kp].nzpos)
+                    push!(skel, sd)
+                else
+                    sd = skel[k]
+                end
+                bykey = Dict{UInt,Vector{Term}}()
+                order = UInt[]
+                for t in form.terms
+                    kk = objectid(t.weights)
+                    haskey(bykey, kk) || (push!(order, kk); bykey[kk] = Term[])
+                    push!(bykey[kk], t)
+                end
+                for kk in order, cls in skeleton_classes(form.trian, bykey[kk], D)
+                    push!(fgroups, SkeletonGroup(bykey[kk], form.trian, Us, locs, D, ndl, sd, cls, previous; linear_maps))
+                end
+                append!(groups, fgroups)
+                continue
+            end
             # the cell map and the colouring of a triangulation only depend on the triangulation: reuse those of
             # a previous operator (`update`) instead of recomputing them (both are O(cells))
-            prev = findfirst(g -> g.trian === form.trian, previous)
+            prev = findfirst(g -> g isa Group && g.trian === form.trian, previous)
             cmap = prev === nothing ? integration_cells(form.trian, strian) : previous[prev].cellmap
             bykey = Dict{UInt,Vector{Term}}()
             order = UInt[]
@@ -308,12 +357,13 @@ function KernelOperator(res, jac, U::FESpace, V::FESpace; nthreads::Int=Threads.
     jforms, jfb = capture(jac, probes(U, :unknown), probes(U, :trial), probes(V, :test))
     locs = Tuple(fl.loc for fl in fields)
     colors = color_cells(fields, ncells, toff)
-    rgroups = compile_groups(rforms, U, locs, D, colors; linear_maps, fallback=rfb)
-    jgroups = compile_groups(jforms, U, locs, D, colors; linear_maps, fallback=jfb)
+    skel = SkeletonData[]
+    rgroups = compile_groups(rforms, U, locs, D, colors; linear_maps, fallback=rfb, skel, fields, nrows=toff, ndl=loc)
+    jgroups = compile_groups(jforms, U, locs, D, colors, rgroups; linear_maps, fallback=jfb, skel, fields, nrows=toff, ndl=loc)   # tables shared with the residual
     warn_fallback("residual", rfb); warn_fallback("Jacobian", jfb)
     fb = Fallback(Any[t for (t, _) in rfb], Any[t for (t, _) in jfb], SparseMatrixAssembler(U, V))
-    A0, nzpos = sparsity(fields, loc, ncells, toff, uoff, fallback_pattern(fb, U, V, jac))
-    KernelOperator(res, jac, U, V, fields, loc, rgroups, jgroups, A0, nzpos, colors, nthreads, cache_aux, linear_maps, fb)
+    A0, nzpos = sparsity(fields, loc, ncells, toff, uoff, fallback_pattern(fb, U, V, jac); skel=jacobian_skeletons(skel, jgroups))
+    KernelOperator(res, jac, U, V, fields, loc, rgroups, jgroups, A0, nzpos, colors, nthreads, cache_aux, linear_maps, fb, skel)
 end
 
 """
@@ -329,23 +379,29 @@ function update(op::KernelOperator, res, jac)
     lm = op.linear_maps
     rforms, rfb = capture(res, probes(op.U, :unknown), probes(op.V, :test))
     jforms, jfb = capture(jac, probes(op.U, :unknown), probes(op.U, :trial), probes(op.V, :test))
-    rgroups = compile_groups(rforms, op.U, locs, D, op.colors, prev; linear_maps=lm, fallback=rfb)
-    jgroups = compile_groups(jforms, op.U, locs, D, op.colors, prev; linear_maps=lm, fallback=jfb)
+    nrows = sum(num_free_dofs, field_spaces(op.V))
+    skel = SkeletonData[]
+    rgroups = compile_groups(rforms, op.U, locs, D, op.colors, prev; linear_maps=lm, fallback=rfb, skel, previous_skel=op.skel,
+                             fields=op.fields, nrows, ndl=op.ndl)
+    jgroups = compile_groups(jforms, op.U, locs, D, op.colors, prev; linear_maps=lm, fallback=jfb, skel, previous_skel=op.skel,
+                             fields=op.fields, nrows, ndl=op.ndl)
     warn_fallback("residual", rfb); warn_fallback("Jacobian", jfb)
     fb = Fallback(Any[t for (t, _) in rfb], Any[t for (t, _) in jfb], op.fallback.assem)
-    same = length(fb.jtrians) == length(op.fallback.jtrians) && all(t -> any(s -> s === t, op.fallback.jtrians), fb.jtrians)
+    jskel, jskel0 = jacobian_skeletons(skel, jgroups), jacobian_skeletons(op.skel, op.jgroups)
+    same = length(fb.jtrians) == length(op.fallback.jtrians) && all(t -> any(s -> s === t, op.fallback.jtrians), fb.jtrians) &&
+           length(jskel) == length(jskel0) && all(s -> any(t -> t.trian === s.trian, jskel0), jskel)
     A0, nzpos = same ? (op.A0, op.nzpos) : begin
         ncells = num_cells(get_triangulation(field_spaces(op.U)[1]))
-        sparsity(op.fields, op.ndl, ncells, sum(num_free_dofs, field_spaces(op.V)), sum(num_free_dofs, field_spaces(op.U)),
-                 fallback_pattern(fb, op.U, op.V, jac))
+        sparsity(op.fields, op.ndl, ncells, nrows, sum(num_free_dofs, field_spaces(op.U)), fallback_pattern(fb, op.U, op.V, jac); skel=jskel)
     end
-    KernelOperator(res, jac, op.U, op.V, op.fields, op.ndl, rgroups, jgroups, A0, nzpos, op.colors, op.nthreads, op.cache_aux, op.linear_maps, fb)
+    KernelOperator(res, jac, op.U, op.V, op.fields, op.ndl, rgroups, jgroups, A0, nzpos, op.colors, op.nthreads, op.cache_aux, op.linear_maps, fb, skel)
 end
 
 # ---------------------------------------------------------------------------------------------
 # Sparsity pattern and nonzero positions
 
-function sparsity(fields::Vector{FieldLayout}, ndl::Int, ncells::Int, nrows::Int, ncols::Int, extra=nothing)
+function sparsity(fields::Vector{FieldLayout}, ndl::Int, ncells::Int, nrows::Int, ncols::Int, extra=nothing;
+                  skel::Vector{SkeletonData}=SkeletonData[])
     grow = zeros(Int32, ndl, ncells)
     gcol = zeros(Int32, ndl, ncells)
     for fl in fields, cell in 1:ncells, j in 1:fl.nd
@@ -370,6 +426,9 @@ function sparsity(fields::Vector{FieldLayout}, ndl::Int, ncells::Int, nrows::Int
             push!(keys, (UInt64(c) << 32) | UInt64(rv[p]))
         end
     end
+    for sd in skel          # coupling between the two cells of every facet
+        skeleton_keys!(keys, sd, grow, gcol, ndl)
+    end
     sort!(keys)
     unique!(keys)
     cnt = zeros(Int, ncols)
@@ -384,6 +443,9 @@ function sparsity(fields::Vector{FieldLayout}, ndl::Int, ncells::Int, nrows::Int
         colptr[c+1] = colptr[c] + cnt[c]
     end
     A0 = SparseMatrixCSC(nrows, ncols, colptr, rowval, zeros(length(keys)))
+    for sd in skel
+        skeleton_positions!(sd, grow, gcol, ndl, colptr, rowval)
+    end
     nzpos = zeros(Int32, ndl * ndl, ncells)
     Threads.@threads for cell in 1:ncells
         for jj in 1:ndl
@@ -479,14 +541,14 @@ end
 # The element functions only read dense arrays; the scatter is the part that changes for MPI
 # (local numbering + communication) and GPU (atomics or colours).
 
-"Local values of the unknowns of `cell` (free values and Dirichlet values)."
-@inline function gather_cell!(xl, fields::Vector{FieldLayout}, x, dvals, cell::Integer)
+"Local values of the unknowns of `cell` (free values and Dirichlet values), from position `shift` of `xl`."
+@inline function gather_cell!(xl, fields::Vector{FieldLayout}, x, dvals, cell::Integer, shift::Int=0)
     for (f, fl) in enumerate(fields)
         off = fl.trial_off
         dv = dvals[f]
         @inbounds for j in 1:fl.nd
             id = fl.trial_ids[j, cell]
-            xl[fl.loc+j] = id > 0 ? x[off+id] : dv[-id]
+            xl[shift+fl.loc+j] = id > 0 ? x[off+id] : dv[-id]
         end
     end
     xl
@@ -602,13 +664,13 @@ end
 "True if every field of the group has node-contiguous dofs (matrix-product path available)."
 contiguous(g::Group) = all(t -> t isa FieldTable{<:Any,<:Any,<:Any,<:Any,true}, g.tables)
 
-"Add an element residual to the global vector (serial numbering)."
-@inline function scatter_residual!(b, fields::Vector{FieldLayout}, re, cell::Integer)
+"Add an element residual (from position `shift` of `re`) to the global vector (serial numbering)."
+@inline function scatter_residual!(b, fields::Vector{FieldLayout}, re, cell::Integer, shift::Int=0)
     for fl in fields
         off = fl.test_off
         @inbounds for j in 1:fl.nd
             id = fl.test_ids[j, cell]
-            id > 0 && (b[off+id] += re[fl.loc+j])
+            id > 0 && (b[off+id] += re[shift+fl.loc+j])
         end
     end
     b
@@ -626,7 +688,7 @@ end
 # ---------------------------------------------------------------------------------------------
 # Threaded CPU driver: colours, then chunks of cells per task.
 
-function run_cells!(kind::Val, b, A, op::KernelOperator, g::Group, x, dvals)
+function run_cells!(kind::Val, b, A, op::KernelOperator, g::AbstractGroup, x, dvals)
     auxd = aux_data(op, g)
     for color in g.colors
         # tasks of at least WORK_PER_TASK "units" (points × element-matrix entries per cell)

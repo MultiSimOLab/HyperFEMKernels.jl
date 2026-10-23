@@ -29,6 +29,8 @@ mutable struct MatrixFreeJacobian{OP,TP,GD}
 end
 
 function MatrixFreeJacobian(op::KernelOperator)
+    any(g -> g isa SkeletonGroup, op.jgroups) &&
+        error("HyperFEMKernels: MatrixFreeJacobian with skeleton integrals is not supported yet")
     tps = map(op.jgroups) do g
         map(t -> TPTable(t, g.xq), g.tables)
     end

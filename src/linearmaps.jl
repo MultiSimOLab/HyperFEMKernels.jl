@@ -99,7 +99,7 @@ function LinearForm(terms0::Vector{Term}, pf::PointForm, tables, aux::Tuple, kin
             push!(term_inputs[i], k)
         end
     end
-    st = CodegenState(pf.test, pf.trial, pf.aux)
+    st = CodegenState(pf.test, pf.trial, pf.aux, pf.nf)
     vals = Any[emit_node!(st, n) for n in inputs]
     ex = :((ops, FV, A) -> begin
         $(st.body...)
@@ -121,7 +121,7 @@ function LinearForm(terms0::Vector{Term}, pf::PointForm, tables, aux::Tuple, kin
     maps = SparseMap[]
     for (i, t) in enumerate(terms)
         gidx = term_inputs[i]
-        lst = CodegenState(pf.test, pf.trial, pf.aux)
+        lst = CodegenState(pf.test, pf.trial, pf.aux, pf.nf)
         for (j, g) in enumerate(gidx)
             lst.subst[inputs[g]] = :(S[$j])
         end
