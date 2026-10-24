@@ -4,7 +4,7 @@
 #
 # For each (p, n): assembly times, the ratio to the fastest run, and the relative difference of the
 # check values (energy, residual and Jacobian norms) to the first code listed; then the Newton
-# runs. The last run of each (code, processes, threads, p, n) is used.
+# runs. The last run of each (code, processes, threads, p, n, assembly/newton) is used.
 import glob
 import json
 import os
@@ -17,7 +17,8 @@ for path in sorted(glob.glob(os.path.join(root, "*.jsonl"))):
         for line in f:
             if line.strip():
                 r = json.loads(line)
-                runs[(r["code"], r["nprocs"], r["nthreads"], r["p"], r["n"])] = r
+                kind = "newton" if "newton_iters" in r and "t_jac" not in r else "assembly"
+                runs[(r["code"], r["nprocs"], r["nthreads"], r["p"], r["n"], kind)] = r
 if not runs:
     sys.exit(f"no results in {root}")
 
