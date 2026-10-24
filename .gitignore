@@ -26,3 +26,6 @@ dev/
 *.command
 *.log
 benchmark/simulations/env_official/
+
+# Cross-code benchmark: MFEM executable
+benchmark/crosscode/mfem/bench
