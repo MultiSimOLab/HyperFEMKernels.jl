@@ -95,11 +95,12 @@ function skeleton_classes(trian::Triangulation, terms::Vector{Term}, D::Int)
 end
 
 "A compiled class of facets of a skeleton: same points on both sides."
-struct SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D,NF2,LF,JF} <: AbstractGroup
+struct SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D,NF2,LF,JF,UU} <: AbstractGroup
     pf::PF
     lin::LF                        # LinearForm or nothing
     locs::NTuple{NF2,Int}          # offset of each (side, field) in the facet element vector: plus fields, then minus (+ ndl)
     tables::TT                     # FieldTable per (side, field): plus fields at xqp, then minus fields at xqm
+    use::UU                        # FieldUse per (side, field)
     geo::GeoTable{D,JF}            # plus cells at xqp, with Jf (facet measure)
     geom::GeoTable{D,Nothing}      # minus cells at xqm (only Jt⁻¹ is used)
     aux::Tuple                     # Gridap arrays on the skeleton, materialised per facet of the class (AUX: dense types)
@@ -136,6 +137,7 @@ function SkeletonGroup(terms::Vector{Term}, trian::Triangulation, Uspaces, locs,
     fieldof = (ntuple(identity, NF)..., ntuple(identity, NF)...)
     smv = Tuple(SlotSpec(slot_map(pf.test, fieldof[i], tables[i].nc, D; side=sides[i]), D) for i in 1:NF2)
     smu = Tuple(SlotSpec(slot_map(pf.trial, fieldof[i], tables[i].nc, D; side=sides[i]), D) for i in 1:NF2)
+    use = Tuple(field_use(terms, fieldof[i]; side=sides[i]) for i in 1:NF2)
     aux = Tuple(a.array for a in pf.aux)
     any(a -> a isa StateColumns, aux) && error("HyperFEMKernels: internal variables (KernelState) on a skeleton are not supported yet")
     AUX = Tuple{(Matrix{eltype(eltype(a))} for a in aux)...}
@@ -147,8 +149,8 @@ function SkeletonGroup(terms::Vector{Term}, trian::Triangulation, Uspaces, locs,
     end
     colors = [Int32[pos[f] for f in col if pos[f] > 0] for col in skel.colors]
     filter!(!isempty, colors)
-    SkeletonGroup{pf.test.nslots,pf.trial.nslots,typeof(pf),typeof(tables),AUX,typeof(smv),typeof(smu),D,NF2,typeof(lin),typeof(geo.Jf)}(
-        pf, lin, NTuple{NF2,Int}(locs2), tables, geo, geom, aux, smv, smu, trian, cls.key, Ref{Any}(nothing), cls.facets, skel, colors)
+    SkeletonGroup{pf.test.nslots,pf.trial.nslots,typeof(pf),typeof(tables),AUX,typeof(smv),typeof(smu),D,NF2,typeof(lin),typeof(geo.Jf),typeof(use)}(
+        pf, lin, NTuple{NF2,Int}(locs2), tables, use, geo, geom, aux, smv, smu, trian, cls.key, Ref{Any}(nothing), cls.facets, skel, colors)
 end
 
 # ---------------------------------------------------------------------------------------------
@@ -192,8 +194,8 @@ end
 "Same value for the plus half of the tuple and for the minus half."
 @inline side_tuple(a, b, ::Val{N}) where {N} = ntuple(i -> 2i <= N ? a : b, Val(N))
 
-function element_residual!(re, g::SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D,NF2,LF}, xl, auxd, lf::Integer,
-                           Wb) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF2,LF}
+function element_residual!(re, g::SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D,NF2,LF}, xl, auxd,
+                           lf::Integer) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF2,LF}
     fill!(re, 0.0)
     tables, locs, pf = g.tables, g.locs, g.pf
     zsv = zero(SVector{NSV,Float64})
@@ -201,15 +203,14 @@ function element_residual!(re, g::SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D,NF2,LF
         dS, iJp = point_geometry(g.geo, q, lf)
         _, iJm = point_geometry(g.geom, q, lf)
         iJs = side_tuple(iJp, iJm, Val(NF2))
-        map((t, W, iJ) -> point_weights!(W, t, q, iJ), tables, Wb, iJs)
-        FV = map((t, l, W) -> field_point_values(t, xl, l, W), tables, locs, Wb)
+        FV = field_values_sides(tables, locs, g.use, xl, q, iJs)
         Aq = map(a -> @inbounds(a[q, lf]), auxd)
         R = if LF === Nothing
             ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, EMPTY_SLOTS), zsv)
         else
             apply_maps(g.lin, g.lin.state(g.lin.ops, FV, Aq), Val(NSV))
         end
-        map((t, l, sm, W) -> contract_residual!(re, t, l, sm, R, W, dS), tables, locs, g.smv, Wb)
+        map((t, l, sm, iJ) -> contract_residual!(re, t, l, sm, R, q, iJ, dS), tables, locs, g.smv, iJs)
     end
     re
 end
@@ -225,7 +226,7 @@ function element_jacobian!(KeT, g::SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D,NF2,L
         _, iJm = point_geometry(g.geom, q, lf)
         iJs = side_tuple(iJp, iJm, Val(NF2))
         map((t, W, iJ) -> point_weights!(W, t, q, iJ), tables, Wb, iJs)
-        FV = map((t, l, W) -> field_point_values(t, xl, l, W), tables, locs, Wb)
+        FV = field_values_sides(tables, locs, g.use, xl, q, iJs)
         Aq = map(a -> @inbounds(a[q, lf]), auxd)
         T = if LF === Nothing
             ForwardDiff.jacobian(r -> ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsv), zsu)   # T[test slot, trial slot]
@@ -255,7 +256,7 @@ function cells!(::Val{K}, b, A, op::KernelOperator, g::SkeletonGroup{NSV,NSU,PF,
             cp, cm = skel.cells[1, f], skel.cells[2, f]
             gather_cell!(xl, op.fields, x, dvals, cp)
             gather_cell!(xl, op.fields, x, dvals, cm, ndl)
-            element_residual!(re, g, xl, auxd, lf, Wb)
+            element_residual!(re, g, xl, auxd, lf)
             scatter_residual!(b, op.fields, re, cp)
             scatter_residual!(b, op.fields, re, cm, ndl)
         end
@@ -331,8 +332,8 @@ function _element_allocations(kind::Symbol, op::KernelOperator, g::SkeletonGroup
     Wb = map(t -> zeros(t.nn, D + 1), g.tables)
     if kind === :residual
         re = zeros(2ndl)
-        element_residual!(re, g, xl, auxd, 1, Wb)
-        return @allocated element_residual!(re, g, xl, auxd, 1, Wb)
+        element_residual!(re, g, xl, auxd, 1)
+        return @allocated element_residual!(re, g, xl, auxd, 1)
     else
         KeT = zeros(2ndl, 2ndl)
         element_jacobian!(KeT, g, xl, auxd, 1, Wb)
