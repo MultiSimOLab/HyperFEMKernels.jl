@@ -88,7 +88,6 @@ function prepare_cells!(gds::Tuple{GroupData{D},GroupData{D}}, g::SkeletonGroup{
     tables, locs, pf = g.tables, g.locs, g.pf
     ndl = op.ndl
     xl = zeros(2ndl)
-    Wb = map(t -> zeros(t.nn, D + 1), tables)
     zsv = zero(SVector{NSV,Float64}); zsu = zero(SVector{NSU,Float64})
     for lf in lfacets
         f = g.facets[lf]
@@ -98,8 +97,7 @@ function prepare_cells!(gds::Tuple{GroupData{D},GroupData{D}}, g::SkeletonGroup{
             dS, iJp = point_geometry(g.geo, q, lf)
             _, iJm = point_geometry(g.geom, q, lf)
             iJs = side_tuple(iJp, iJm, Val(NF2))
-            map((t, W, iJ) -> point_weights!(W, t, q, iJ), tables, Wb, iJs)
-            FV = map((t, l, W) -> field_point_values(t, xl, l, W), tables, locs, Wb)
+            FV = field_values_sides(tables, locs, g.use, xl, q, iJs)
             Aq = map(a -> @inbounds(a[q, lf]), auxd)
             T = if LF === Nothing
                 ForwardDiff.jacobian(r -> ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsv), zsu)
@@ -122,15 +120,13 @@ end
 function prepare_cells!(gd::GroupData{D}, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}, op, x, dvals, auxd, cells) where {D,NSV,NSU,PF,TT,AUX,SV,SU,NF,LF,JF}
     tables, locs, pf = g.tables, g.locs, g.pf
     xl = zeros(op.ndl)
-    Wb = map(t -> zeros(t.nn, D + 1), tables)
     zsv = zero(SVector{NSV,Float64}); zsu = zero(SVector{NSU,Float64})
     for cell in cells
         sc = g.cellmap[cell]
         gather_cell!(xl, op.fields, x, dvals, sc)
         for q in 1:g.geo.np
             dV, iJt = point_geometry(g.geo, q, cell)
-            map((t, W) -> point_weights!(W, t, q, iJt), tables, Wb)
-            FV = map((t, l, W) -> field_point_values(t, xl, l, W), tables, locs, Wb)
+            FV = field_values(tables, locs, g.use, xl, q, iJt)
             Aq = map(a -> @inbounds(a[q, cell]), auxd)
             T = if LF === Nothing
                 ForwardDiff.jacobian(r -> ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsv), zsu)

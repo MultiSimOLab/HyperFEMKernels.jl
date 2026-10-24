@@ -56,7 +56,142 @@ end
 @inline ldofidx(t::FieldTable{D,T,NN,NC,true}, n, c) where {D,T,NN,NC} = t.ldof[1, c] + n - 1
 @inline ldofidx(t::FieldTable{D,T,NN,NC,false}, n, c) where {D,T,NN,NC} = t.ldof[n, c]
 
-"Value and gradient (Gridap convention) of a field at the point from its local dof values."
+# ---------------------------------------------------------------------------------------------
+# Reference-gradient evaluation and contraction (no per-point transformation of the shape functions)
+#
+# With Jt the (transposed) Jacobian of the cell map and iJt = Jt⁻¹, a physical gradient is
+# ∂N_n/∂x_J = Σ_K iJt[J,K] ∂N_n/∂ξ_K. The chain rule is applied to the field, not to the shape
+# functions: the reference gradient of the field, Ĝ[c,K] = Σ_n x_{n,c} ∂N_n/∂ξ_K, is accumulated
+# in one pass over the nodes (all components and directions at once) and transformed once,
+# ∇u[J,c] = Σ_K iJt[J,K] Ĝ[c,K]; the residual coefficients R[c,J] of the gradient slots are
+# transformed once per point, R̃[c,K] = Σ_J iJt[J,K] R[c,J], and contracted with the reference
+# gradient tables. The tables are shared by all cells (GPU: constant memory); no per-cell buffer.
+
+"""
+    FieldUse{HV,HG}
+
+Which derivatives of an unknown field the weak form evaluates at the points: its value (`HV`)
+and/or its gradient (`HG`). What is not used is not computed.
+"""
+struct FieldUse{HV,HG} end
+
+@inline _smat(iJt::TensorValue{D,D,Float64}) where {D} = SMatrix{D,D,Float64,D * D}(iJt.data)   # both column-major [J,K]
+
+"""
+    field_point_values(t, xl, off, q, iJt, use) -> (u, ∇u)
+
+Value and gradient (Gridap convention: `∇u[J,c] = ∂u_c/∂x_J`) of a field at point `q` from its
+local dof values (from position `off` of `xl`) and the reference tables, in a single pass over
+the nodes. Derivatives not in `use` are returned as zero.
+"""
+@inline function field_point_values(t::FieldTable{D,T,NN,NC}, xl, off::Int, q::Int, iJt,
+                                    ::FieldUse{HV,HG}) where {D,T,NN,NC,HV,HG}
+    v = zero(SVector{NC,Float64})
+    G = zero(SMatrix{NC,D,Float64,NC * D})          # Ĝ[c,K]
+    @inbounds for n in 1:NN
+        x = SVector{NC,Float64}(ntuple(c -> xl[off+ldofidx(t, n, c)], Val(NC)))
+        HV && (v = muladd.(x, t.Nt[n, q], v))
+        if HG
+            d = SVector{D,Float64}(ntuple(K -> t.dNt[n, K, q], Val(D)))
+            G = muladd.(x * transpose(d), 1.0, G)
+        end
+    end
+    g = HG ? _smat(iJt) * transpose(G) : zero(SMatrix{D,NC,Float64,D * NC})   # [J,c]
+    _field_values(T, v, g)
+end
+@inline _field_values(::Type{Float64}, v::SVector{1}, g::SMatrix{D,1}) where {D} =
+    (v[1], VectorValue{D,Float64}(Tuple(g)))
+@inline _field_values(::Type{VectorValue{NC,Float64}}, v::SVector{NC}, g::SMatrix{D,NC}) where {D,NC} =
+    (VectorValue{NC,Float64}(Tuple(v)), TensorValue{D,NC,Float64,D * NC}(Tuple(g)))
+
+"""
+    field_values(tables, locs, use, xl, q, iJt) -> FV
+
+`field_point_values` of every field, as a tuple. Generated (no closures) and inlined, so that the
+node loops of every field are compiled in the caller's loop.
+"""
+@inline @generated function field_values(tables::NTuple{NF,Any}, locs, use, xl, q, iJt) where {NF}
+    ex = [:(field_point_values(tables[$i], xl, locs[$i], q, iJt, use[$i])) for i in 1:NF]
+    :(($(ex...),))
+end
+
+"Same with one `iJt` per field (skeleton: the inverse Jacobian of each side)."
+@inline @generated function field_values_sides(tables::NTuple{NF,Any}, locs, use, xl, q, iJs) where {NF}
+    ex = [:(field_point_values(tables[$i], xl, locs[$i], q, iJs[$i], use[$i])) for i in 1:NF]
+    :(($(ex...),))
+end
+
+"""
+    residual_weights(t, sp, np) -> B (nn × np·LV)
+
+Reference weights of the slots of one field at all points: `B[n, (q-1)LV + jj] = N_n(ξ_q)` for the
+value slot and `∂N_n/∂ξ_K(ξ_q)` for the gradient slots. Shared by all cells; the element residual
+of a cell is `re_f = B · C_f`, with `C_f[(q-1)LV + jj, c]` the transformed coefficients of the cell
+(`residual_coefs!`).
+"""
+function residual_weights(t::FieldTable{D,T,NN,NC}, sp::SlotSpec{NC,LV,HV,HG}, np::Int) where {D,T,NN,NC,LV,HV,HG}
+    B = zeros(NN, np * LV)
+    for q in 1:np, n in 1:NN
+        HV && (B[n, (q-1)*LV+1] = t.Nt[n, q])
+        HG && for K in 1:D
+            B[n, (q-1)*LV+(HV ? 1 : 0)+K] = t.dNt[n, K, q]
+        end
+    end
+    B
+end
+
+"Transformed residual coefficients of one field at point `q` into `C[(q-1)LV + jj, c]` (see `residual_weights`)."
+@inline function residual_coefs!(C, sp::SlotSpec{NC,LV,HV,HG}, R, q::Int, iJt, dV, ::Val{D}) where {NC,LV,HV,HG,D}
+    LV == 0 && return C
+    @inbounds for c in 1:NC
+        HV && (C[(q-1)*LV+1, c] = dV * R[sp.sm[c, 1]])
+        if HG
+            for K in 1:D
+                s = 0.0
+                for J in 1:D
+                    s += iJt[J, K] * R[sp.sm[c, (HV ? 1 : 0)+J]]
+                end
+                C[(q-1)*LV+(HV ? 1 : 0)+K, c] = dV * s
+            end
+        end
+    end
+    C
+end
+
+"""
+    contract_residual!(re, t, loc, sp, R, q, iJt, dV)
+
+Residual contribution of one field at point `q` from the reference tables:
+`re[(n,c)] += dV (R[c,0] N_n + Σ_K R̃[c,K] ∂N_n/∂ξ_K)` with `R̃[c,K] = Σ_J iJt[J,K] R[c,J]`.
+"""
+@inline function contract_residual!(re, t::FieldTable{D,T,NN,NC}, loc::Int, sp::SlotSpec{NC,LV,HV,HG},
+                                    R, q::Int, iJt, dV) where {D,T,NN,NC,LV,HV,HG}
+    LV == 0 && return nothing
+    @inbounds for c in 1:NC
+        r0 = HV ? dV * R[sp.sm[c, 1]] : 0.0
+        rt = ntuple(K -> begin
+                s = 0.0
+                if HG
+                    for J in 1:D
+                        s += iJt[J, K] * R[sp.sm[c, (HV ? 1 : 0)+J]]
+                    end
+                end
+                dV * s
+            end, Val(D))
+        @simd for n in 1:NN
+            acc = HV ? r0 * t.Nt[n, q] : 0.0
+            if HG
+                for K in 1:D
+                    acc += rt[K] * t.dNt[n, K, q]
+                end
+            end
+            re[loc+ldofidx(t, n, c)] += acc
+        end
+    end
+    nothing
+end
+
+"Value and gradient (Gridap convention) of a field at the point from its local dof values and the physical weights `W`."
 @inline function field_point_values(t::FieldTable{D,Float64,NN}, xl, off::Int, W) where {D,NN}
     u = 0.0
     @inbounds @simd for n in 1:NN

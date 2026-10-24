@@ -40,8 +40,13 @@ function _element_allocations(kind::Symbol, op::KernelOperator, g::Group{NSV,NSU
     dNb = map(t -> zeros(t.nn, D + 1), g.tables)
     if kind === :residual
         re = zeros(op.ndl)
-        element_residual!(re, g, xl, auxd, 1, dNb)
-        return @allocated element_residual!(re, g, xl, auxd, 1, dNb)
+        if MATRIX_PRODUCTS && contiguous(g)
+            Cb, Mb = rm_buffers(g)
+            element_residual_mm!(re, g, xl, auxd, 1, Cb, Mb)
+            return @allocated element_residual_mm!(re, g, xl, auxd, 1, Cb, Mb)
+        end
+        element_residual!(re, g, xl, auxd, 1)
+        return @allocated element_residual!(re, g, xl, auxd, 1)
     else
         KeT = zeros(op.ndl, op.ndl)
         element_jacobian!(KeT, g, xl, auxd, 1, dNb)

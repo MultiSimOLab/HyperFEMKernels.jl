@@ -36,11 +36,13 @@ end
 abstract type AbstractGroup end
 
 "A compiled group of terms: same triangulation and quadrature."
-struct Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF} <: AbstractGroup
+struct Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF,UU,RB} <: AbstractGroup
     pf::PF
     lin::LF               # LinearForm (no dual numbers) or nothing
     locs::NTuple{NF,Int}  # offset of each field in the element vector
     tables::TT          # FieldTable per field
+    use::UU             # FieldUse per field: derivatives of the unknown evaluated at the points
+    rb::RB              # reference weights of the test slots per field (`residual_weights`), for the matrix-product residual
     geo::GeoTable{D,JF}
     aux::Tuple          # Gridap arrays, evaluated per cell (lazy; their types are not part of the group's type,
                         # so that a changed auxiliary expression does not recompile the kernels)
@@ -52,6 +54,12 @@ struct Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF} <: AbstractGroup
     auxcache::Base.RefValue{Any}   # dense auxiliary values when cache_aux = true
     cellmap::Vector{Int32}         # integration cell → cell of the FE spaces
     colors::Vector{Vector{Int32}}  # integration cells per colour
+end
+
+"Derivatives of the unknown of field `f` (on `side`) that the terms evaluate at the points."
+function field_use(terms::Vector{Term}, f::Int; side::Symbol=:cell)
+    ls = [l for l in leaves(terms, :unknown) if l.field == f && l.side === side]
+    FieldUse{any(l -> l.deriv == 0, ls),any(l -> l.deriv >= 1, ls)}()
 end
 
 function Group(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int, cellmap, colors, previous=Any[];
@@ -74,12 +82,14 @@ function Group(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int,
     end
     smv = Tuple(SlotSpec(slot_map(pf.test, f, t.nc, D), D) for (f, t) in enumerate(tables))
     smu = Tuple(SlotSpec(slot_map(pf.trial, f, t.nc, D), D) for (f, t) in enumerate(tables))
+    use = Tuple(field_use(terms, f) for f in eachindex(tables))
+    rb = Tuple(residual_weights(t, sp, geo.np) for (t, sp) in zip(tables, smv))
     aux = Tuple(a.array for a in pf.aux)
     AUX = Tuple{(Matrix{eltype(eltype(a))} for a in aux)...}
     NF = length(tables)
     lin = linear_maps ? LinearForm(terms, pf, tables, aux, pf.trial.nslots == 0 ? :res : :jac) : nothing
-    Group{pf.test.nslots,pf.trial.nslots,typeof(pf),typeof(tables),AUX,typeof(smv),typeof(smu),D,NF,typeof(lin),typeof(geo.Jf)}(
-        pf, lin, NTuple{NF,Int}(locs), tables, geo, aux, smv, smu, trian, collect(xq), Ref{Any}(nothing), cellmap, colors)
+    Group{pf.test.nslots,pf.trial.nslots,typeof(pf),typeof(tables),AUX,typeof(smv),typeof(smu),D,NF,typeof(lin),typeof(geo.Jf),typeof(use),typeof(rb)}(
+        pf, lin, NTuple{NF,Int}(locs), tables, use, rb, geo, aux, smv, smu, trian, collect(xq), Ref{Any}(nothing), cellmap, colors)
 end
 
 """
@@ -566,24 +576,86 @@ end
 @inline measure(Jt, Jf) = meas(Jf ⋅ Jt)             # surface: Jacobian of the face map composed with the cell map
 
 "Element residual of `cell` into `re` (local numbering of the element)."
-function element_residual!(re, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}, xl, auxd, cell::Integer,
-                           dNb) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}
+function element_residual!(re, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}, xl, auxd,
+                           cell::Integer) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}
     fill!(re, 0.0)
     tables, locs, pf = g.tables, g.locs, g.pf
     zsv = zero(SVector{NSV,Float64})
     for q in 1:g.geo.np
         dV, iJt = point_geometry(g.geo, q, cell)
-        map((t, W) -> point_weights!(W, t, q, iJt), tables, dNb)
-        FV = map((t, l, W) -> field_point_values(t, xl, l, W), tables, locs, dNb)
+        FV = field_values(tables, locs, g.use, xl, q, iJt)
         Aq = map(a -> @inbounds(a[q, cell]), auxd)
         R = if LF === Nothing
             ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, EMPTY_SLOTS), zsv)
         else
             apply_maps(g.lin, g.lin.state(g.lin.ops, FV, Aq), Val(NSV))
         end
-        map((t, l, sm, W) -> contract_residual!(re, t, l, sm, R, W, dV), tables, locs, g.smv, dNb)
+        map((t, l, sm) -> contract_residual!(re, t, l, sm, R, q, iJt, dV), tables, locs, g.smv)
     end
     re
+end
+
+"""
+Element residual of `cell` as matrix products (node-contiguous dofs): the point loop only stores the
+transformed slot coefficients `C_f[(q,jj), c]`; then `re_f = B_f · C_f` per field with the reference
+weight table `B_f` (`residual_weights`), so the sum over the points runs in registers.
+Buffers from `rm_buffers`.
+"""
+function element_residual_mm!(re, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}, xl, auxd, cell::Integer,
+                              Cb, Mb) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}
+    fill!(re, 0.0)
+    tables, locs, pf = g.tables, g.locs, g.pf
+    np = g.geo.np
+    zsv = zero(SVector{NSV,Float64})
+    for q in 1:np
+        dV, iJt = point_geometry(g.geo, q, cell)
+        FV = field_values(tables, locs, g.use, xl, q, iJt)
+        Aq = map(a -> @inbounds(a[q, cell]), auxd)
+        R = if LF === Nothing
+            ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, EMPTY_SLOTS), zsv)
+        else
+            apply_maps(g.lin, g.lin.state(g.lin.ops, FV, Aq), Val(NSV))
+        end
+        map((sm, C) -> residual_coefs!(C, sm, R, q, iJt, dV, Val(D)), g.smv, Cb)
+    end
+    ntuple(f -> residual_products!(re, tables[f], locs[f], g.smv[f], g.rb[f], Cb[f], Mb[f], np), Val(NF))
+    re
+end
+
+"""
+`re_f += B_f · C_f` (nn × R times R × nc, R = np·LV) through the work matrix `M` (nn × nc), then
+added at the dof positions. With few columns (nc ≤ 3) the plain loops — points outer, nodes inner
+(unit stride in `B`), the nc accumulators of each node updated together — run faster than the
+tiled `gemm_add!` of the Jacobian.
+"""
+@inline function residual_products!(re, t::FieldTable{D,T,NN,NC,true}, loc::Int, sp::SlotSpec{NC,LV}, B, C, M,
+                                    np::Int) where {D,T,NN,NC,LV}
+    LV == 0 && return re
+    fill!(M, 0.0)
+    @inbounds for r in 1:np*LV
+        cr = ntuple(c -> C[r, c], Val(NC))
+        @simd for n in 1:NN
+            b = B[n, r]
+            for c in 1:NC
+                M[n, c] = muladd(b, cr[c], M[n, c])
+            end
+        end
+    end
+    @inbounds for c in 1:NC
+        o = loc + t.ldof[1, c] - 1
+        @simd for n in 1:NN
+            re[o+n] += M[n, c]
+        end
+    end
+    re
+end
+
+"Buffers of the matrix-product residual: coefficients (np·LV × nc) and work matrix (nn × nc) per field."
+function rm_buffers(g::Group)
+    lv(sp::SlotSpec{NC,LV}) where {NC,LV} = LV
+    Cb = map((t, sm) -> zeros(g.geo.np * lv(sm), t.nc), g.tables, g.smv)
+    Mb = map(t -> zeros(t.nn, t.nc), g.tables)
+    Cb, Mb
 end
 
 "Element Jacobian of `cell` into `KeT` (transposed: KeT[trial, test], local numbering)."
@@ -596,7 +668,7 @@ function element_jacobian!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}, xl
     for q in 1:g.geo.np
         dV, iJt = point_geometry(g.geo, q, cell)
         map((t, W) -> point_weights!(W, t, q, iJt), tables, dNb)
-        FV = map((t, l, W) -> field_point_values(t, xl, l, W), tables, locs, dNb)
+        FV = field_values(tables, locs, g.use, xl, q, iJt)
         Aq = map(a -> @inbounds(a[q, cell]), auxd)
         T = if LF === Nothing
             ForwardDiff.jacobian(r -> ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsv), zsu)   # T[test slot, trial slot]
@@ -630,7 +702,7 @@ function element_jacobian_mm!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF},
             q = q0 + ql - 1
             dV, iJt = point_geometry(g.geo, q, cell)
             map((t, W) -> point_weights!(W, t, q, iJt), tables, Wb)
-            FV = map((t, l, W) -> field_point_values(t, xl, l, W), tables, locs, Wb)
+            FV = field_values(tables, locs, g.use, xl, q, iJt)
             Aq = map(a -> @inbounds(a[q, cell]), auxd)
             T = if LF === Nothing
                 ForwardDiff.jacobian(r -> ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsv), zsu)   # T[test slot, trial slot]
@@ -709,16 +781,22 @@ function cells!(::Val{K}, b, A, op::KernelOperator, g::Group{NSV,NSU,PF,TT,AUX,S
                 x, dvals, auxd, cells) where {K,NSV,NSU,PF,TT,AUX,SV,SU,D}
     ndl = op.ndl
     xl = zeros(ndl)
-    dNb = map(t -> zeros(t.nn, D + 1), g.tables)
     if K === :res
         re = zeros(ndl)
+        mm = MATRIX_PRODUCTS && contiguous(g)
+        Cb, Mb = mm ? rm_buffers(g) : (nothing, nothing)
         for cell in cells
             sc = g.cellmap[cell]
             gather_cell!(xl, op.fields, x, dvals, sc)
-            element_residual!(re, g, xl, auxd, cell, dNb)
+            if mm
+                element_residual_mm!(re, g, xl, auxd, cell, Cb, Mb)
+            else
+                element_residual!(re, g, xl, auxd, cell)
+            end
             scatter_residual!(b, op.fields, re, sc)
         end
     else
+        dNb = map(t -> zeros(t.nn, D + 1), g.tables)
         KeT = zeros(ndl, ndl)
         nzv = nonzeros(A)
         mm = MATRIX_PRODUCTS && contiguous(g)
