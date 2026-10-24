@@ -618,7 +618,7 @@ function element_residual_mm!(re, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}, 
         end
         map((sm, C) -> residual_coefs!(C, sm, R, q, iJt, dV, Val(D)), g.smv, Cb)
     end
-    ntuple(f -> residual_products!(re, tables[f], locs[f], g.smv[f], g.rb[f], Cb[f], Mb[f], np), Val(NF))
+    residual_products_all!(re, tables, locs, g.smv, g.rb, Cb, Mb, np)
     re
 end
 
@@ -648,6 +648,15 @@ tiled `gemm_add!` of the Jacobian.
         end
     end
     re
+end
+
+"`residual_products!` of every field; generated (no closures over the tuples, which would allocate)."
+@inline @generated function residual_products_all!(re, tables::NTuple{NF,Any}, locs, smv, rb, Cb, Mb, np) where {NF}
+    calls = [:(residual_products!(re, tables[$f], locs[$f], smv[$f], rb[$f], Cb[$f], Mb[$f], np)) for f in 1:NF]
+    quote
+        $(calls...)
+        re
+    end
 end
 
 "Buffers of the matrix-product residual: coefficients (np·LV × nc) and work matrix (nn × nc) per field."
