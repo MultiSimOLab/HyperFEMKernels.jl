@@ -23,4 +23,6 @@ examples/*/results/
 
 # Local scratch scripts (debugging, watcher launchers): not versioned
 dev/
+*.command
+*.log
 benchmark/simulations/env_official/

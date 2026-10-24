@@ -25,11 +25,9 @@ julia -t auto --project=benchmark benchmark/phase0/em3d.jl cart 40 8 8 2 # large
 ```
 julia -t auto --project=benchmark benchmark/bench1.jl          # Jacobian and residual assembly, Gridap vs kernel
 julia -t auto --project=benchmark benchmark/bench_mf.jl        # matrix-free apply vs SpMV vs assembly
-julia -t auto --project=benchmark benchmark/bench_qblock.jl    # Jacobian assembly vs quadrature-point block size
 julia -t auto --project=benchmark benchmark/bench_visco.jl     # visco-hyperelastic dynamic weak form
 julia -t auto --project=benchmark benchmark/bench_states.jl    # update of the visco internal variables: Gridap vs update_states!
 julia -t auto --project=benchmark benchmark/roofline.jl        # efficiency vs STREAM bandwidth and FMA peak
-julia -t 1 --project=benchmark benchmark/gemm_bench.jl         # element matrix-product micro-benchmark
 ```
 
 ## Profiling of the examples
