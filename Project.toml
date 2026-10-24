@@ -1,6 +1,6 @@
 name = "HyperFEMKernels"
 uuid = "c52e38e0-a033-47df-8a03-a6c4ac881830"
-authors = ["MultiSimOLab"]
+authors = ["Jesús Martínez-Frutos <jesus.martinez@upct.es>", "MultiSimOLab"]
 version = "0.1.0"
 
 [deps]

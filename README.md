@@ -1,4 +1,4 @@
-[![CI](https://github.com/MultiSimOLab/HyperFEMKernels.jl/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/MultiSimOLab/HyperFEMKernels.jl/actions/workflows/ci.yml?branch=main)
+[![CI](https://github.com/MultiSimOLab/HyperFEMKernels.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/MultiSimOLab/HyperFEMKernels.jl/actions/workflows/CI.yml?branch=main)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 # HyperFEMKernels.jl
@@ -57,7 +57,13 @@ The scripts that produce these figures are in [`benchmark/`](benchmark).
 
 ## Installation
 
-HyperFEMKernels is not yet in the General registry. From the Julia REPL:
+From the Julia REPL:
+
+```julia
+pkg> add HyperFEMKernels
+```
+
+Until the package appears in the General registry, add it from the repository instead:
 
 ```julia
 pkg> add https://github.com/MultiSimOLab/HyperFEMKernels.jl

@@ -46,7 +46,7 @@ julia -t auto --project=benchmark benchmark/prof_hmre_vacuum_solve.jl    # where
   1.4 GB per Dirichlet update). Fixed in HyperFEM branch `fix-legacy-coupling` (a `DirichletApplicator` evaluates
   the prescriptions at the Dirichlet nodes of their tag with a cached point search; the update costs 4 ms), which
   also retires the legacy `DirichletBC`/`DirichletCoupling`/`InterpolableBC!`; the example needs HyperFEM with
-  that branch merged with `kernel-backend`. Report: `docs/regresion_DirichletCoupling_HyperFEM.pdf`.
+  that branch merged with `kernel-backend`.
 - New engine features exercised here (now covered by `test/test_subdomains.jl` and the hMRE + vacuum testset of
   `test/hyperfem/runtests.jl`): FE spaces on a sub-triangulation of the model with integrals on parts of it and
   different constitutive laws per part; the boundary of a subdomain as an internal interface (faces interior to
