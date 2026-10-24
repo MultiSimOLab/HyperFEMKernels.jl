@@ -119,8 +119,17 @@ override them: `make MFEM_DIR=$CONDA_PREFIX MFEM_EXT_LIBS="-L$CONDA_PREFIX/lib -
 
 ### All sizes
 
-`run_all.sh` runs the four codes over the sizes of the table above for one number of threads /
-processes (edit the variables at the top).
+`run_all.sh` runs all codes over the sizes of the table above for one number of threads /
+processes (`NPAR` at the top). FEniCSx and MFEM are given by the prefixes of their environments,
+since they may come with different MPI libraries (with conda-forge they need separate
+environments):
+
+```
+conda create -n crosscode-fx -c conda-forge fenics-dolfinx=0.11 petsc4py mpich
+conda create -n crosscode-mf -c conda-forge mfem cxx-compiler make
+FENICSX_ENV=$HOME/miniforge3/envs/crosscode-fx MFEM_ENV=$HOME/miniforge3/envs/crosscode-mf \
+    bash benchmark/crosscode/run_all.sh
+```
 
 ## Fairness notes
 
