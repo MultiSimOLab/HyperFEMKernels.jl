@@ -10,22 +10,25 @@ const TOL = 1e-12
 
 include("common.jl")
 
-@testset "HyperFEMKernels" begin
-    @testset "probes"           begin include("test_probes.jl") end
-    @testset "tree"             begin include("test_tree.jl") end
-    @testset "codegen"          begin include("test_codegen.jl") end
-    @testset "tables"           begin include("test_tables.jl") end
-    @testset "kernels"          begin include("test_kernels.jl") end
-    @testset "linear maps"      begin include("test_linearmaps.jl") end
-    @testset "assembly"         begin include("test_assembly.jl") end
-    @testset "matrix-free"      begin include("test_matrixfree.jl") end
-    @testset "errors"           begin include("test_errors.jl") end
-    @testset "hybrid fallback"  begin include("test_fallback.jl") end
-    @testset "boundary"         begin include("test_boundary.jl") end
-    @testset "H(div) fields"    begin include("test_hdiv.jl") end
-    @testset "CFD (Oseen step)" begin include("test_cfd.jl") end
-    @testset "subdomains, interface" begin include("test_subdomains.jl") end
-    @testset "skeleton"         begin include("test_skeleton.jl") end
-    @testset "states"           begin include("test_states.jl") end
-    @testset "Gridap equality"  begin include("test_gridap_equality.jl") end
+# Test groups (`HFK_TEST_GROUP`): "all" (default), "hdiv" (H(div) fields only) or "core" (everything
+# else). CI runs "core" and "hdiv" as separate jobs so that each stays well below the time limit.
+const TEST_GROUP = get(ENV, "HFK_TEST_GROUP", "all")
+TEST_GROUP in ("all", "core", "hdiv") || error("HFK_TEST_GROUP must be all, core or hdiv (got $TEST_GROUP)")
+const TEST_FILES = [
+    ("probes", "test_probes.jl"), ("tree", "test_tree.jl"), ("codegen", "test_codegen.jl"),
+    ("tables", "test_tables.jl"), ("kernels", "test_kernels.jl"), ("linear maps", "test_linearmaps.jl"),
+    ("assembly", "test_assembly.jl"), ("matrix-free", "test_matrixfree.jl"), ("errors", "test_errors.jl"),
+    ("hybrid fallback", "test_fallback.jl"), ("boundary", "test_boundary.jl"), ("H(div) fields", "test_hdiv.jl"),
+    ("CFD (Oseen step)", "test_cfd.jl"), ("subdomains, interface", "test_subdomains.jl"),
+    ("skeleton", "test_skeleton.jl"), ("states", "test_states.jl"), ("Gridap equality", "test_gridap_equality.jl"),
+]
+in_group(file) = TEST_GROUP == "all" || (TEST_GROUP == "hdiv") == (file == "test_hdiv.jl")
+
+@testset "HyperFEMKernels ($TEST_GROUP)" begin
+    for (name, file) in TEST_FILES
+        in_group(file) || continue
+        @testset "$name" begin
+            include(file)
+        end
+    end
 end
