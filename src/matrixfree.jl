@@ -5,14 +5,18 @@
 # then applies the Jacobian without forming it: per cell, interpolate dx to the points (sum
 # factorisation on n-cubes, dense weights otherwise), multiply by T, contract back. Dirichlet dofs
 # carry zero increments and their rows are not written, so the operator acts on free dofs only.
+# H(div) fields use the dense path with the stored Piola geometry (Jt and Jt⁻¹) and the dof signs
+# at gather/scatter.
 # Skeleton groups do the same per facet with the increments of both cells (dense weights, the
 # Jt⁻¹ of each side; the T and dS arrays are shared by the two `GroupData` of a class).
 
 struct GroupData{D}
     T::Array{Float64,3}          # nsv*nsu × np × ncells (column-major: T[sv + (su-1)*nsv, q, cell])
     iJt::Array{Float64,3}        # D*D × np × ncells
+    Jt::Array{Float64,3}         # D*D × np × ncells (Piola map of H(div) fields)
     dV::Matrix{Float64}          # np × ncells
 end
+GroupData{D}(T, iJt, dV) where {D} = GroupData{D}(T, iJt, similar(iJt), dV)
 
 """
     MatrixFreeJacobian(op::KernelOperator)
@@ -94,8 +98,8 @@ function prepare_cells!(gds::Tuple{GroupData{D},GroupData{D}}, g::SkeletonGroup{
         gather_cell!(xl, op.fields, x, dvals, g.skel.cells[1, f])
         gather_cell!(xl, op.fields, x, dvals, g.skel.cells[2, f], ndl)
         for q in 1:g.geo.np
-            dS, iJp = point_geometry(g.geo, q, lf)
-            _, iJm = point_geometry(g.geom, q, lf)
+            dS, iJp, Jp = point_geometry(g.geo, q, lf)
+            _, iJm, Jm = point_geometry(g.geom, q, lf)
             iJs = side_tuple(iJp, iJm, Val(NF2))
             FV = field_values_sides(tables, locs, g.use, xl, q, iJs)
             Aq = map(a -> @inbounds(a[q, lf]), auxd)
@@ -110,6 +114,8 @@ function prepare_cells!(gds::Tuple{GroupData{D},GroupData{D}}, g::SkeletonGroup{
             @inbounds for i in 1:D*D
                 gp.iJt[i, q, lf] = iJp[i]
                 gm.iJt[i, q, lf] = iJm[i]
+                gp.Jt[i, q, lf] = Jp[i]
+                gm.Jt[i, q, lf] = Jm[i]
             end
             gp.dV[q, lf] = dS
         end
@@ -120,13 +126,15 @@ end
 function prepare_cells!(gd::GroupData{D}, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}, op, x, dvals, auxd, cells) where {D,NSV,NSU,PF,TT,AUX,SV,SU,NF,LF,JF}
     tables, locs, pf = g.tables, g.locs, g.pf
     xl = zeros(op.ndl)
+    sg = zeros(op.ndl)
     zsv = zero(SVector{NSV,Float64}); zsu = zero(SVector{NSU,Float64})
     for cell in cells
         sc = g.cellmap[cell]
         gather_cell!(xl, op.fields, x, dvals, sc)
+        op.signed && apply_signs!(xl, cell_signs!(sg, op.fields, sc), op.ndl)   # state of H(div) fields with the dof signs
         for q in 1:g.geo.np
-            dV, iJt = point_geometry(g.geo, q, cell)
-            FV = field_values(tables, locs, g.use, xl, q, iJt)
+            dV, iJt, Jt = point_geometry(g.geo, q, cell)
+            FV = field_values(tables, locs, g.use, xl, q, iJt, Jt)
             Aq = map(a -> @inbounds(a[q, cell]), auxd)
             T = if LF === Nothing
                 ForwardDiff.jacobian(r -> ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsv), zsu)
@@ -138,6 +146,7 @@ function prepare_cells!(gd::GroupData{D}, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,
             end
             @inbounds for i in 1:D*D
                 gd.iJt[i, q, cell] = iJt[i]
+                gd.Jt[i, q, cell] = Jt[i]
             end
             gd.dV[q, cell] = dV
         end
@@ -165,7 +174,7 @@ function apply_buffers(g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D}, tps, ndl::Int) where
     np = g.geo.np
     (xl=zeros(ndl), re=zeros(ndl),
      su=zeros(NSU, np), sv=zeros(NSV, np),
-     Wb=map(t -> zeros(t.nn, D + 1), g.tables),
+     Wb=map(t -> zeros(t.nn, wcols(t)), g.tables),
      uc=map(t -> zeros(t.nn), g.tables), rc=map(t -> zeros(t.nn), g.tables),
      pts=map(t -> zeros(np, D + 1), g.tables), coef=map(t -> zeros(np, D + 1), g.tables),
      tmp=map(tp -> tp === nothing ? zeros(0, 0) : tp_scratch(tp), tps))
@@ -247,11 +256,18 @@ function apply_cells!(y, gd::GroupData{D}, tps, g::Group{NSV,NSU,PF,TT,AUX,SV,SU
     fields = op.fields
     for cell in cells
         sc = g.cellmap[cell]
-        # gather the increment (zero at Dirichlet dofs)
+        # gather the increment (zero at Dirichlet dofs; with the dof signs of H(div) fields)
         for fl in fields
-            @inbounds for j in 1:fl.nd
-                id = fl.trial_ids[j, sc]
-                b.xl[fl.loc+j] = id > 0 ? dx[fl.trial_off+id] : 0.0
+            if has_signs(fl)
+                @inbounds for j in 1:fl.nd
+                    id = fl.trial_ids[j, sc]
+                    b.xl[fl.loc+j] = id > 0 ? fl.signs[j, sc] * dx[fl.trial_off+id] : 0.0
+                end
+            else
+                @inbounds for j in 1:fl.nd
+                    id = fl.trial_ids[j, sc]
+                    b.xl[fl.loc+j] = id > 0 ? dx[fl.trial_off+id] : 0.0
+                end
             end
         end
         fill!(b.su, 0.0)
@@ -273,11 +289,18 @@ function apply_cells!(y, gd::GroupData{D}, tps, g::Group{NSV,NSU,PF,TT,AUX,SV,SU
         map(tables, locs, g.smv, tps, b.rc, b.coef, b.Wb, b.tmp) do t, loc, sp, tp, rc, coef, W, tmp
             contract_slots!(b.re, t, loc, sp, tp, b.sv, rc, coef, W, tmp, gd, cell, np)
         end
-        # scatter (free test rows only)
+        # scatter (free test rows only; with the dof signs of H(div) fields)
         for fl in fields
-            @inbounds for j in 1:fl.nd
-                id = fl.test_ids[j, sc]
-                id > 0 && (y[fl.test_off+id] += b.re[fl.loc+j])
+            if has_signs(fl)
+                @inbounds for j in 1:fl.nd
+                    id = fl.test_ids[j, sc]
+                    id > 0 && (y[fl.test_off+id] += fl.signs[j, sc] * b.re[fl.loc+j])
+                end
+            else
+                @inbounds for j in 1:fl.nd
+                    id = fl.test_ids[j, sc]
+                    id > 0 && (y[fl.test_off+id] += b.re[fl.loc+j])
+                end
             end
         end
     end
@@ -340,7 +363,37 @@ function interpolate_slots!(su, t::FieldTable{D,T,NN,NC}, loc, sp::SlotSpec{NC,L
     nothing
 end
 
+"H(div) field: value and gradient at every point from the reference tables and the stored Piola geometry."
+function interpolate_slots!(su, t::PiolaTable{D,NN}, loc, sp::SlotSpec{1,LV,HV,HG}, ::Nothing, xl, uc, pts, W, tmp,
+                            gd::GroupData{D}, cell, np) where {D,NN,LV,HV,HG}
+    LV == 0 && return nothing
+    @inbounds for q in 1:np
+        iJt = TensorValue{D,D,Float64,D * D}(ntuple(i -> gd.iJt[i, q, cell], Val(D * D)))
+        Jt = TensorValue{D,D,Float64,D * D}(ntuple(i -> gd.Jt[i, q, cell], Val(D * D)))
+        u, g = field_point_values(t, xl, loc, q, iJt, Jt, FieldUse{HV,HG}())
+        HV && for c in 1:D
+            su[sp.sm[1, c], q] = u[c]
+        end
+        HG && for i in 1:D*D
+            su[sp.sm[1, (HV ? D : 0)+i], q] = g[i]
+        end
+    end
+    nothing
+end
+
 # --- contraction of the test coefficients back to the nodes ---------------------------------
+
+"H(div) field: the slot coefficients of every point pulled back to the reference tables (`contract_residual!`)."
+function contract_slots!(re, t::PiolaTable{D,NN}, loc, sp::SlotSpec{1,LV}, ::Nothing, sv, rc, coef, W, tmp,
+                         gd::GroupData{D}, cell, np) where {D,NN,LV}
+    LV == 0 && return nothing
+    @inbounds for q in 1:np
+        iJt = TensorValue{D,D,Float64,D * D}(ntuple(i -> gd.iJt[i, q, cell], Val(D * D)))
+        Jt = TensorValue{D,D,Float64,D * D}(ntuple(i -> gd.Jt[i, q, cell], Val(D * D)))
+        contract_residual!(re, t, loc, sp, view(sv, :, q), q, iJt, Jt, 1.0)
+    end
+    nothing
+end
 
 function contract_slots!(re, t::FieldTable{D,T,NN,NC}, loc, sp::SlotSpec{NC,LV,HV,HG}, tp::TPTable, sv, rc, coef, W, tmp,
                          gd::GroupData{D}, cell, np) where {D,T,NN,NC,LV,HV,HG}

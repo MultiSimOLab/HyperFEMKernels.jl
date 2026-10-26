@@ -52,6 +52,7 @@ end
 Tensor-product structure of a field table whose reference element is an n-cube with Q^D
 equispaced Lagrange nodes and P^D tensor-product quadrature points, or `nothing`.
 """
+TPTable(::PiolaTable, xq::AbstractVector) = nothing
 function TPTable(t::FieldTable{D,T,NN}, xq::AbstractVector) where {D,T,NN}
     Q = round(Int, NN^(1 / D)); Q^D == NN || return nothing
     np = length(xq)

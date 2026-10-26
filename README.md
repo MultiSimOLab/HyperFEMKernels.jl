@@ -27,8 +27,9 @@ backend for its drivers (`backend = :kernel`).
   operations that Gridap applies pointwise; agreement is checked to machine precision (`check`).
 - **Integrals:** volume integrals, boundary integrals (Neumann, Robin, follower loads with the
   normal) and skeleton integrals on interior facets (`plus`/`minus`, `jump`, `mean`).
-- **Spaces:** Lagrangian spaces of any order on hexahedra, quadrilaterals, tetrahedra and triangles;
-  single- and multi-field; Dirichlet masks; subdomains; auxiliary `FEFunction`s and `CellField`s.
+- **Spaces:** Lagrangian spaces of any order and H(div)-conforming Raviart–Thomas spaces (contravariant
+  Piola map, per-cell dof signs) on hexahedra, quadrilaterals, tetrahedra and triangles; single- and
+  multi-field (e.g. Biot u–W, mixed Darcy); Dirichlet masks; subdomains; auxiliary `FEFunction`s and `CellField`s.
 - **Threads, no allocations.** Cells are coloured so that the assembly loop is threaded without
   locks; element kernels allocate nothing (`allocations` reports it), which is also the
   requirement for GPU execution.
@@ -222,8 +223,9 @@ run with both backends as part of the test suite.
 
 ## Current scope
 
-- Lagrangian (`H1`) spaces; Piola-mapped spaces (Raviart–Thomas, Nédélec) are assembled through the
-  Gridap fallback.
+- Lagrangian (`H1`) and Raviart–Thomas (`H(div)`) spaces in volume and boundary integrals and in the
+  matrix-free Jacobian. Raviart–Thomas fields on skeleton integrals (the terms go to the Gridap fallback)
+  and Nédélec (`H(curl)`) spaces are not supported yet.
 - Shared-memory parallelism (threads). Distributed runs with GridapDistributed and GPU execution
   are design targets: kernels are allocation-free and states use a GPU-friendly layout.
 - Gridap is pinned to 0.19.9, because the engine reads Gridap's internal expression tree.
