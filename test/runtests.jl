@@ -22,6 +22,7 @@ include("common.jl")
     @testset "errors"           begin include("test_errors.jl") end
     @testset "hybrid fallback"  begin include("test_fallback.jl") end
     @testset "boundary"         begin include("test_boundary.jl") end
+    @testset "H(div) fields"    begin include("test_hdiv.jl") end
     @testset "CFD (Oseen step)" begin include("test_cfd.jl") end
     @testset "subdomains, interface" begin include("test_subdomains.jl") end
     @testset "skeleton"         begin include("test_skeleton.jl") end

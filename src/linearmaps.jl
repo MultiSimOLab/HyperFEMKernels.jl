@@ -65,6 +65,7 @@ rand_value(::Type{T}) where {T<:MultiValue} = T(ntuple(_ -> rand(), length(T)))
 
 field_types(::FieldTable{D,Float64}) where {D} = (Float64, VectorValue{D,Float64})
 field_types(::FieldTable{D,VectorValue{NC,Float64}}) where {D,NC} = (VectorValue{NC,Float64}, TensorValue{D,NC,Float64,D * NC})
+field_types(::PiolaTable{D}) where {D} = (VectorValue{D,Float64}, TensorValue{D,D,Float64,D * D})
 
 # Split a slot-dependent expression into additive parts: [(expr, sign), ...].
 function split_sum(n::Node, sgn::Float64=1.0)

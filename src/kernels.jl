@@ -9,18 +9,31 @@
 #
 # The innermost loops run over nodes with unit stride (when the dofs of each component are
 # consecutive), so they vectorise on CPU and map to coalesced accesses on GPU. No BLAS calls.
+#
+# H(div) (Raviart–Thomas) fields use the same contractions with one pseudo-component and one
+# derivative index per value component and per gradient entry; their W is the contravariant Piola
+# map of the reference tables, applied per point (see "H(div) fields" below and `PiolaTable`).
 
 """
-    SlotSpec{NC,LV,HV,HG}
+    SlotSpec{NC,LV,HV,HG,S,COLS}
 
 Slots of the leaves of one field (test or trial) in the slot vector: `sm[c, jj]` is the slot of
 component `c` and "derivative index" `jj`, where the value comes first if present (`HV`) and then
-∂/∂x_1…∂/∂x_D if the gradient is present (`HG`). `LV` = number of derivative indices.
+∂/∂x_1…∂/∂x_D if the gradient is present (`HG`). `LV` = number of derivative indices; `COLS[jj]`
+is the column of the physical weight matrix W (`point_weights!`) of derivative index `jj`.
+
+For an H(div) field (`PiolaTable`) there is one pseudo-component and the derivative indices run over
+the value components (D) and then the gradient entries [J,c] column-major (D²), in the order of the
+columns of W.
 """
-struct SlotSpec{NC,LV,HV,HG,S}
+struct SlotSpec{NC,LV,HV,HG,S,COLS}
     sm::S
 end
 
+SlotSpec(::FieldTable, smap::Matrix{Int}, D::Int) = SlotSpec(smap, D)
+SlotSpec(::PiolaTable{D}, smap::Matrix{Int}, ::Int) where {D} = piola_slotspec(smap, D)
+
+"Nodal field: `smap[c, 1 + J]` = slot of component `c`, value (`J = 0`) or ∂/∂x_J (`slot_map`)."
 function SlotSpec(smap::Matrix{Int}, D::Int)
     nc = size(smap, 1)
     hv = any(>(0), smap[:, 1])
@@ -29,13 +42,27 @@ function SlotSpec(smap::Matrix{Int}, D::Int)
     lv = length(cols)
     sm = SMatrix{nc,lv,Int,nc * lv}(smap[:, cols])
     all(>(0), sm) || error("HyperFEMKernels: partial use of a field's components is not supported")
-    SlotSpec{nc,lv,hv,hg,typeof(sm)}(sm)
+    SlotSpec{nc,lv,hv,hg,typeof(sm),Tuple(cols)}(sm)
 end
 
-"Column of the weight matrix W for derivative index jj (W[:,1] = values, W[:,1+J] = ∂_J)."
-@inline wcol(::SlotSpec{NC,LV,HV}, jj) where {NC,LV,HV} = HV ? jj : jj + 1
+"H(div) field: the slots of all D value components and/or all D² gradient entries, in one row."
+function piola_slotspec(smap::Matrix{Int}, D::Int)
+    size(smap, 1) == D || error("HyperFEMKernels: an H(div) field has $D components")
+    hv = any(>(0), smap[:, 1])
+    hg = any(>(0), smap[:, 2:end])
+    slots = vcat(hv ? smap[:, 1] : Int[], hg ? vec(permutedims(smap[:, 2:end])) : Int[])   # [J,c] column-major: J fastest
+    cols = vcat(hv ? collect(1:D) : Int[], hg ? collect(D+1:D+D*D) : Int[])
+    lv = length(slots)
+    sm = SMatrix{1,lv,Int,lv}(permutedims(slots))
+    all(>(0), sm) || error("HyperFEMKernels: partial use of a field's components is not supported")
+    SlotSpec{1,lv,hv,hg,typeof(sm),Tuple(cols)}(sm)
+end
+
+"Column of the weight matrix W for derivative index jj (nodal: W[:,1] = values, W[:,1+J] = ∂_J)."
+@inline wcol(::SlotSpec{NC,LV,HV,HG,S,COLS}, jj) where {NC,LV,HV,HG,S,COLS} = COLS[jj]
 
 "Shape-function weights of `t` at point `q`: W[n,1] = N_n, W[n,1+J] = ∂N_n/∂x_J."
+@inline point_weights!(W::Matrix{Float64}, t::FieldTable, q::Int, iJt, Jt) = point_weights!(W, t, q, iJt)
 @inline function point_weights!(W::Matrix{Float64}, t::FieldTable{D,T,NN}, q::Int, iJt) where {D,T,NN}
     @inbounds @simd for n in 1:NN
         W[n, 1] = t.Nt[n, q]
@@ -53,8 +80,8 @@ end
     W
 end
 
-@inline ldofidx(t::FieldTable{D,T,NN,NC,true}, n, c) where {D,T,NN,NC} = t.ldof[1, c] + n - 1
-@inline ldofidx(t::FieldTable{D,T,NN,NC,false}, n, c) where {D,T,NN,NC} = t.ldof[n, c]
+@inline ldofidx(t::AbstractFieldTable{D,T,NN,NC,true}, n, c) where {D,T,NN,NC} = t.ldof[1, c] + n - 1
+@inline ldofidx(t::AbstractFieldTable{D,T,NN,NC,false}, n, c) where {D,T,NN,NC} = t.ldof[n, c]
 
 # ---------------------------------------------------------------------------------------------
 # Reference-gradient evaluation and contraction (no per-point transformation of the shape functions)
@@ -84,6 +111,7 @@ Value and gradient (Gridap convention: `∇u[J,c] = ∂u_c/∂x_J`) of a field a
 local dof values (from position `off` of `xl`) and the reference tables, in a single pass over
 the nodes. Derivatives not in `use` are returned as zero.
 """
+@inline field_point_values(t::FieldTable, xl, off::Int, q::Int, iJt, Jt, use::FieldUse) = field_point_values(t, xl, off, q, iJt, use)
 @inline function field_point_values(t::FieldTable{D,T,NN,NC}, xl, off::Int, q::Int, iJt,
                                     ::FieldUse{HV,HG}) where {D,T,NN,NC,HV,HG}
     v = zero(SVector{NC,Float64})
@@ -105,13 +133,13 @@ end
     (VectorValue{NC,Float64}(Tuple(v)), TensorValue{D,NC,Float64,D * NC}(Tuple(g)))
 
 """
-    field_values(tables, locs, use, xl, q, iJt) -> FV
+    field_values(tables, locs, use, xl, q, iJt, Jt) -> FV
 
 `field_point_values` of every field, as a tuple. Generated (no closures) and inlined, so that the
 node loops of every field are compiled in the caller's loop.
 """
-@inline @generated function field_values(tables::NTuple{NF,Any}, locs, use, xl, q, iJt) where {NF}
-    ex = [:(field_point_values(tables[$i], xl, locs[$i], q, iJt, use[$i])) for i in 1:NF]
+@inline @generated function field_values(tables::NTuple{NF,Any}, locs, use, xl, q, iJt, Jt) where {NF}
+    ex = [:(field_point_values(tables[$i], xl, locs[$i], q, iJt, Jt, use[$i])) for i in 1:NF]
     :(($(ex...),))
 end
 
@@ -141,7 +169,7 @@ function residual_weights(t::FieldTable{D,T,NN,NC}, sp::SlotSpec{NC,LV,HV,HG}, n
 end
 
 "Transformed residual coefficients of one field at point `q` into `C[(q-1)LV + jj, c]` (see `residual_weights`)."
-@inline function residual_coefs!(C, sp::SlotSpec{NC,LV,HV,HG}, R, q::Int, iJt, dV, ::Val{D}) where {NC,LV,HV,HG,D}
+@inline function residual_coefs!(C, ::FieldTable{D}, sp::SlotSpec{NC,LV,HV,HG}, R, q::Int, iJt, Jt, dV) where {D,NC,LV,HV,HG}
     LV == 0 && return C
     @inbounds for c in 1:NC
         HV && (C[(q-1)*LV+1, c] = dV * R[sp.sm[c, 1]])
@@ -164,6 +192,7 @@ end
 Residual contribution of one field at point `q` from the reference tables:
 `re[(n,c)] += dV (R[c,0] N_n + Σ_K R̃[c,K] ∂N_n/∂ξ_K)` with `R̃[c,K] = Σ_J iJt[J,K] R[c,J]`.
 """
+@inline contract_residual!(re, t::FieldTable, loc::Int, sp::SlotSpec, R, q::Int, iJt, Jt, dV) = contract_residual!(re, t, loc, sp, R, q, iJt, dV)
 @inline function contract_residual!(re, t::FieldTable{D,T,NN,NC}, loc::Int, sp::SlotSpec{NC,LV,HV,HG},
                                     R, q::Int, iJt, dV) where {D,T,NN,NC,LV,HV,HG}
     LV == 0 && return nothing
@@ -187,6 +216,125 @@ Residual contribution of one field at point `q` from the reference tables:
             end
             re[loc+ldofidx(t, n, c)] += acc
         end
+    end
+    nothing
+end
+
+# ---------------------------------------------------------------------------------------------
+# H(div) fields: contravariant Piola map per point (see `PiolaTable`)
+#
+# With v̂ the reference vector shape function and Ĝ = ∇̂v̂ its reference gradient ([K,L] = ∂v̂_L/∂ξ_K),
+# the physical value and gradient (without the dof sign, applied at gather/scatter) are
+#     v[c]    = (1/|det Jt|) Σ_K v̂[K] Jt[K,c]
+#     ∇v[J,c] = (1/|det Jt|) Σ_K Σ_L iJt[J,K] Ĝ[K,L] Jt[L,c]
+# Both are linear in (v̂, Ĝ): they are applied once per point to the field (sum over the dofs of
+# the reference tables first) and, transposed, to the residual coefficients.
+
+@inline _smat_t(Jt::TensorValue{D,D,Float64}) where {D} = SMatrix{D,D,Float64,D * D}(Jt.data)
+
+"Physical weights of an H(div) field at point `q`: W[n, c] = v_n[c], W[n, D + J + D(c-1)] = ∇v_n[J,c]."
+@inline function point_weights!(W::Matrix{Float64}, t::PiolaTable{D,NN}, q::Int, iJt, Jt) where {D,NN}
+    J = _smat_t(Jt); iJ = _smat_t(iJt)
+    s = 1.0 / meas(Jt)
+    @inbounds for n in 1:NN
+        v = SVector{D,Float64}(ntuple(K -> t.Vt[n, K, q], Val(D)))
+        G = SMatrix{D,D,Float64,D * D}(ntuple(i -> t.dVt[n, (i-1)%D+1, (i-1)÷D+1, q], Val(D * D)))   # [K,L]
+        pv = s * (transpose(J) * v)                  # [c]
+        pg = s * (iJ * G * J)                        # [J,c]
+        for c in 1:D
+            W[n, c] = pv[c]
+        end
+        for i in 1:D*D
+            W[n, D+i] = pg[i]
+        end
+    end
+    W
+end
+
+"Value and gradient of an H(div) field at point `q` from its local (signed) dof values and the reference tables."
+@inline function field_point_values(t::PiolaTable{D,NN}, xl, off::Int, q::Int, iJt, Jt,
+                                    ::FieldUse{HV,HG}) where {D,NN,HV,HG}
+    v = zero(SVector{D,Float64})
+    G = zero(SMatrix{D,D,Float64,D * D})
+    @inbounds for n in 1:NN
+        x = xl[off+n]
+        HV && (v = muladd.(SVector{D,Float64}(ntuple(K -> t.Vt[n, K, q], Val(D))), x, v))
+        HG && (G = muladd.(SMatrix{D,D,Float64,D * D}(ntuple(i -> t.dVt[n, (i-1)%D+1, (i-1)÷D+1, q], Val(D * D))), x, G))
+    end
+    s = 1.0 / meas(Jt)
+    J = _smat_t(Jt)
+    pv = HV ? s * (transpose(J) * v) : v
+    pg = HG ? s * (_smat_t(iJt) * G * J) : G
+    (VectorValue{D,Float64}(Tuple(pv)), TensorValue{D,D,Float64,D * D}(Tuple(pg)))
+end
+
+"""
+Transformed residual coefficients of an H(div) field at a point: the coefficients `R` of the value
+slots (`Rv[c]`) and gradient slots (`Rg[J,c]`) pulled back to the reference tables,
+`R̃v[K] = (1/|det Jt|) Σ_c Jt[K,c] Rv[c]`, `R̃g[K,L] = (1/|det Jt|) Σ_J Σ_c iJt[J,K] Rg[J,c] Jt[L,c]`,
+as one static vector in the order of the derivative indices (values, then gradient entries with K fastest).
+"""
+@inline function piola_coefs(sp::SlotSpec{1,LV,HV,HG}, R, iJt, Jt, dV, ::Val{D}) where {LV,HV,HG,D}
+    s = dV / meas(Jt)
+    J = _smat_t(Jt)
+    rv = if HV
+        Rv = SVector{D,Float64}(ntuple(c -> @inbounds(R[sp.sm[1, c]]), Val(D)))
+        s * (J * Rv)
+    else
+        zero(SVector{0,Float64})
+    end
+    rg = if HG
+        o = HV ? D : 0
+        Rg = SMatrix{D,D,Float64,D * D}(ntuple(i -> @inbounds(R[sp.sm[1, o+i]]), Val(D * D)))   # [J,c]
+        s * (transpose(_smat_t(iJt)) * Rg * transpose(J))                                      # [K,L]
+    else
+        zero(SMatrix{0,0,Float64,0})
+    end
+    SVector{LV,Float64}((Tuple(rv)..., Tuple(rg)...))
+end
+
+"Reference weights of the slots of an H(div) field at all points (see the nodal `residual_weights`)."
+function residual_weights(t::PiolaTable{D,NN}, sp::SlotSpec{1,LV,HV,HG}, np::Int) where {D,NN,LV,HV,HG}
+    B = zeros(NN, np * LV)
+    for q in 1:np, n in 1:NN
+        HV && for K in 1:D
+            B[n, (q-1)*LV+K] = t.Vt[n, K, q]
+        end
+        HG && for L in 1:D, K in 1:D
+            B[n, (q-1)*LV+(HV ? D : 0)+K+D*(L-1)] = t.dVt[n, K, L, q]
+        end
+    end
+    B
+end
+
+@inline function residual_coefs!(C, ::PiolaTable{D}, sp::SlotSpec{1,LV}, R, q::Int, iJt, Jt, dV) where {D,LV}
+    LV == 0 && return C
+    rt = piola_coefs(sp, R, iJt, Jt, dV, Val(D))
+    @inbounds for jj in 1:LV
+        C[(q-1)*LV+jj, 1] = rt[jj]
+    end
+    C
+end
+
+"Residual contribution of an H(div) field at point `q` from the reference tables."
+@inline function contract_residual!(re, t::PiolaTable{D,NN}, loc::Int, sp::SlotSpec{1,LV,HV,HG},
+                                    R, q::Int, iJt, Jt, dV) where {D,NN,LV,HV,HG}
+    LV == 0 && return nothing
+    rt = piola_coefs(sp, R, iJt, Jt, dV, Val(D))
+    @inbounds @simd for n in 1:NN
+        acc = 0.0
+        if HV
+            for K in 1:D
+                acc += rt[K] * t.Vt[n, K, q]
+            end
+        end
+        if HG
+            o = HV ? D : 0
+            for L in 1:D, K in 1:D
+                acc += rt[o+K+D*(L-1)] * t.dVt[n, K, L, q]
+            end
+        end
+        re[loc+n] += acc
     end
     nothing
 end
@@ -228,7 +376,7 @@ end
 end
 
 "Residual contribution of one field."
-@inline function contract_residual!(re, t::FieldTable{D,T,NN,NC}, loc::Int, sp::SlotSpec{NC,LV},
+@inline function contract_residual!(re, t::AbstractFieldTable{D,T,NN,NC}, loc::Int, sp::SlotSpec{NC,LV},
                                     R, W, dV) where {D,T,NN,NC,LV}
     LV == 0 && return nothing
     @inbounds for c in 1:NC
@@ -246,8 +394,8 @@ end
 end
 
 "Jacobian block (test field f, trial field g), stored transposed: KeT[trial dof, test dof]."
-@inline function contract_jacobian!(KeT, tf::FieldTable{D,Tf,NNf,NCf}, locf::Int, spf::SlotSpec{NCf,LVf}, Wf,
-                                    tg::FieldTable{D,Tg,NNg,NCg}, locg::Int, spg::SlotSpec{NCg,LVg}, Wg,
+@inline function contract_jacobian!(KeT, tf::AbstractFieldTable{D,Tf,NNf,NCf}, locf::Int, spf::SlotSpec{NCf,LVf}, Wf,
+                                    tg::AbstractFieldTable{D,Tg,NNg,NCg}, locg::Int, spg::SlotSpec{NCg,LVg}, Wg,
                                     T, dV) where {D,Tf,NNf,NCf,LVf,Tg,NNg,NCg,LVg}
     (LVf == 0 || LVg == 0) && return nothing
     colsf = ntuple(jj -> wcol(spf, jj), Val(LVf))
@@ -374,8 +522,8 @@ end
     ntuple(j -> muladd.(a, @inbounds(B[r, n0+j-1]), acc[j]), Val(NB))
 
 "Add the products of one block (f, g) to KeT (transposed element matrix)."
-@inline function block_products!(KeT, tf::FieldTable{D,Tf,NNf,NCf,true}, locf::Int, spf::SlotSpec{NCf,LVf}, B,
-                                 tg::FieldTable{D,Tg,NNg,NCg,true}, locg::Int, spg::SlotSpec{NCg,LVg}, G,
+@inline function block_products!(KeT, tf::AbstractFieldTable{D,Tf,NNf,NCf,true}, locf::Int, spf::SlotSpec{NCf,LVf}, B,
+                                 tg::AbstractFieldTable{D,Tg,NNg,NCg,true}, locg::Int, spg::SlotSpec{NCg,LVg}, G,
                                  np::Int) where {D,Tf,NNf,NCf,LVf,Tg,NNg,NCg,LVg}
     (LVf == 0 || LVg == 0) && return KeT
     R = np * LVf

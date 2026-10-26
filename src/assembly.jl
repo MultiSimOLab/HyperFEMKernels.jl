@@ -12,7 +12,10 @@ struct FieldLayout
     trial_off::Int              # same, trial
     loc::Int                    # offset of the field in the element vector
     nd::Int
+    signs::Matrix{Int8}         # ndofs × ncells, ±1 per cell dof of an H(div) field (`cell_signs`); 0 × 0 if none
 end
+FieldLayout(test_ids, trial_ids, test_off, trial_off, loc, nd) = FieldLayout(test_ids, trial_ids, test_off, trial_off, loc, nd, Matrix{Int8}(undef, 0, 0))
+has_signs(fl::FieldLayout) = !isempty(fl.signs)
 
 "Triangulations assembled by Gridap (`[:all]` = every contribution) and the Gridap assembler."
 struct Fallback
@@ -76,12 +79,12 @@ function Group(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int,
     if k === nothing
         strian = get_triangulation(Uspaces[1])
         geo = boundary === nothing ? GeoTable(strian, xq, w; cells=cellmap) : GeoTable(strian, xq, w; cells=cellmap, Jf=boundary.Jf)
-        tables = Tuple(FieldTable(s, xq, D) for s in Uspaces)
+        tables = Tuple(field_table(s, xq, D) for s in Uspaces)
     else
         geo, tables = previous[k].geo, previous[k].tables
     end
-    smv = Tuple(SlotSpec(slot_map(pf.test, f, t.nc, D), D) for (f, t) in enumerate(tables))
-    smu = Tuple(SlotSpec(slot_map(pf.trial, f, t.nc, D), D) for (f, t) in enumerate(tables))
+    smv = Tuple(SlotSpec(t, slot_map(pf.test, f, ncomps(field_types(t)[1]), D), D) for (f, t) in enumerate(tables))
+    smu = Tuple(SlotSpec(t, slot_map(pf.trial, f, ncomps(field_types(t)[1]), D), D) for (f, t) in enumerate(tables))
     use = Tuple(field_use(terms, f) for f in eachindex(tables))
     rb = Tuple(residual_weights(t, sp, geo.np) for (t, sp) in zip(tables, smv))
     aux = Tuple(a.array for a in pf.aux)
@@ -126,6 +129,7 @@ struct KernelOperator{R,J,US,VS} <: NonlinearOperator
     linear_maps::Bool
     fallback::Fallback
     skel::Vector{SkeletonData}       # skeleton triangulations with groups (facet cells, colours, positions)
+    signed::Bool                     # some field has dof signs (H(div)): applied at gather/scatter
 end
 
 "A skeleton (interior facets with a plus and a minus cell): its glue to the cells is a `SkeletonPair`."
@@ -358,7 +362,7 @@ function KernelOperator(res, jac, U::FESpace, V::FESpace; nthreads::Int=Threads.
     toff, uoff, loc = 0, 0, 0
     for (su, sv) in zip(Us, Vs)
         nd = length(testitem(get_cell_dof_ids(sv)))
-        push!(fields, FieldLayout(cell_dof_matrix(sv, nd), cell_dof_matrix(su, nd), toff, uoff, loc, nd))
+        push!(fields, FieldLayout(cell_dof_matrix(sv, nd), cell_dof_matrix(su, nd), toff, uoff, loc, nd, cell_signs(sv, nd)))
         toff += num_free_dofs(sv)
         uoff += num_free_dofs(su)
         loc += nd
@@ -373,7 +377,8 @@ function KernelOperator(res, jac, U::FESpace, V::FESpace; nthreads::Int=Threads.
     warn_fallback("residual", rfb); warn_fallback("Jacobian", jfb)
     fb = Fallback(Any[t for (t, _) in rfb], Any[t for (t, _) in jfb], SparseMatrixAssembler(U, V))
     A0, nzpos = sparsity(fields, loc, ncells, toff, uoff, fallback_pattern(fb, U, V, jac); skel=jacobian_skeletons(skel, jgroups))
-    KernelOperator(res, jac, U, V, fields, loc, rgroups, jgroups, A0, nzpos, colors, nthreads, cache_aux, linear_maps, fb, skel)
+    KernelOperator(res, jac, U, V, fields, loc, rgroups, jgroups, A0, nzpos, colors, nthreads, cache_aux, linear_maps, fb, skel,
+                   any(has_signs, fields))
 end
 
 """
@@ -404,7 +409,8 @@ function update(op::KernelOperator, res, jac)
         ncells = num_cells(get_triangulation(field_spaces(op.U)[1]))
         sparsity(op.fields, op.ndl, ncells, nrows, sum(num_free_dofs, field_spaces(op.U)), fallback_pattern(fb, op.U, op.V, jac); skel=jskel)
     end
-    KernelOperator(res, jac, op.U, op.V, op.fields, op.ndl, rgroups, jgroups, A0, nzpos, op.colors, op.nthreads, op.cache_aux, op.linear_maps, fb, skel)
+    KernelOperator(res, jac, op.U, op.V, op.fields, op.ndl, rgroups, jgroups, A0, nzpos, op.colors, op.nthreads, op.cache_aux, op.linear_maps, fb, skel,
+                   op.signed)
 end
 
 # ---------------------------------------------------------------------------------------------
@@ -564,13 +570,48 @@ end
     xl
 end
 
-"Geometry at point `q` of `cell`: (dV, inverse of Jt)."
+"Geometry at point `q` of `cell`: (dV, inverse of Jt, Jt)."
 @inline function point_geometry(geo::GeoTable{D}, q::Int, cell::Integer) where {D}
     Jt = zero(TensorValue{D,D,Float64,D * D})
     @inbounds for n in 1:geo.ng
         Jt += outer(geo.dM[q, n], geo.coords[n, cell])
     end
-    (geo.w[q] * measure(Jt, geo.Jf), inv(Jt))
+    (geo.w[q] * measure(Jt, geo.Jf), inv(Jt), Jt)
+end
+
+"""
+Signs of the local dofs of `cell` (±1 on the H(div) fields, 1 elsewhere) into `sg` from position
+`shift`. The local values are multiplied by them after `gather_cell!` and the element residual and
+Jacobian before the scatter (`apply_signs!`): the kernels then see the unsigned reference shape functions.
+"""
+@inline function cell_signs!(sg, fields::Vector{FieldLayout}, cell::Integer, shift::Int=0)
+    for fl in fields
+        if has_signs(fl)
+            @inbounds for j in 1:fl.nd
+                sg[shift+fl.loc+j] = fl.signs[j, cell]
+            end
+        else
+            @inbounds for j in 1:fl.nd
+                sg[shift+fl.loc+j] = 1.0
+            end
+        end
+    end
+    sg
+end
+@inline function apply_signs!(v::AbstractVector, sg, n::Int)
+    @inbounds @simd for i in 1:n
+        v[i] *= sg[i]
+    end
+    v
+end
+@inline function apply_signs!(K::AbstractMatrix, sg, n::Int)
+    @inbounds for jj in 1:n
+        s = sg[jj]
+        @simd for ii in 1:n
+            K[ii, jj] *= s * sg[ii]
+        end
+    end
+    K
 end
 @inline measure(Jt, ::Nothing) = meas(Jt)           # volume
 @inline measure(Jt, Jf) = meas(Jf ⋅ Jt)             # surface: Jacobian of the face map composed with the cell map
@@ -582,15 +623,15 @@ function element_residual!(re, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}, xl,
     tables, locs, pf = g.tables, g.locs, g.pf
     zsv = zero(SVector{NSV,Float64})
     for q in 1:g.geo.np
-        dV, iJt = point_geometry(g.geo, q, cell)
-        FV = field_values(tables, locs, g.use, xl, q, iJt)
+        dV, iJt, Jt = point_geometry(g.geo, q, cell)
+        FV = field_values(tables, locs, g.use, xl, q, iJt, Jt)
         Aq = map(a -> @inbounds(a[q, cell]), auxd)
         R = if LF === Nothing
             ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, EMPTY_SLOTS), zsv)
         else
             apply_maps(g.lin, g.lin.state(g.lin.ops, FV, Aq), Val(NSV))
         end
-        map((t, l, sm) -> contract_residual!(re, t, l, sm, R, q, iJt, dV), tables, locs, g.smv)
+        map((t, l, sm) -> contract_residual!(re, t, l, sm, R, q, iJt, Jt, dV), tables, locs, g.smv)
     end
     re
 end
@@ -608,15 +649,15 @@ function element_residual_mm!(re, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}, 
     np = g.geo.np
     zsv = zero(SVector{NSV,Float64})
     for q in 1:np
-        dV, iJt = point_geometry(g.geo, q, cell)
-        FV = field_values(tables, locs, g.use, xl, q, iJt)
+        dV, iJt, Jt = point_geometry(g.geo, q, cell)
+        FV = field_values(tables, locs, g.use, xl, q, iJt, Jt)
         Aq = map(a -> @inbounds(a[q, cell]), auxd)
         R = if LF === Nothing
             ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, EMPTY_SLOTS), zsv)
         else
             apply_maps(g.lin, g.lin.state(g.lin.ops, FV, Aq), Val(NSV))
         end
-        map((sm, C) -> residual_coefs!(C, sm, R, q, iJt, dV, Val(D)), g.smv, Cb)
+        map((t, sm, C) -> residual_coefs!(C, t, sm, R, q, iJt, Jt, dV), tables, g.smv, Cb)
     end
     residual_products_all!(re, tables, locs, g.smv, g.rb, Cb, Mb, np)
     re
@@ -628,7 +669,7 @@ added at the dof positions. With few columns (nc ≤ 3) the plain loops — poin
 (unit stride in `B`), the nc accumulators of each node updated together — run faster than the
 tiled `gemm_add!` of the Jacobian.
 """
-@inline function residual_products!(re, t::FieldTable{D,T,NN,NC,true}, loc::Int, sp::SlotSpec{NC,LV}, B, C, M,
+@inline function residual_products!(re, t::AbstractFieldTable{D,T,NN,NC,true}, loc::Int, sp::SlotSpec{NC,LV}, B, C, M,
                                     np::Int) where {D,T,NN,NC,LV}
     LV == 0 && return re
     fill!(M, 0.0)
@@ -675,9 +716,9 @@ function element_jacobian!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}, xl
     zsv = zero(SVector{NSV,Float64})
     zsu = zero(SVector{NSU,Float64})
     for q in 1:g.geo.np
-        dV, iJt = point_geometry(g.geo, q, cell)
-        map((t, W) -> point_weights!(W, t, q, iJt), tables, dNb)
-        FV = field_values(tables, locs, g.use, xl, q, iJt)
+        dV, iJt, Jt = point_geometry(g.geo, q, cell)
+        map((t, W) -> point_weights!(W, t, q, iJt, Jt), tables, dNb)
+        FV = field_values(tables, locs, g.use, xl, q, iJt, Jt)
         Aq = map(a -> @inbounds(a[q, cell]), auxd)
         T = if LF === Nothing
             ForwardDiff.jacobian(r -> ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsv), zsu)   # T[test slot, trial slot]
@@ -709,9 +750,9 @@ function element_jacobian_mm!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF},
         nq = min(qb, np - q0 + 1)
         for ql in 1:nq
             q = q0 + ql - 1
-            dV, iJt = point_geometry(g.geo, q, cell)
-            map((t, W) -> point_weights!(W, t, q, iJt), tables, Wb)
-            FV = field_values(tables, locs, g.use, xl, q, iJt)
+            dV, iJt, Jt = point_geometry(g.geo, q, cell)
+            map((t, W) -> point_weights!(W, t, q, iJt, Jt), tables, Wb)
+            FV = field_values(tables, locs, g.use, xl, q, iJt, Jt)
             Aq = map(a -> @inbounds(a[q, cell]), auxd)
             T = if LF === Nothing
                 ForwardDiff.jacobian(r -> ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsv), zsu)   # T[test slot, trial slot]
@@ -736,14 +777,14 @@ point_block(np::Int) = (qb = POINT_BLOCK[]; qb <= 0 ? np : min(qb, np))
 function mm_buffers(g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D}) where {NSV,NSU,PF,TT,AUX,SV,SU,D}
     np = point_block(g.geo.np)
     lv(sp::SlotSpec{NC,LV}) where {NC,LV} = LV
-    Wb = map(t -> zeros(t.nn, D + 1), g.tables)
+    Wb = map(t -> zeros(t.nn, wcols(t)), g.tables)
     Bb = map((t, sm) -> zeros(np * lv(sm), t.nn), g.tables, g.smv)
     Gb = map((tf, smf) -> map((tg, smg) -> zeros(tg.nn, np * lv(smf), tg.nc, tf.nc), g.tables, g.smu), g.tables, g.smv)
     (Wb, Bb, Gb)
 end
 
 "True if every field of the group has node-contiguous dofs (matrix-product path available)."
-contiguous(g::Group) = all(t -> t isa FieldTable{<:Any,<:Any,<:Any,<:Any,true}, g.tables)
+contiguous(g::Group) = all(t -> t isa AbstractFieldTable{<:Any,<:Any,<:Any,<:Any,true}, g.tables)
 
 "Add an element residual (from position `shift` of `re`) to the global vector (serial numbering)."
 @inline function scatter_residual!(b, fields::Vector{FieldLayout}, re, cell::Integer, shift::Int=0)
@@ -790,6 +831,8 @@ function cells!(::Val{K}, b, A, op::KernelOperator, g::Group{NSV,NSU,PF,TT,AUX,S
                 x, dvals, auxd, cells) where {K,NSV,NSU,PF,TT,AUX,SV,SU,D}
     ndl = op.ndl
     xl = zeros(ndl)
+    signed = op.signed
+    sg = zeros(ndl)
     if K === :res
         re = zeros(ndl)
         mm = MATRIX_PRODUCTS && contiguous(g)
@@ -797,15 +840,17 @@ function cells!(::Val{K}, b, A, op::KernelOperator, g::Group{NSV,NSU,PF,TT,AUX,S
         for cell in cells
             sc = g.cellmap[cell]
             gather_cell!(xl, op.fields, x, dvals, sc)
+            signed && apply_signs!(xl, cell_signs!(sg, op.fields, sc), ndl)
             if mm
                 element_residual_mm!(re, g, xl, auxd, cell, Cb, Mb)
             else
                 element_residual!(re, g, xl, auxd, cell)
             end
+            signed && apply_signs!(re, sg, ndl)
             scatter_residual!(b, op.fields, re, sc)
         end
     else
-        dNb = map(t -> zeros(t.nn, D + 1), g.tables)
+        dNb = map(t -> zeros(t.nn, wcols(t)), g.tables)
         KeT = zeros(ndl, ndl)
         nzv = nonzeros(A)
         mm = MATRIX_PRODUCTS && contiguous(g)
@@ -813,11 +858,13 @@ function cells!(::Val{K}, b, A, op::KernelOperator, g::Group{NSV,NSU,PF,TT,AUX,S
         for cell in cells
             sc = g.cellmap[cell]
             gather_cell!(xl, op.fields, x, dvals, sc)
+            signed && apply_signs!(xl, cell_signs!(sg, op.fields, sc), ndl)
             if mm
                 element_jacobian_mm!(KeT, g, xl, auxd, cell, Wb, Bb, Gb)
             else
                 element_jacobian!(KeT, g, xl, auxd, cell, dNb)
             end
+            signed && apply_signs!(KeT, sg, ndl)
             scatter_jacobian!(nzv, op.nzpos, KeT, ndl, sc)
         end
     end

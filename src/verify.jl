@@ -37,7 +37,7 @@ function _element_allocations(kind::Symbol, op::KernelOperator, g::Group{NSV,NSU
     auxd = materialize_aux(g, 1)
     xl = zeros(op.ndl)
     gather_cell!(xl, op.fields, x, dvals, g.cellmap[1])
-    dNb = map(t -> zeros(t.nn, D + 1), g.tables)
+    dNb = map(t -> zeros(t.nn, wcols(t)), g.tables)
     if kind === :residual
         re = zeros(op.ndl)
         if MATRIX_PRODUCTS && contiguous(g)
