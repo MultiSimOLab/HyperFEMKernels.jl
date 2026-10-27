@@ -274,7 +274,7 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
     @testset "drivers with backend=:kernel: Dirichlet projection (ProjectDirichlet=true)" begin
         CM = HyperFEM.ComputationalModels
         if !isdefined(CM, :dirichlet_projection)
-            @info "HyperFEM without the kernel backend of the drivers (branch kernel-backend): driver tests skipped"
+            @info "HyperFEM without the kernel backend of the drivers (needs HyperFEM ≥ 0.0.7): driver tests skipped"
         else
             # 1. The projection increment of a step, kernel vs Gridap, at a nonzero state; twice, so that the
             #    second call reuses the kernel operator of the first (`update`).
@@ -325,7 +325,7 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
     @testset "StaticLinearModel with backend=:kernel (matrix, load, Dirichlet lift, re-assembly, several loads, Stokes)" begin
         CM = HyperFEM.ComputationalModels
         if !isdefined(CM, :linear_system)
-            @info "HyperFEM without the kernel backend of StaticLinearModel (branch kernel-backend): linear driver tests skipped"
+            @info "HyperFEM without the kernel backend of StaticLinearModel (needs HyperFEM ≥ 0.0.7): linear driver tests skipped"
         else
             # Linear elasticity, Dirichlet lift (nonzero displacement on "moving") and body load.
             geometry = CartesianDiscreteModel((0, 1.0, 0, 0.2, 0, 0.2), (5, 2, 2))
@@ -420,7 +420,7 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
     @testset "HyperFEM's state interface with backend=:kernel (CellState(model, dΩ; backend), update_state!(model, ...; backend))" begin
         PM = HyperFEM.PhysicalModels
         if !isdefined(PM, :new_state)
-            @info "HyperFEM without the kernel backend of the states (branch kernel-backend): state interface tests skipped"
+            @info "HyperFEM without the kernel backend of the states (needs HyperFEM ≥ 0.0.7): state interface tests skipped"
         else
             geometry = CartesianDiscreteModel((0, 0.05, 0, 0.005, 0, 0.002), (5, 2, 2))
             model = GeneralizedMaxwell(NeoHookean3D(μ=13446.1, λ=0.0) + VolumetricEnergy(λ=2.5e6),
@@ -454,7 +454,7 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
     end
 end
 
-# HyperFEM's simulation tests (test/SimulationsTests of HyperFEM.jl, branch kernel-backend), with both backends:
+# HyperFEM's simulation tests (test/SimulationsTests of HyperFEM.jl), with both backends:
 # every simulation runs with :gridap and :kernel, the reference values are checked with each one and the kernel
 # results are compared with Gridap's. They live in HyperFEM (their final place) and are included here, at top
 # level (they load packages and define constants). Skipped when the HyperFEM next to this package has no kernel
@@ -468,5 +468,5 @@ end
 if hyperfem_has_backend
     include(hyperfem_sims)
 else
-    @info "HyperFEM without the kernel backend (branch kernel-backend): HyperFEM's simulation tests skipped"
+    @info "HyperFEM without the kernel backend (needs HyperFEM ≥ 0.0.7): HyperFEM's simulation tests skipped"
 end
