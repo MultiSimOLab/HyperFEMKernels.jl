@@ -30,6 +30,17 @@ julia -t auto --project=benchmark benchmark/bench_states.jl    # update of the v
 julia -t auto --project=benchmark benchmark/roofline.jl        # efficiency vs STREAM bandwidth and FMA peak
 ```
 
+## Compilation cost
+
+Time to first assembly with each backend, every measurement in a fresh Julia process: building
+the operator, first `residual!`, first `jacobian!`, and a warm `residual!`+`jacobian!`, with the
+part spent compiling. A last process per backend assembles both cases in sequence to show the
+marginal cost of a new weak form once the engine is compiled.
+
+```
+julia -t auto --project=benchmark benchmark/bench_compile.jl   # EM plate P1 and EM box Q2, Gridap vs kernel
+```
+
 ## Profiling of the examples
 
 ```

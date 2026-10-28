@@ -26,3 +26,9 @@ dev/
 *.command
 *.log
 benchmark/simulations/env_official/
+
+# Generated PDF reports in docs/: not versioned
+docs/*.pdf
+
+# Compiled cross-code benchmark binaries (built from the crosscode-benchmark branch)
+benchmark/crosscode/mfem/bench
