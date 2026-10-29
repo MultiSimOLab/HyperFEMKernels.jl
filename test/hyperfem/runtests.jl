@@ -271,7 +271,7 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
         end
     end
 
-    @testset "drivers with backend=:kernel: Dirichlet projection (ProjectDirichlet=true)" begin
+    @testset "drivers with backend=:compiled: Dirichlet projection (ProjectDirichlet=true)" begin
         CM = HyperFEM.ComputationalModels
         if !isdefined(CM, :dirichlet_projection)
             @info "HyperFEM without the kernel backend of the drivers (needs HyperFEM ≥ 0.0.7): driver tests skipped"
@@ -290,7 +290,7 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
             k = Kinematics(Mechano, Solid)
             res(Λ) = (u, v) -> residual(physmodel, k, u, v, dΩ)
             jac(Λ) = (u, du, v) -> jacobian(physmodel, k, u, du, v, dΩ)
-            models = map((:gridap, :kernel)) do backend
+            models = map((:lazy, :compiled)) do backend
                 V = TestFESpace(Ω, reffeu, D_bc, conformity=:H1); U = TrialFESpace(V, D_bc, 0.0)
                 StaticNonlinearModel(res, jac, U, V, D_bc; nls=NewtonSolver(LUSolver(); verbose=false), backend=backend)
             end
@@ -322,7 +322,7 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
         end
     end
 
-    @testset "StaticLinearModel with backend=:kernel (matrix, load, Dirichlet lift, re-assembly, several loads, Stokes)" begin
+    @testset "StaticLinearModel with backend=:compiled (matrix, load, Dirichlet lift, re-assembly, several loads, Stokes)" begin
         CM = HyperFEM.ComputationalModels
         if !isdefined(CM, :linear_system)
             @info "HyperFEM without the kernel backend of StaticLinearModel (needs HyperFEM ≥ 0.0.7): linear driver tests skipped"
@@ -348,7 +348,7 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
             @test_throws ErrorException StaticLinearModel(l, a, spaces()..., D_bc; backend=:other)
 
             # 1. lf + bf: K and b at construction, solution, re-assembly with other Dirichlet values
-            mg, mk = map((:gridap, :kernel)) do backend
+            mg, mk = map((:lazy, :compiled)) do backend
                 StaticLinearModel(l, a, spaces()..., D_bc; backend)
             end
             Kg, bg = system(mg); Kk, bk = system(mk)
@@ -368,7 +368,7 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
             @test mk.caches[7][] isa KernelOperator
 
             # 2. bf only: the matrix, the right-hand side given to solve! and the functor (Assembly=true)
-            mg, mk = map((:gridap, :kernel)) do backend
+            mg, mk = map((:lazy, :compiled)) do backend
                 StaticLinearModel(a, spaces()..., D_bc; backend)
             end
             Kg, bg = system(mg); Kk, bk = system(mk)
@@ -388,7 +388,7 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
             Ds = BoundaryConditions(BoundaryCondition("fixed", 0.0), BoundaryCondition("moving", 1.0))
             κ(∇u) = 2.0 * ∇u
             as(u, v) = ∫((κ ∘ ∇(u)) ⋅ ∇(v))dΩ
-            mg, mk = map((:gridap, :kernel)) do backend
+            mg, mk = map((:lazy, :compiled)) do backend
                 Vs = TestFESpace(Ω, reffes, Ds, conformity=:H1)
                 StaticLinearModel(as, TrialFESpace(Vs, Ds, 1.0), Vs, Ds; backend)
             end
@@ -402,7 +402,7 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
             @test mk.caches[7][] isa KernelOperator
 
             # 3. several linear forms on repeated spaces (load vectors without Dirichlet lift)
-            mg, mk = map((:gridap, :kernel)) do backend
+            mg, mk = map((:lazy, :compiled)) do backend
                 StaticLinearModel([l, l2], a, spaces()..., D_bc; backend)
             end
             xg = solve!(mg); xk = solve!(mk)
@@ -417,7 +417,7 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
         end
     end
 
-    @testset "HyperFEM's state interface with backend=:kernel (CellState(model, dΩ; backend), update_state!(model, ...; backend))" begin
+    @testset "HyperFEM's state interface with backend=:compiled (CellState(model, dΩ; backend), update_state!(model, ...; backend))" begin
         PM = HyperFEM.PhysicalModels
         if !isdefined(PM, :new_state)
             @info "HyperFEM without the kernel backend of the states (needs HyperFEM ≥ 0.0.7): state interface tests skipped"
@@ -435,16 +435,16 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
             dense(s::CellState) = reduce(hcat, s.values); dense(s::KernelState) = s.values
             same(a, b) = maximum(norm, dense(a) - dense(b)) <= 1e-12 * max(1.0, maximum(norm, dense(b)))
             Ag = CellState(model, dΩ)                                    # Gridap's storage and loop (reference)
-            Ak = CellState(model, dΩ; backend=:kernel)                   # KernelStates: the engine, with any backend
+            Ak = CellState(model, dΩ; backend=:compiled)                   # KernelStates: the engine, with any backend
             Ac = CellState(model, dΩ)                                    # Gridap's storage, the engine's loop
-            Ae = CellState(em, dΩ; backend=:kernel)
+            Ae = CellState(em, dΩ; backend=:compiled)
             @test all(s -> s isa KernelState, Ak) && all(s -> s isa KernelState, Ae) && all(s -> s isa CellState, Ac)
             @test_throws ErrorException CellState(model, dΩ; backend=:other)
             for _ in 1:2
                 update_state!(model, Ag, Fh, Fh⁻)
                 update_state!(model, Ak, Fh, Fh⁻)
-                update_state!(model, Ac, Fh, Fh⁻; backend=:kernel)
-                update_state!(em, Ae, Fh, nothing, Fh⁻; backend=:kernel)        # (state, F, E, Fn)
+                update_state!(model, Ac, Fh, Fh⁻; backend=:compiled)
+                update_state!(em, Ae, Fh, nothing, Fh⁻; backend=:compiled)        # (state, F, E, Fn)
                 @test all(same(a, g) for (a, g) in zip(Ak, Ag))
                 @test all(same(a, g) for (a, g) in zip(Ac, Ag))
                 @test all(same(a, g) for (a, g) in zip(Ae, Ag))
@@ -455,7 +455,7 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
 end
 
 # HyperFEM's simulation tests (test/SimulationsTests of HyperFEM.jl), with both backends:
-# every simulation runs with :gridap and :kernel, the reference values are checked with each one and the kernel
+# every simulation runs with :lazy and :compiled, the reference values are checked with each one and the kernel
 # results are compared with Gridap's. They live in HyperFEM (their final place) and are included here, at top
 # level (they load packages and define constants). Skipped when the HyperFEM next to this package has no kernel
 # backend (e.g. main).

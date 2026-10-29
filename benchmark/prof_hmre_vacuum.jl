@@ -7,7 +7,7 @@ include(joinpath(@__DIR__, "..", "examples", "hmre_vacuum_2d", "hmre_vacuum_2d.j
 const HK = HyperFEMKernels
 best(f; n=3) = (f(); minimum(@elapsed(f()) for _ in 1:n))
 
-s = build(:kernel)
+s = build(:compiled)
 args = (Dict(:stepping => (nsteps=1, maxbisec=5), :ProjectDirichlet => true), Dict(:stepping => (nsteps=1, maxbisec=5)),
         Dict(:stepping => (nsteps=1, maxbisec=5), :ProjectDirichlet => true))
 solve!(s.comp_model; stepping=(nsteps=2, nsubsteps=1, maxbisec=1), kargsolve=args, verbose=false)   # a deformed state

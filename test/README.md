@@ -38,7 +38,7 @@ tests; locally: `julia test/hyperfem/setup.jl` once, then
 
 HyperFEM's simulation tests (`test/SimulationsTests` of HyperFEM.jl, ≥ 0.0.7) are included at the
 end of `test/hyperfem/runtests.jl`: nine simulations (HyperFEM's seven, a Turek DFG 2D-1 Navier-Stokes test and the
-hMRE + vacuum staggered example reduced to half the potential and four steps), each one run with `:gridap` and
-`:kernel`, reference values checked with both and the kernel compared with Gridap. They live in HyperFEM, their
+hMRE + vacuum staggered example reduced to half the potential and four steps), each one run with `:lazy` and
+`:compiled`, reference values checked with both and the kernel compared with Gridap. They live in HyperFEM, their
 final place; with a HyperFEM without the kernel backend they are skipped with a message. The CI job `hyperfem`
 clones HyperFEM's `main`.

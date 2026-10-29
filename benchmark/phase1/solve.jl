@@ -1,4 +1,4 @@
-# Phase 1 — full HyperFEM solve with backend = :gridap or :kernel (same Newton, same steps).
+# Phase 1 — full HyperFEM solve with backend = :lazy or :compiled (same Newton, same steps).
 #
 #   julia -t auto --project=benchmark benchmark/phase1/solve.jl em plate 2 1 kernel   # EM plate n=2, P1
 #   julia -t auto --project=benchmark benchmark/phase1/solve.jl em box 20 4 4 2 gridap
@@ -95,12 +95,12 @@ function main(args)
     @printf("DOFs %d\ncold: build %.2f s + solve %.2f s\nwarm: build %.2f s + solve %.2f s = %.2f s\n", n, tb0, ts0, tb1, ts1, tb1 + ts1)
     resdir = joinpath(@__DIR__, "..", "results"); mkpath(resdir)
     serialize(joinpath(resdir, "phase1_$(tag)_$(backend).jls"), (x=x, tb=tb1, ts=ts1, cold=tb0 + ts0))
-    other = joinpath(resdir, "phase1_$(tag)_$(backend == :kernel ? :gridap : :kernel).jls")
+    other = joinpath(resdir, "phase1_$(tag)_$(backend == :compiled ? :lazy : :compiled).jls")
     if isfile(other)
         o = deserialize(other)
         @printf("vs %s: final state rel. diff %.2e, warm total %.2f s vs %.2f s (×%.2f)\n",
-                backend == :kernel ? "gridap" : "kernel", norm(x - o.x) / norm(o.x), tb1 + ts1, o.tb + o.ts,
-                backend == :kernel ? (o.tb + o.ts) / (tb1 + ts1) : (tb1 + ts1) / (o.tb + o.ts))
+                backend == :compiled ? "lazy" : "compiled", norm(x - o.x) / norm(o.x), tb1 + ts1, o.tb + o.ts,
+                backend == :compiled ? (o.tb + o.ts) / (tb1 + ts1) : (tb1 + ts1) / (o.tb + o.ts))
     end
 end
 
