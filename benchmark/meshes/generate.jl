@@ -1,7 +1,7 @@
 # Refinable meshes with the same geometry and physical tags as the HyperFEM examples.
 #
 #   julia --project=benchmark benchmark/meshes/generate.jl em n      # EM plate, structured hexahedra
-#   julia --project=benchmark benchmark/meshes/generate.jl hmre r    # hMRE Short_magnet, triangles
+#   julia --project=benchmark benchmark/meshes/generate.jl hmre r [rv]   # hMRE Short_magnet, triangles
 #   julia --project=benchmark benchmark/meshes/generate.jl turek h   # DFG flow around a cylinder 2D, triangles
 #
 # em n   : plate 8 × 0.8 × 40 (x, y, z) in two layers y ∈ [0, 0.4] and [0.4, 0.8], like
@@ -11,7 +11,9 @@
 # hmre r : geometry of test/models/Short_magnet.msh (beam 0.05 × 0.002,
 #          magnet, vacuum box and outer box) with all its physical tags. Element sizes ≈ 5e-4 on the
 #          beam, 3e-3 on the vacuum box and magnet, 1e-2 on the outer box, divided by r; r = 1
-#          reproduces the original element counts closely; cells grow as r².
+#          reproduces the original element counts closely; cells grow as r². The optional rv (default r)
+#          refines the magnet and the vacuum boxes only by rv, to grow the beam (the solid DOFs) without
+#          growing the vacuum: `hmre 30 2` for the solver baseline.
 #
 # turek h: channel of the DFG benchmark "flow around a cylinder" 2D (Schäfer & Turek 1996): rectangle
 #          2.2 × 0.41 with a circle of radius 0.05 centred at (0.2, 0.2); element size h on the channel and
@@ -51,10 +53,10 @@ function em_plate(n::Int)
     finish(file)
 end
 
-function hmre_short(r::Real)
-    file = joinpath(OUTDIR, "hmre_short_r$(r).msh")
+function hmre_short(r::Real, rv::Real=r)
+    file = joinpath(OUTDIR, rv == r ? "hmre_short_r$(r).msh" : "hmre_short_r$(r)_rv$(rv).msh")
     # point sizes and transfinite counts fitted to the segment counts of Short_magnet.msh (r = 1)
-    hb, hv, hm, ho = 2.4e-3 / r, 3e-3 / r, 8e-3 / r, 1e-2 / r
+    hb, hv, hm, ho = 2.4e-3 / r, 3e-3 / rv, 8e-3 / rv, 1e-2 / rv
     gmsh.initialize(); gmsh.option.setNumber("General.Terminal", 0)
     gmsh.model.add("hmre_short")
     geo = gmsh.model.geo
@@ -72,8 +74,11 @@ function hmre_short(r::Real)
     L(13, 25, 22); L(14, 26, 20); L(15, 27, 26); L(16, 28, 27); L(17, 24, 28); L(18, 15, 18)
     L(19, 19, 13); L(20, 14, 23)
     # beam edges (≈ 5e-4 / r) and magnet edges (≈ 3e-3 / r) with fixed divisions
-    for (c, m) in ((2, 5), (3, 95), (4, 4), (5, 95), (6, 5), (19, 4), (18, 4), (10, 25), (12, 25), (13, 9), (20, 9))
+    for (c, m) in ((2, 5), (3, 95), (4, 4), (5, 95), (6, 5), (19, 4), (18, 4))      # beam edges, by r
         geo.mesh.setTransfiniteCurve(c, round(Int, m * r) + 1)
+    end
+    for (c, m) in ((10, 25), (12, 25), (13, 9), (20, 9))                             # magnet edges, by rv
+        geo.mesh.setTransfiniteCurve(c, round(Int, m * rv) + 1)
     end
     S(tag, loop) = geo.addPlaneSurface([geo.addCurveLoop(loop, tag)], tag)
     S(1, [2, 18, 6, 19])                                   # beam, x ≤ 0.0025
@@ -140,5 +145,5 @@ end
 
 kind = ARGS[1]
 kind == "em" ? em_plate(parse(Int, ARGS[2])) :
-kind == "hmre" ? hmre_short(parse(Float64, ARGS[2])) :
-kind == "turek" ? turek(parse(Float64, ARGS[2])) : error("usage: generate.jl em n | hmre r | turek h")
+kind == "hmre" ? hmre_short(parse(Float64, ARGS[2]), parse(Float64, get(ARGS, 3, ARGS[2]))) :
+kind == "turek" ? turek(parse(Float64, ARGS[2])) : error("usage: generate.jl em n | hmre r [rv] | turek h")

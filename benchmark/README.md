@@ -49,6 +49,26 @@ julia -t auto --project=benchmark benchmark/prof_hmre_vacuum.jl          # hMRE 
 julia -t auto --project=benchmark benchmark/prof_hmre_vacuum_solve.jl    # hMRE + vacuum, staggered solve
 ```
 
+## Solver baseline (design/solvers.md, stage S0 + R0)
+
+Own environment (`benchmark/solvers/`, with GridapPETSc) so that PETSc stays out of the other benchmarks:
+
+```
+julia benchmark/solvers/setup.jl                                                 # once
+julia --project=benchmark/solvers benchmark/solvers/petsc_check.jl 40            # preconditioners of the PETSc binary (GAMG, hypre, MUMPS, …)
+julia --project=benchmark/solvers benchmark/meshes/generate.jl em 6              # EM plate n = 4, 6, 10
+julia --project=benchmark/solvers benchmark/meshes/generate.jl hmre 14 2         # hMRE beam refined by r = 7, 14, 30; vacuum by 2
+julia -t 6 --project=benchmark/solvers benchmark/solvers/baseline.jl em_box 52 11 11 compiled          # per Newton iteration
+julia -t 6 --project=benchmark/solvers benchmark/solvers/baseline.jl hmre 7 lazy 300000 driver         # + full solve! (R0)
+bash benchmark/solvers/run_all.sh iter 6 1 18                                    # the whole matrix; `small`, `large`, `driver` subsets
+julia --project=benchmark/solvers benchmark/solvers/summary.jl                   # Markdown tables from results/solvers_baseline.csv
+```
+
+`baseline.jl` times residual, Jacobian, LU factorisation and triangular solve on the operator (both backends,
+1/6/18 threads), the matrix and LU memory, and with `driver` the full `solve!` through `StaticNonlinearModel`
+(time and allocations per step and per iteration). LU is skipped above `lu_max` DOFs (default 300 000).
+Results and conclusions: project document `design/solvers.md`, section "S0 results".
+
 ## Distributed capture
 
 `benchmark/dist_capture.jl` checks the capture with GridapDistributed (PartitionedArrays debug
