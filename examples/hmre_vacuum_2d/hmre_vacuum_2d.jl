@@ -52,10 +52,10 @@ end
 println("hMRE + vacuum 2D (staggered), mode $mode, $nsteps steps × $nsubsteps substeps, $(Threads.nthreads()) threads")
 if mode == "compare"
   # warm-up (compilation of HyperFEM, Gridap and the kernels) with one step, so that the timings compare runs
-  tw = @elapsed foreach(b -> simulate(b; nsteps=1, nsubsteps=1, quiet=true), (:gridap, :kernel))
+  tw = @elapsed foreach(b -> simulate(b; nsteps=1, nsubsteps=1, quiet=true), (:lazy, :compiled))
   @printf("warm-up (1 step each backend, compilation): %.1f s\n", tw)
-  sg, tg = simulate(:gridap)
-  sk, tk = simulate(:kernel)
+  sg, tg = simulate(:lazy)
+  sk, tk = simulate(:compiled)
   println("Final solutions, kernel vs Gridap (relative difference):")
   for (pg, pk) in zip(sg.problems, sk.problems)
     xg, xk = get_free_dof_values(pg.xh), get_free_dof_values(pk.xh)

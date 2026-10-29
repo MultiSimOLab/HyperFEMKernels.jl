@@ -17,7 +17,7 @@ Jacobians written for Gridap's `FEOperator` work as they are, including those bu
 functions, loops and conditionals, new constitutive models and new physics.
 
 [HyperFEM.jl](https://github.com/MultiSimOLab/HyperFEM.jl) uses it as an alternative assembly
-backend for its drivers (`backend = :kernel`).
+backend for its drivers (`backend = :compiled`).
 
 ## Features
 
@@ -176,12 +176,12 @@ HyperFEM selects the assembly backend with a keyword; everything else in the sim
 boundary conditions, solvers, post-processing) is unchanged:
 
 ```julia
-comp_model = StaticNonlinearModel(res, jac, U, V, D_bc; nls = nls_, backend = :kernel)
+comp_model = StaticNonlinearModel(res, jac, U, V, D_bc; nls = nls_, backend = :compiled)
 x = solve!(comp_model; stepping = (nsteps = 5, maxbisec = 5), post = post_model)
 ```
 
-`StaticLinearModel` accepts the same keyword, and `CellState(model, dΩ; backend = :kernel)` /
-`update_state!(model, states, args...; backend = :kernel)` move the internal variables of HyperFEM's
+`StaticLinearModel` accepts the same keyword, and `CellState(model, dΩ; backend = :compiled)` /
+`update_state!(model, states, args...; backend = :compiled)` move the internal variables of HyperFEM's
 visco-elastic models to the engine.
 
 ### Matrix-free Jacobian
@@ -216,7 +216,7 @@ update_state!(KernelUpdater(upd), A, F ∘ ∇(uh)', F ∘ ∇(uh⁻)')   # same
   step and times both.
 - [`examples/hmre_vacuum_2d`](examples/hmre_vacuum_2d) — hard-magnetic soft beam with explicit
   surrounding air, three staggered problems (magnetic, solid, mesh motion of the air) with HyperFEM's
-  drivers and `backend = :gridap | :kernel`.
+  drivers and `backend = :lazy | :compiled`.
 
 HyperFEM's simulation tests (electromechanics, hMRE, visco-elasticity, third-medium contact, Stokes)
 run with both backends as part of the test suite.

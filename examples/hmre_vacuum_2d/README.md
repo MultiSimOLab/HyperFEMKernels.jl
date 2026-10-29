@@ -12,7 +12,7 @@ on the mesh `test/models/Short_magnet.msh` (8 637 nodes, 25 375 DOFs in all):
 
 Same weak forms, models, boundary conditions and stepping as the original; no DrWatson (mesh from `test/models`,
 output to `results/`), the setup is a function so that it runs for each backend, and the drivers take
-`backend = :gridap | :kernel` (HyperFEM branch `kernel-backend`).
+`backend = :lazy | :compiled` (HyperFEM branch `kernel-backend`).
 
 ```
 julia -t auto --project=benchmark examples/hmre_vacuum_2d/hmre_vacuum_2d.jl mode=compare   # both backends, 20 × 2 steps
