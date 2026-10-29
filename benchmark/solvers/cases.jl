@@ -56,9 +56,13 @@ function hmre(r::Real, rv::Real=2)
     V_N = TestFESpace(Ωs, reffeu)
     Nh = interpolate_everywhere(x -> VectorValue(1.0, 0.0), V_N)
     Bah = interpolate_everywhere(VectorValue([0.0, -Banorm]), V_N)
-    function invU(F; ε=1e-12)
-        F_ = get_array(F); S = F_' * F_ + ε * get_array(I2)
-        TensorValue(inv(sqrt(S)))
+    # inverse of the right stretch tensor, closed form in 2D so that the element kernel does not allocate
+    # (the matrix-sqrt form of the original script builds dense matrices; a local function with keyword
+    # arguments is called dynamically by Julia and allocates too, see `allocations(op, x)`)
+    function invU(F)
+        C = transpose(F) ⋅ F + 1e-12 * I2
+        s = sqrt(det(C))
+        inv((C + s * I2) / sqrt(tr(C) + 2s))
     end
     ∂Ψmag∂F(Fn, N, Ba) = (-αr / μ0) * (Ba ⊗ ((invU(Fn)) * N))
     res(Λ) = (u, v) -> ∫((∇(v)' ⊙ (∂Ψs∂F ∘ (F ∘ (∇(u)'), Nh))))dΩs + Λ * ∫((∂Ψmag∂F ∘ (F ∘ (∇(uh⁻)'), Nh, Bah)) ⊙ (∇(v)'))dΩs

@@ -54,7 +54,7 @@ struct Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF,UU,RB} <: AbstractGroup
     smu::SU             # slot specs (trial) per field
     trian::Triangulation
     xq::Vector          # reference quadrature points
-    auxcache::Base.RefValue{Any}   # dense auxiliary values when cache_aux = true
+    auxcache::Base.RefValue{Any}   # dense auxiliary values (buffers reused across assemblies; see aux_data)
     cellmap::Vector{Int32}         # integration cell → cell of the FE spaces
     colors::Vector{Vector{Int32}}  # integration cells per colour
 end
@@ -107,10 +107,12 @@ precomputed linear maps to the state inputs of each term (no dual numbers) whene
 form allows it (see `linearmaps.jl`); otherwise, and with `linear_maps = false`, by exact
 differentiation with dual numbers.
 
-With `cache_aux = true` the auxiliary data (fields that do not depend on the unknown, e.g. a
-previous state) is evaluated once per operator instead of once per assembly. Only safe when that
-data does not change while the operator is used (e.g. it must not be built from the FE function
-that holds the current Newton iterate).
+The auxiliary data (fields that do not depend on the unknown, e.g. a previous state or an
+interpolated field) is evaluated by Gridap into dense buffers owned by the operator, allocated at
+the first assembly and refilled in place at every assembly. With `cache_aux = true` it is evaluated
+only once per operator (the buffers are not refilled). Only safe when that data does not change
+while the operator is used (e.g. it must not be built from the FE function that holds the current
+Newton iterate).
 """
 struct KernelOperator{R,J,US,VS} <: NonlinearOperator
     res::R
@@ -514,24 +516,48 @@ end
 # Auxiliary data: dense values at the quadrature points
 #
 # Auxiliary data (fields that do not depend on the unknown/test/trial functions: previous states,
-# interpolated fields, functions of x, constants) is evaluated by Gridap once per assembly (or
-# once per operator with `cache_aux = true`) into dense `np × ncells` arrays, so the element
-# kernels only read plain arrays (requirement for GPU execution).
+# interpolated fields, functions of x, constants) is evaluated by Gridap into dense `np × ncells`
+# arrays, so the element kernels only read plain arrays (requirement for GPU execution). The arrays
+# are allocated once per group (first assembly) and refilled in place at every assembly, so that a
+# field that changes between assemblies (a previous state updated per load step) is always current
+# and the assembly allocates nothing for them; with `cache_aux = true` they are filled only once.
 
-"Dense values (np × ncells) of the auxiliary arrays of a group (a tuple of type `AUX`)."
+"Dense values (np × ncells) of the auxiliary arrays of a group (a tuple of type `AUX`), newly allocated."
 function materialize_aux(g::Group{NSV,NSU,PF,TT,AUX}, nthreads::Int) where {NSV,NSU,PF,TT,AUX}
     np, ncells = g.geo.np, size(g.geo.coords, 2)
-    chunks = collect(Iterators.partition(1:ncells, cld(ncells, max(1, nthreads))))
     vals = ntuple(length(g.aux)) do k
         a = g.aux[k]                                   # not inferred: function barrier below
         a isa StateColumns && return a.M               # a KernelState: its matrix is the dense value
-        M = Matrix{eltype(eltype(a))}(undef, np, ncells)
-        @sync for ch in chunks
-            Threads.@spawn _materialize!(M, a, ch, np)
-        end
-        M
+        Matrix{eltype(eltype(a))}(undef, np, ncells)
     end
-    AUX(vals)::AUX                                     # the assertion keeps the callers' inference precise (Julia 1.10)
+    materialize_aux!(AUX(vals)::AUX, g, nthreads)      # the assertion keeps the callers' inference precise (Julia 1.10)
+end
+
+"""
+Refills the dense auxiliary values `vals` of a group in place: FE functions by the engine
+(`materialize_fe!`, from their current nodal values), other arrays by Gridap; KernelStates are
+read directly, not copied.
+"""
+function materialize_aux!(vals::AUX, g::Group{NSV,NSU,PF,TT,AUX}, nthreads::Int) where {NSV,NSU,PF,TT,AUX}
+    np, ncells = g.geo.np, size(g.geo.coords, 2)
+    chunks = collect(Iterators.partition(1:ncells, cld(ncells, max(1, nthreads))))
+    for k in 1:length(g.aux)
+        a = g.aux[k]
+        a isa StateColumns && continue
+        M = vals[k]
+        if a isa FEArray && g.geo.Jf === nothing && length(a) == ncells && size(a.fe.N, 1) == np
+            # cell integrals at the points of the FE leaf's basis table; anything else (boundary
+            # integrals, other points) takes Gridap's lazy array, which gives the same values
+            @sync for ch in chunks
+                Threads.@spawn materialize_fe!(M, a, ch, np, g.geo)
+            end
+        else
+            @sync for ch in chunks
+                Threads.@spawn _materialize!(M, a, ch, np)
+            end
+        end
+    end
+    vals
 end
 function _materialize!(M::Matrix, a, cells, np::Int)
     cache = array_cache(a)
@@ -545,11 +571,12 @@ function _materialize!(M::Matrix, a, cells, np::Int)
 end
 
 function aux_data(op::KernelOperator, g::Group{NSV,NSU,PF,TT,AUX}) where {NSV,NSU,PF,TT,AUX}
-    if op.cache_aux
-        g.auxcache[] === nothing && (g.auxcache[] = materialize_aux(g, op.nthreads))
-        return g.auxcache[]::AUX
+    if g.auxcache[] === nothing
+        g.auxcache[] = materialize_aux(g, op.nthreads)                 # first assembly: allocate and fill
+    elseif !op.cache_aux
+        materialize_aux!(g.auxcache[]::AUX, g, op.nthreads)            # refill the same buffers
     end
-    materialize_aux(g, op.nthreads)
+    g.auxcache[]::AUX
 end
 
 # ---------------------------------------------------------------------------------------------

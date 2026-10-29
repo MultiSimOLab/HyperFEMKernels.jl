@@ -53,16 +53,24 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
         V_N = TestFESpace(Ωs, reffeu)
         Nh = interpolate_everywhere(x -> VectorValue(1.0, 0.0), V_N)
         Bah = interpolate_everywhere(VectorValue([0.0, -Banorm]), V_N)
-        invU(F; ε=1e-12) = (F_ = get_array(F); TensorValue(inv(sqrt(F_' * F_ + ε * get_array(I2)))))   # original
-        ∂Ψmag∂F(Fn, N, Ba) = (-αr / μ0) * (Ba ⊗ ((invU(Fn)) * N))
+        # the magnetic term depends on uh⁻, Nh and Bah only: FE functions read as leaves of the compiled
+        # integrand (re-read at every assembly), ∂Ψmag∂F compiled with it
+        # (the original script's `invU(F; ε=1e-12)`: a local function with keyword arguments is called
+        # dynamically by Julia and allocates in the element kernel, which `allocations` reports)
+        invU0(F) = (F_ = get_array(F); TensorValue(inv(sqrt(F_' * F_ + 1e-12 * get_array(I2)))))   # original (matrix sqrt)
+        invU(F) = (C = transpose(F) ⋅ F + 1e-12 * I2; s = sqrt(det(C)); inv((C + s * I2) / sqrt(tr(C) + 2s)))  # closed form, 2D
         Λ = 0.35
-        res(u, v) = ∫((∇(v)' ⊙ (∂Ψs∂F ∘ (F ∘ (∇(u)'), Nh))))dΩs + Λ * ∫((∂Ψmag∂F ∘ (F ∘ (∇(uh⁻)'), Nh, Bah)) ⊙ (∇(v)'))dΩs
         jac(u, du, v) = ∫(∇(v)' ⊙ ((∂Ψs∂FF ∘ (F ∘ (∇(u)'), Nh)) ⊙ (∇(du)')))dΩs
         x = 1e-4 .* randn(num_free_dofs(U))
-        op = KernelOperator(res, jac, U, V)
-        c = check(res, jac, U, V, x; op)
-        @test c.res < TOL && c.jac < TOL
-        @test all(a -> a.bytes == 0, allocations(op, x))   # the magnetic term (uh⁻ only) is auxiliary
+        for iU in (invU0, invU)
+            ∂Ψmag∂F(Fn, N, Ba) = (-αr / μ0) * (Ba ⊗ ((iU(Fn)) * N))
+            res(u, v) = ∫((∇(v)' ⊙ (∂Ψs∂F ∘ (F ∘ (∇(u)'), Nh))))dΩs + Λ * ∫((∂Ψmag∂F ∘ (F ∘ (∇(uh⁻)'), Nh, Bah)) ⊙ (∇(v)'))dΩs
+            op = KernelOperator(res, jac, U, V)
+            @test count(a -> a isa HyperFEMKernels.FEArray, op.rgroups[1].aux) == 3    # Nh (used twice), ∇uh⁻, Bah
+            c = check(res, jac, U, V, x; op)
+            @test c.res < TOL && c.jac < TOL
+            @test all(a -> a.bytes == 0, allocations(op, x))
+        end
     end
 
     @testset "visco-hyperelastic dynamics with CellState internal variables (midpoint rule)" begin

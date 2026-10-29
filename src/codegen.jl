@@ -104,7 +104,7 @@ function emit!(st::CodegenState, n::Const)
 end
 
 function emit!(st::CodegenState, n::Aux)
-    k = findfirst(a -> a.array === n.array, st.aux)
+    k = findfirst(a -> same_aux(a.array, n.array), st.aux)
     :(A[$k])
 end
 

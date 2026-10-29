@@ -20,7 +20,7 @@ const TEST_FILES = [
     ("assembly", "test_assembly.jl"), ("matrix-free", "test_matrixfree.jl"), ("errors", "test_errors.jl"),
     ("hybrid fallback", "test_fallback.jl"), ("boundary", "test_boundary.jl"), ("H(div) fields", "test_hdiv.jl"),
     ("CFD (Oseen step)", "test_cfd.jl"), ("subdomains, interface", "test_subdomains.jl"),
-    ("skeleton", "test_skeleton.jl"), ("states", "test_states.jl"), ("Gridap equality", "test_gridap_equality.jl"),
+    ("skeleton", "test_skeleton.jl"), ("FE functions in the form", "test_fefunctions.jl"), ("states", "test_states.jl"), ("Gridap equality", "test_gridap_equality.jl"),
 ]
 in_group(file) = TEST_GROUP == "all" || (TEST_GROUP == "hdiv") == (file == "test_hdiv.jl")
 

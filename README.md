@@ -29,7 +29,11 @@ backend for its drivers (`backend = :compiled`).
   normal) and skeleton integrals on interior facets (`plus`/`minus`, `jump`, `mean`).
 - **Spaces:** Lagrangian spaces of any order and H(div)-conforming Raviart–Thomas spaces (contravariant
   Piola map, per-cell dof signs) on hexahedra, quadrilaterals, tetrahedra and triangles; single- and
-  multi-field (e.g. Biot u–W, mixed Darcy); Dirichlet masks; subdomains; auxiliary `FEFunction`s and `CellField`s.
+  multi-field (e.g. Biot u–W, mixed Darcy); Dirichlet masks; subdomains.
+- **Data in the form.** `FEFunction`s that are not the unknown (a previous state, a field interpolated
+  from another physics or from boundary data) and their gradients are evaluated by the engine from
+  their nodal values at every assembly, with the operations above them compiled into the integrand;
+  other `CellField`s are evaluated by Gridap once per assembly into dense buffers that are reused.
 - **Threads, no allocations.** Cells are coloured so that the assembly loop is threaded without
   locks; element kernels allocate nothing (`allocations` reports it), which is also the
   requirement for GPU execution.

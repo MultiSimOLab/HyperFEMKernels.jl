@@ -121,25 +121,6 @@ emit!(st::CodegenState, n::FELeaf) = :(FV[$(n.k)])
 _walk_leaves!(found, role, n::FELeaf) = nothing
 _walk_aux!(found, n::FELeaf) = nothing
 
-"""
-Dof values and basis of an FE function at the points, read from Gridap's lazy tree: the cell dof
-ids (a `Table`, with an optional map from the cells of the points to the cells of the space),
-the free and Dirichlet values, and the uniform `np × nd` matrix of basis values (or reference
-gradients) at the points.
-"""
-struct FEData{T,DV,VF,VD,N,C,P,I}
-    vals::Any                 # Gridap's cell dof values (identity key within one capture)
-    free::VF                  # free values (a view of the block vector for a field of a multi-field function)
-    diri::VD
-    ptrs::P                   # Table of cell dof ids
-    data::I
-    cellmap::C                # nothing, or point cell → space cell
-    N::Matrix{N}              # np × nd basis at the points (values, DV = 0, or reference gradients, DV = 1)
-    nd::Int
-end
-Base.eltype(::FEData{T}) where {T} = T
-fe_deriv(::FEData{T,DV}) where {T,DV} = DV
-
 const StateContext = @NamedTuple{x::CellPoint, states::Vector{Any}, fes::Vector{FEData}, aux::Vector{Aux}, D::Int}
 
 function state_node(a::AbstractArray, ctx::StateContext)
@@ -169,51 +150,17 @@ function state_node(a::AbstractArray, ctx::StateContext)
     Aux(a)
 end
 
-"The single matrix of a cell-wise array that is uniform across cells (`Fill`, or `CompressedArray` with one value)."
-function uniform_matrix(a)
-    a isa Fill && a.value isa Matrix && return a.value
-    a isa CompressedArray && length(a.values) == 1 && a.values[1] isa Matrix && return a.values[1]
-    nothing
-end
-
-"The array `pinvJt(∇(cell_map))` at the points (a `Fill` on affine meshes, lazy otherwise)."
-function is_inverse_jacobian(a, D::Int)
-    a isa Fill && return eltype(a.value) <: TensorValue{D,D}
-    a isa LazyArray || return false
-    k = first(a.maps)
-    (k isa BroadcastingFieldOpMap && k.op === Fields.pinvJt) || (k isa Broadcasting && k.f === Fields.pinvJt)
-end
-
 function fe_leaf(a::LazyArray, deriv::Int, ctx::StateContext)
-    first(a.maps) isa Fields.LinearCombinationMap || return nothing
-    length(a.args) == 2 || return nothing
-    vals, bx = a.args
-    vals isa LazyArray && first(vals.maps) isa Broadcasting && first(vals.maps).f isa Arrays.PosNegReindex || return nothing
-    N = uniform_matrix(bx)          # basis at the points: the same matrix for every cell (one cell type)
-    N === nothing && return nothing
-    ids = vals.args[1]
-    if ids isa Arrays.Table
-        table, cellmap = ids, nothing
-    elseif ids isa LazyArray && first(ids.maps) isa Arrays.Reindex && first(ids.maps).values isa Arrays.Table
-        table, cellmap = first(ids.maps).values, ids.args[1]
-    else
-        return nothing
-    end
     np = length(testitem(get_data(ctx.x)))
-    size(N, 1) == np || return nothing
+    fe = fe_data(a, deriv, np)
+    fe === nothing && return nothing
     # the same FE function appears with different bases (values, reference gradients): one leaf per basis
-    k = findfirst(f -> f.vals === vals && f.N === N, ctx.fes)
-    T = eltype(a)
+    k = findfirst(f -> f.vals === fe.vals && f.N === fe.N, ctx.fes)
     if k === nothing
-        pnr = first(vals.maps).f
-        free, diri = pnr.values_pos, pnr.values_neg
-        eltype(free) == eltype(diri) || return nothing
-        nd = size(N, 2)
-        push!(ctx.fes, FEData{eltype(T),deriv,typeof(free),typeof(diri),eltype(N),typeof(cellmap),typeof(table.ptrs),typeof(table.data)}(
-            vals, free, diri, table.ptrs, table.data, cellmap, N, nd))
+        push!(ctx.fes, fe)
         k = length(ctx.fes)
     end
-    FELeaf(k, deriv, eltype(T))
+    FELeaf(k, deriv, eltype(fe))
 end
 
 # ---------------------------------------------------------------------------------------------
@@ -300,34 +247,6 @@ show_code(su::StateUpdate) = println(Base.remove_linenums!(deepcopy(su.expr)))
 
 # ---------------------------------------------------------------------------------------------
 # Kernels
-
-"Local dof values of the FE function in `cell` (a cell of the points)."
-@inline function gather_fe!(xl, fe::FEData, cell::Int)
-    sc = fe.cellmap === nothing ? cell : Int(fe.cellmap[cell])
-    @inbounds begin
-        p0 = fe.ptrs[sc]
-        for j in 1:fe.nd
-            id = fe.data[p0+j-1]
-            xl[j] = id > 0 ? fe.free[id] : fe.diri[-id]
-        end
-    end
-    xl
-end
-
-"Value (or physical gradient, `inv(Jt) ⋅` reference gradient) of the FE function at point `q`."
-@inline function fe_point_value(fe::FEData{T,0}, xl, q::Int, iJt) where {T}
-    linear_combination_at(fe, xl, q)
-end
-@inline function fe_point_value(fe::FEData{T,1}, xl, q::Int, iJt) where {T}
-    iJt ⋅ linear_combination_at(fe, xl, q)
-end
-@inline function linear_combination_at(fe::FEData{T,DV,VF,VD,N}, xl, q::Int) where {T,DV,VF,VD,N}
-    s = zero(N) * zero(eltype(xl))
-    @inbounds for j in 1:fe.nd
-        s += xl[j] * fe.N[q, j]
-    end
-    s
-end
 
 "Update the states of one cell (no allocation; the part that runs on each device)."
 function update_cell!(su::StateUpdate{F,O,FE,ST,NW}, xls, auxd, cell::Int) where {F,O,FE,ST,NW}
