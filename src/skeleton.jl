@@ -158,16 +158,19 @@ end
 
 function materialize_aux(g::SkeletonGroup{NSV,NSU,PF,TT,AUX}, nthreads::Int) where {NSV,NSU,PF,TT,AUX}
     np, n = g.geo.np, length(g.facets)
+    vals = ntuple(k -> Matrix{eltype(eltype(g.aux[k]))}(undef, np, n), length(g.aux))
+    materialize_aux!(AUX(vals)::AUX, g, nthreads)
+end
+function materialize_aux!(vals::AUX, g::SkeletonGroup{NSV,NSU,PF,TT,AUX}, nthreads::Int) where {NSV,NSU,PF,TT,AUX}
+    np, n = g.geo.np, length(g.facets)
     chunks = collect(Iterators.partition(1:n, cld(n, max(1, nthreads))))
-    vals = ntuple(length(g.aux)) do k
-        a = g.aux[k]
-        M = Matrix{eltype(eltype(a))}(undef, np, n)
+    for k in 1:length(g.aux)
+        a = g.aux[k]; M = vals[k]
         @sync for ch in chunks
             Threads.@spawn _materialize_facets!(M, a, g.facets, ch, np)
         end
-        M
     end
-    AUX(vals)::AUX
+    vals
 end
 function _materialize_facets!(M::Matrix, a, facets, range, np::Int)
     cache = array_cache(a)
@@ -181,11 +184,12 @@ function _materialize_facets!(M::Matrix, a, facets, range, np::Int)
 end
 
 function aux_data(op::KernelOperator, g::SkeletonGroup{NSV,NSU,PF,TT,AUX}) where {NSV,NSU,PF,TT,AUX}
-    if op.cache_aux
-        g.auxcache[] === nothing && (g.auxcache[] = materialize_aux(g, op.nthreads))
-        return g.auxcache[]::AUX
+    if g.auxcache[] === nothing
+        g.auxcache[] = materialize_aux(g, op.nthreads)
+    elseif !op.cache_aux
+        materialize_aux!(g.auxcache[]::AUX, g, op.nthreads)
     end
-    materialize_aux(g, op.nthreads)
+    g.auxcache[]::AUX
 end
 
 # ---------------------------------------------------------------------------------------------

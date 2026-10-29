@@ -23,7 +23,11 @@ Leaf(role, field, deriv, T, points) = Leaf(role, field, deriv, T, points, :cell)
 Base.:(==)(a::Leaf, b::Leaf) = a.role == b.role && a.field == b.field && a.deriv == b.deriv && a.side == b.side
 Base.hash(a::Leaf, h::UInt) = hash((a.role, a.field, a.deriv, a.side), h)
 
-"Data that does not depend on the unknown, test or trial functions: evaluated by Gridap per cell."
+"""
+Data that does not depend on the unknown, test or trial functions, as a cell-wise array of its
+values at the points: a Gridap array (evaluated by Gridap per cell) or an `FEArray` (an FE
+function evaluated by the engine from its nodal values, see `fefunctions.jl`).
+"""
 struct Aux <: Node
     array::AbstractArray
 end
@@ -119,7 +123,26 @@ function to_node(a::AbstractArray)
        all(v -> v == a.value[1], a.value)
         return Const(a.value[1])                   # the same value at every point of every cell
     end
-    contains_probe(a) || return Aux(a)
+    if !contains_probe(a)
+        # data that does not depend on the unknown/test/trial functions. An FE function (or its
+        # gradient) is read as a leaf the engine evaluates from its nodal values (`fe_array`), and
+        # the operations above such leaves are compiled with the integrand; any other data, or a
+        # subtree the reader cannot translate, is one auxiliary array evaluated by Gridap.
+        fe = fe_array(a)
+        fe === nothing || return Aux(fe)
+        contains_fe(a) || return Aux(a)
+        return try
+            to_ops(a)
+        catch err
+            err isa InterruptException && rethrow()
+            Aux(a)
+        end
+    end
+    to_ops(a)
+end
+
+"Pointwise operation node of a `BroadcastingFieldOpMap` array."
+function to_ops(a)
     if a isa LazyArray
         k = first(a.maps)
         if k isa BroadcastingFieldOpMap
@@ -128,6 +151,13 @@ function to_node(a::AbstractArray)
         error("HyperFEMKernels: unsupported operation in the integrand: $(typeof(k))")
     end
     error("HyperFEMKernels: unsupported array in the integrand: $(typeof(a))")
+end
+
+"Whether an FE-function leaf (`fe_array`) appears below `a` through pointwise operations only."
+function contains_fe(a)
+    a isa LazyArray || return false
+    first(a.maps) isa BroadcastingFieldOpMap || return false
+    any(b -> fe_array(b) !== nothing || contains_fe(b), a.args)
 end
 
 "Leaves of each role appearing in a set of forms, in a stable order."
@@ -143,7 +173,17 @@ _walk_leaves!(found, role, n::Op) = foreach(c -> _walk_leaves!(found, role, c), 
 _walk_leaves!(found, role, n::Aux) = nothing
 _walk_leaves!(found, role, n::Const) = nothing
 
-"Auxiliary nodes of a set of terms (identical arrays counted once)."
+"""
+Whether two auxiliary arrays are the same data: the same array, or the same FE function (or
+gradient) at the same points, which Gridap builds as a new lazy array at each use in the form
+(method for `FEArray` in `fefunctions.jl`). The generic method compares the boxed arrays
+(`@nospecialize`): Gridap's lazy arrays are large nested immutable structs, and `===` on the
+unboxed copies a specialised method would receive is not reliable (Julia 1.13: false for two
+copies of the same array).
+"""
+same_aux(@nospecialize(a), @nospecialize(b)) = a === b
+
+"Auxiliary nodes of a set of terms (the same data counted once, see `same_aux`)."
 function aux_nodes(terms::Vector{Term})
     found = Aux[]
     for t in terms
@@ -151,7 +191,7 @@ function aux_nodes(terms::Vector{Term})
     end
     found
 end
-_walk_aux!(found, n::Aux) = any(a -> a.array === n.array, found) || push!(found, n)
+_walk_aux!(found, n::Aux) = any(a -> same_aux(a.array, n.array), found) || push!(found, n)
 _walk_aux!(found, n::Op) = foreach(c -> _walk_aux!(found, c), n.args)
 _walk_aux!(found, n::Leaf) = nothing
 _walk_aux!(found, n::Const) = nothing
@@ -161,7 +201,7 @@ function show_tree(io::IO, n::Node, depth=0)
     if n isa Leaf
         println(io, pad, n.role, "[", n.field, "]", n.deriv == 1 ? " ∇" : "", n.side === :cell ? "" : " $(n.side)", " :: ", n.T)
     elseif n isa Aux
-        println(io, pad, "aux :: ", eltype(eltype(n.array)))
+        println(io, pad, n.array isa FEArray ? "fe function" : "aux", " :: ", eltype(eltype(n.array)))
     elseif n isa Const
         println(io, pad, "const ", n.value)
     else

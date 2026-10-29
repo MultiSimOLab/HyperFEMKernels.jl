@@ -151,6 +151,13 @@ end
             g isa HK.SkeletonGroup || continue
             @test g.lin === nothing
         end
+        # the facet-size data of the skeleton groups lives in buffers refilled in place (not reallocated)
+        b = Algebra.residual(op, x)
+        gs = first(g for g in op.rgroups if g isa HK.SkeletonGroup)
+        buf = gs.auxcache[]
+        @test buf !== nothing && length(buf) ≥ 1
+        Algebra.residual!(b, op, x)
+        @test gs.auxcache[][1] === buf[1]
     end
 end
 

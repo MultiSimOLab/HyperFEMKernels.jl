@@ -128,10 +128,12 @@ end
     @test reldiff(jacobian(op1, x0), Ag) < TOL
     @test reldiff(r1, bg) > 1e-3                 # the data did change
     # BDF2 after the backward Euler step: other numbers (c0, c1, c2) and another advecting-velocity expression
-    # (2uⁿ - uⁿ⁻¹ instead of uⁿ: other lazy arrays, same dense types): same group types, same code
+    # (2uⁿ - uⁿ⁻¹ instead of uⁿ). The FE functions are leaves of the compiled integrand, so the new
+    # expression is new code: `update` recompiles the groups once (the switch happens once per simulation)
     p.bdf2[] = true
     op2 = HyperFEMKernels.update(op1, p.res, p.jac)
-    @test same_code(op, op2)
+    @test !same_code(op, op2)
+    @test same_code(op2, HyperFEMKernels.update(op2, p.res, p.jac))      # and not again
     Ag, bg = gridap_system(p)
     @test reldiff(-residual(op2, x0), bg) < TOL
     @test reldiff(jacobian(op2, x0), Ag) < TOL

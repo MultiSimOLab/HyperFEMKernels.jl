@@ -128,6 +128,16 @@ end
     b_cached = Algebra.residual(opc, x)
     b_fresh = Algebra.residual(op, x)
     @test !(b_cached ≈ b_fresh)
+    # without cache_aux the buffers are allocated once and refilled in place: same object across
+    # assemblies, current values, and no allocation of np × ncells arrays per call
+    b = similar(b_fresh)
+    Algebra.residual!(b, op, x)
+    buf = op.rgroups[1].auxcache[]
+    @test buf !== nothing && buf[1] !== auxd[1]                        # a buffer owned by the group, not the one above
+    get_free_dof_values(uold) .*= 2
+    Algebra.residual!(b, op, x)
+    @test op.rgroups[1].auxcache[][1] === buf[1]                         # same buffer
+    @test reldiff(b, Algebra.residual(gridap_op((; res, jac=e.jac, U=e.U, V=e.V)), x)) < TOL   # refilled
 end
 
 @testset "integration_cells and group colours on a subdomain" begin

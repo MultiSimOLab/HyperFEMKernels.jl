@@ -6,6 +6,9 @@
 # Gridap: correct, with no speed-up. Returning mock cell data for the probes was tried and rejected
 # (Gridap then builds trees the reader misparses). Skeleton integrals (jump/mean) are no longer a
 # fallback case: see test_skeleton.jl.
+"Builds an operator whose form is deliberately sent to Gridap, capturing the fallback warnings (they are expected here, not noise for the test log)."
+fallback_op(f, args...) = @test_logs (:warn, r"assembled by Gridap") match_mode = :any f(args...)
+
 function product_gradient_problem(; order=1, simplex=false, n=(5, 4))
     p = poisson_2d(; n, order, simplex)
     Λ = SkeletonTriangulation(p.model); dΛ = Measure(Λ, 2order)
@@ -30,7 +33,7 @@ end
 @testset "fallback terms enlarge the sparsity pattern (the Gridap part couples neighbouring cells)" begin
     s = product_gradient_problem(; n=(6, 5), order=2)
     p = s.p
-    op = KernelOperator(s.res, s.jac, p.U, p.V)
+    op = fallback_op(KernelOperator, s.res, s.jac, p.U, p.V)
     op0 = KernelOperator(p.res, p.jac, p.U, p.V)
     x = randx(p.U)
     Ak = Algebra.jacobian(op, x)
@@ -62,7 +65,7 @@ end
 @testset "matrix-free Jacobian includes the Gridap part" begin
     s = product_gradient_problem(; n=(6, 5), order=2)
     p = s.p; res = s.res; jac = s.jac
-    op = KernelOperator(res, jac, p.U, p.V)
+    op = fallback_op(KernelOperator, res, jac, p.U, p.V)
     x = randx(p.U); dx = randn(num_free_dofs(p.U))
     A = Algebra.jacobian(op, x)
     mf = MatrixFreeJacobian(op); prepare!(mf, x)
@@ -73,13 +76,13 @@ end
     p = poisson_2d(; order=2)
     mk(α) = ((u, v) -> ∫(∇(v) ⋅ ∇(u) + α * (∇(v) ⋅ ∇(u * u)))p.dΩ, (u, du, v) -> ∫(∇(v) ⋅ ∇(du) + 2α * (∇(v) ⋅ ∇(du * u)))p.dΩ)
     r1, j1 = mk(1.0); r2, j2 = mk(2.0)
-    op1 = KernelOperator(r1, j1, p.U, p.V)
-    op2 = update(op1, r2, j2)
+    op1 = fallback_op(KernelOperator, r1, j1, p.U, p.V)
+    op2 = fallback_op(update, op1, r2, j2)
     @test op2.A0 === op1.A0 && op2.nzpos === op1.nzpos
     c = check(r2, j2, p.U, p.V, randx(p.U); op=op2)
     @test c.res < TOL && c.jac < TOL
     # a fallback appearing in update: pattern recomputed
-    op3 = update(KernelOperator(p.res, p.jac, p.U, p.V), r2, j2)
+    op3 = fallback_op(update, KernelOperator(p.res, p.jac, p.U, p.V), r2, j2)
     @test op3.A0 !== op1.A0
     c3 = check(r2, j2, p.U, p.V, randx(p.U); op=op3)
     @test c3.res < TOL && c3.jac < TOL
