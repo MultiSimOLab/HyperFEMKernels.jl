@@ -306,7 +306,7 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
             x = 1e-3 .* randn(num_free_dofs(models[1].spaces[1]))
             for (Λ, ∆Λ) in ((0.1, 0.1), (0.3, 0.2))
                 duhs = map(models) do m
-                    m.caches[3] .= x
+                    m.caches.x .= x
                     CM.get_dirichlet_preconditioner(m, Λ, ∆Λ)
                 end
                 dg, dk = map(get_free_dof_values, duhs)
@@ -317,14 +317,14 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
                 uh = FEFunction(mg.spaces[1], x)
                 ∆Ug, ∆Uk = mg.spaces[3], mk.spaces[3]
                 aop = AffineFEOperator((du, v) -> jac(Λ - ∆Λ)(uh, du, v), v -> -1.0 * res(Λ - ∆Λ)(uh, v), ∆Ug, mg.spaces[2])
-                kop = mk.caches[8][]
+                kop = mk.caches.projection
                 z = zero_initial_guess(kop)
                 @test reldiff(nonzeros(jacobian(kop, z)), nonzeros(get_matrix(aop))) < TOL
                 @test reldiff(-residual(kop, z), get_vector(aop)) < TOL
                 @test reldiff(get_dirichlet_dof_values(get_fe_space(duhs[2])), get_dirichlet_dof_values(get_fe_space(duhs[1]))) < TOL
             end
-            @test models[2].caches[8][] isa KernelOperator
-            @test isempty(models[2].caches[8][].fallback.rtrians) && isempty(models[2].caches[8][].fallback.jtrians)
+            @test models[2].caches.projection isa KernelOperator
+            @test isempty(models[2].caches.projection.fallback.rtrians) && isempty(models[2].caches.projection.fallback.jtrians)
 
             # 2. HyperFEM's own simulations with the projection, with both backends: simulations/runtests.jl
         end
@@ -352,7 +352,7 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
             l(v) = ∫(f ⋅ v)dΩ
             l2(v) = ∫(VectorValue(0.3, 0.0, 0.1) ⋅ v)dΩ
             spaces(Λ=1.0) = (V = TestFESpace(Ω, reffe, D_bc, conformity=:H1); (TrialFESpace(V, D_bc, Λ), V))
-            system(m) = (m.caches[2], m.caches[3])
+            system(m) = (m.caches.K, m.caches.b)
             @test_throws ErrorException StaticLinearModel(l, a, spaces()..., D_bc; backend=:other)
 
             # 1. lf + bf: K and b at construction, solution, re-assembly with other Dirichlet values
@@ -363,8 +363,8 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
             @test norm(bg) > 0
             @test reldiff(nonzeros(Kk), nonzeros(Kg)) < TOL
             @test reldiff(bk, bg) < TOL
-            @test mk.caches[7][] isa KernelOperator
-            @test isempty(mk.caches[7][].fallback.rtrians) && isempty(mk.caches[7][].fallback.jtrians)
+            @test mk.caches.op isa KernelOperator
+            @test isempty(mk.caches.op.fallback.rtrians) && isempty(mk.caches.op.fallback.jtrians)
             xg = solve!(mg; Assembly=false); xk = solve!(mk; Assembly=false)
             @test norm(xg) > 0 && reldiff(xk, xg) < 1e-10
             for m in (mg, mk)
@@ -373,7 +373,7 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
             xg = copy(solve!(mg; Assembly=true)); xk = copy(solve!(mk; Assembly=true))
             @test reldiff(bk, bg) < TOL && reldiff(nonzeros(Kk), nonzeros(Kg)) < TOL
             @test reldiff(xk, xg) < 1e-10
-            @test mk.caches[7][] isa KernelOperator
+            @test mk.caches.op isa KernelOperator
 
             # 2. bf only: the matrix, the right-hand side given to solve! and the functor (Assembly=true)
             mg, mk = map((:lazy, :compiled)) do backend
@@ -405,9 +405,9 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
             xg = copy(mg(FEFunction(mg.spaces[1], copy(r)); Measure=dΩ, Assembly=true))
             xk = copy(mk(FEFunction(mk.spaces[1], copy(r)); Measure=dΩ, Assembly=true))
             @test norm(xg) > 0 && reldiff(xk, xg) < 1e-10
-            @test reldiff(nonzeros(mk.caches[2]), nonzeros(mg.caches[2])) < TOL
-            @test reldiff(mk.caches[3], mg.caches[3]) < TOL
-            @test mk.caches[7][] isa KernelOperator
+            @test reldiff(nonzeros(mk.caches.K), nonzeros(mg.caches.K)) < TOL
+            @test reldiff(mk.caches.b, mg.caches.b) < TOL
+            @test mk.caches.op isa KernelOperator
 
             # 3. several linear forms on repeated spaces (load vectors without Dirichlet lift)
             mg, mk = map((:lazy, :compiled)) do backend
@@ -416,7 +416,7 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
             xg = solve!(mg); xk = solve!(mk)
             @test all(norm.(CM.blocks(xg)) .> 0)
             @test reldiff(xk, xg) < 1e-10
-            @test reldiff(mk.caches[3], mg.caches[3]) < TOL     # last load vector (l2), no lift
+            @test reldiff(mk.caches.b, mg.caches.b) < TOL     # last load vector (l2), no lift
             xg = solve!(mg; Assembly=false); xk = solve!(mk; Assembly=false)
             @test reldiff(xk, xg) < 1e-10
 

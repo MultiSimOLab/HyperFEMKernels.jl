@@ -45,7 +45,7 @@ function em_solve(model, order, φtop, backend)
     nls = NewtonSolver(LUSolver(); maxiter=20, atol=1e-10, rtol=1e-8, verbose=false)
     t_build = @elapsed (cm = StaticNonlinearModel(res, jac, U, V, D; nls=nls, backend=backend))
     t_solve = @elapsed solve!(cm; stepping=(nsteps=5, maxbisec=5))
-    t_build, t_solve, copy(cm.caches[3]), num_free_dofs(U)
+    t_build, t_solve, copy(cm.caches.x), num_free_dofs(U)
 end
 
 function hmre_solve(r, backend)

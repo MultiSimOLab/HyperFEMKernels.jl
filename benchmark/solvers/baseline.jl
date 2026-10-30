@@ -37,8 +37,8 @@ function main(args)
     nls = NewtonSolver(LUSolver(); case.nls_kw..., verbose=false)
     t_build = @elapsed (m = StaticNonlinearModel(case.res, case.jac, case.U, case.V, case.D; nls, backend, case.extra...))
     @printf("  mesh + spaces %.1f s (rss %.2f GB); StaticNonlinearModel %.1f s (rss %.2f GB)\n", t_case, rss_case, t_build, rss())
-    op = m.caches[7][]
-    x = m.caches[3]
+    op = m.caches.op
+    x = m.caches.x
     n = length(x)
     @printf("%s  backend=%s  threads=%d  DOFs=%d  build %.1f s  (rss %.2f GB)\n", tag, backend, Threads.nthreads(), n, t_build, rss())
 
