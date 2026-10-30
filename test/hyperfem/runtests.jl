@@ -281,7 +281,7 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
 
     @testset "drivers with backend=:compiled: Dirichlet projection (ProjectDirichlet=true)" begin
         CM = HyperFEM.ComputationalModels
-        if !isdefined(CM, :dirichlet_projection)
+        if !(isdefined(CM, :dirichlet_projection!) || isdefined(CM, :dirichlet_projection))
             @info "HyperFEM without the kernel backend of the drivers (needs HyperFEM ≥ 0.0.7): driver tests skipped"
         else
             # 1. The projection increment of a step, kernel vs Gridap, at a nonzero state; twice, so that the
