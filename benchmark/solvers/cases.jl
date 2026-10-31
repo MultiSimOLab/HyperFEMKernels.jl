@@ -125,8 +125,8 @@ end
 # matrix (Mooney–Rivlin + IdealMagnetic, χ = 0), rigid inclusion (×100) with remanent magnetisation Mr along x
 # (HardMagnetic), external field Hext = Λ·Hy along y by continuation, periodic faces (topology of the mesh), u = 0 and
 # φ = 0 at the corner node. Monolithic u–φ. Mesh from `generate.jl cell dim h`.
-function hmre_cell(dim::Int, h::Real, order::Int=1)
-    model = GmshDiscreteModel(joinpath(MESHDIR, "cell$(dim)d_h$(h).msh"))
+function hmre_cell(dim::Int, h::Real, order::Int=1, R::Real=(dim == 2 ? 0.175 : 0.25))
+    model = GmshDiscreteModel(joinpath(MESHDIR, "cell$(dim)d_h$(h)" * (R == 0.25 ? "" : "_R$(R)") * ".msh"))
     μ0 = 4π * 1e-7
     Mr = 0.1 / μ0; Hy = 0.05 / μ0                        # μ0 Mr = 100 mT, μ0 Hy = 50 mT
     e(c) = VectorValue(ntuple(i -> i == c ? 1.0 : 0.0, dim))
