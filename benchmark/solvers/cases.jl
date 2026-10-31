@@ -125,7 +125,7 @@ end
 # matrix (Mooney–Rivlin + IdealMagnetic, χ = 0), rigid inclusion (×100) with remanent magnetisation Mr along x
 # (HardMagnetic), external field Hext = Λ·Hy along y by continuation, periodic faces (topology of the mesh), u = 0 and
 # φ = 0 at the corner node. Monolithic u–φ. Mesh from `generate.jl cell dim h`.
-function hmre_cell(dim::Int, h::Real, order::Int=1, R::Real=(dim == 2 ? 0.175 : 0.25))
+function hmre_cell(dim::Int, h::Real, order::Int=1, R::Real=(dim == 2 ? 0.175 : 0.25); contrast::Real=100.0)
     model = GmshDiscreteModel(joinpath(MESHDIR, "cell$(dim)d_h$(h)" * (R == 0.25 ? "" : "_R$(R)") * ".msh"))
     μ0 = 4π * 1e-7
     Mr = 0.1 / μ0; Hy = 0.05 / μ0                        # μ0 Mr = 100 mT, μ0 Hy = 50 mT
@@ -135,7 +135,7 @@ function hmre_cell(dim::Int, h::Real, order::Int=1, R::Real=(dim == 2 ? 0.175 : 
         mech_m = MooneyRivlin2D(λ=100.0e3, μ1=10.0e3, μ2=0.0); mech_i = MooneyRivlin2D(λ=10.0e6, μ1=1.0e6, μ2=0.0)
         mag_m = IdealMagnetic2D(μ0=μ0, χe=0.0); mag_i = HardMagnetic2D(μ0=μ0, αr=Mr, χe=0.0)
     else
-        mech_m = MooneyRivlin3D(λ=100.0e3, μ1=10.0e3, μ2=0.0); mech_i = MooneyRivlin3D(λ=10.0e6, μ1=1.0e6, μ2=0.0)
+        mech_m = MooneyRivlin3D(λ=100.0e3, μ1=10.0e3, μ2=0.0); mech_i = MooneyRivlin3D(λ=contrast * 100.0e3, μ1=contrast * 10.0e3, μ2=0.0)   # inclusion/matrix stiffness contrast (100 = the original case)
         mag_m = IdealMagnetic(μ0=μ0, χe=0.0); mag_i = HardMagnetic(μ0=μ0, αr=Mr, χe=0.0)
     end
     _, ∂Ψu_m, ∂Ψφ_m, ∂Ψuu_m, ∂Ψφu_m, ∂Ψφφ_m = (mech_m + mag_m)()
@@ -167,9 +167,10 @@ function hmre_cell(dim::Int, h::Real, order::Int=1, R::Real=(dim == 2 ? 0.175 : 
     (; res, jac, U, V, D, nls_kw=(maxiter=20, atol=1e-10, rtol=1e-8), nsteps=10, extra=(;))
 end
 
-"Case from command-line words: em_plate n | em_box nx ny nz | hmre r [rv] | mech_plate n | mech_box nx ny nz | hmre_cell dim h [order]."
+"Case from command-line words: em_plate n | em_box nx ny nz | hmre r [rv] | mech_plate n | mech_box nx ny nz | hmre_cell dim h [order] | hmre_cell_c dim h order contrast."
 function build_case(words)
     kind = words[1]
+    kind == "hmre_cell_c" && return hmre_cell(parse(Int, words[2]), parse(Float64, words[3]), parse(Int, words[4]); contrast=parse(Float64, words[5])), "hmre_cell$(words[2])d_h$(words[3])_p$(words[4])_c$(words[5])"
     kind == "hmre_cell" && return hmre_cell(parse(Int, words[2]), parse(Float64, words[3]), parse(Int, get(words, 4, "1"))), "hmre_cell$(words[2])d_h$(words[3])_p$(get(words, 4, "1"))"
     kind == "mech_plate" && return mech_plate(parse(Int, words[2])), "mech_plate_n$(words[2])"
     kind == "mech_box" && return mech_box(parse.(Int, words[2:4])...), "mech_box_$(join(words[2:4], 'x'))"
