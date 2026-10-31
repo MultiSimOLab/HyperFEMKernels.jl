@@ -143,7 +143,66 @@ function finish(file)
     println("written $file")
 end
 
+# Periodic unit cell of a magneto-active composite (the "periodic cell" study of 2026-09): a square / cube of
+# side 1 with a circular / spherical inclusion of radius R at the centre, conforming interface (OCC fragment),
+# periodic opposite faces (Gmsh periodic nodes, which GridapGmsh identifies into a torus topology) and the tags
+# "matriz", "inclusion", "interfaz", the faces and "corner_dirichlet" (all the corners: one periodic node, where
+# u = 0 and φ = 0 remove the rigid translations and the constant of the potential). Geometric order 1 (required
+# by GridapGmsh for periodic meshes); the FE order is chosen in Julia. h: element size in the matrix, h/3 on the
+# inclusion. The 2D cell of the study (R = 0.175, h = 0.03, h_inc = 0.01) is `cell 2 0.03 0.175`.
+function cell(dim::Int, h::Real, R::Real=0.25; hinc::Real=h / 3)
+    file = joinpath(OUTDIR, "cell$(dim)d_h$(h)" * (R == 0.25 ? "" : "_R$(R)") * ".msh")
+    L = 1.0; tol = 1e-6
+    gmsh.initialize(); gmsh.option.setNumber("General.Terminal", 0)
+    gmsh.model.add("cell")
+    occ = gmsh.model.occ
+    if dim == 2
+        body = occ.addRectangle(0, 0, 0, L, L); incl = occ.addDisk(L / 2, L / 2, 0, R, R)
+    else
+        body = occ.addBox(0, 0, 0, L, L, L); incl = occ.addSphere(L / 2, L / 2, L / 2, R)
+    end
+    out, outmap = occ.fragment([(dim, body)], [(dim, incl)])
+    occ.synchronize()
+    inclusion = Int[t for (_, t) in outmap[2]]
+    matriz = Int[t for (d, t) in out if d == dim && !(t in inclusion)]
+    inbox(lo, hi, d) = [t for (_, t) in gmsh.model.getEntitiesInBoundingBox((lo .- tol)..., (hi .+ tol)..., d)]
+    # faces (dim-1 entities) by bounding box; in 2D the z coordinate is 0
+    lo3(v) = dim == 2 ? (v[1], v[2], 0.0) : v
+    face(axis, x) = inbox(lo3(ntuple(i -> i == axis ? x : 0.0, dim)), lo3(ntuple(i -> i == axis ? x : L, dim)), dim - 1)
+    names = dim == 2 ? ("izquierda", "derecha", "abajo", "arriba") : ("izquierda", "derecha", "abajo", "arriba", "atras", "delante")
+    faces = [face(a, x) for a in 1:dim for x in (0.0, L)]
+    for (n, f) in zip(names, faces)
+        length(f) == 1 || error("face $n: expected 1 entity, found $(length(f))")
+    end
+    interfaz = Int[abs(t) for (_, t) in gmsh.model.getBoundary([(dim, t) for t in inclusion], true, false, false)]
+    corners = vcat([inbox(lo3(c), lo3(c), 0) for c in Iterators.product(ntuple(_ -> (0.0, L), dim)...)]...)
+    gmsh.model.mesh.setSize(gmsh.model.getEntities(0), h)
+    gmsh.model.mesh.setSize(gmsh.model.getBoundary([(dim, t) for t in inclusion], false, false, true), hinc)
+    trans(a) = [i == j ? 1.0 : (j == 4 && i == a ? L : 0.0) for i in 1:4 for j in 1:4]   # affine translation by L along axis a (row-major)
+    for a in 1:dim
+        gmsh.model.mesh.setPeriodic(dim - 1, faces[2a], faces[2a-1], trans(a))             # slave x = L ← master x = 0
+    end
+    gmsh.model.addPhysicalGroup(dim, matriz, -1, "matriz")
+    gmsh.model.addPhysicalGroup(dim, inclusion, -1, "inclusion")
+    for (n, f) in zip(names, faces)
+        gmsh.model.addPhysicalGroup(dim - 1, f, -1, n)
+    end
+    gmsh.model.addPhysicalGroup(dim - 1, interfaz, -1, "interfaz")
+    gmsh.model.addPhysicalGroup(0, corners, -1, "corner_dirichlet")
+    gmsh.option.setNumber("Mesh.Algorithm", 6)
+    gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 1)
+    gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
+    gmsh.model.mesh.generate(dim)
+    for a in 1:dim
+        _, nodes, master, _ = gmsh.model.mesh.getPeriodicNodes(dim - 1, faces[2a][1])
+        err = maximum((maximum(abs.(gmsh.model.mesh.getNode(n)[1] .- gmsh.model.mesh.getNode(m)[1] .- [i == a ? L : 0.0 for i in 1:3])) for (n, m) in zip(nodes, master)); init=0.0)
+        println("periodicity along axis $a: $(length(nodes)) node pairs, max error $err")
+    end
+    finish(file)
+end
+
 kind = ARGS[1]
+kind == "cell" ? cell(parse(Int, ARGS[2]), parse(Float64, ARGS[3]), parse(Float64, get(ARGS, 4, "0.25"))) :
 kind == "em" ? em_plate(parse(Int, ARGS[2])) :
 kind == "hmre" ? hmre_short(parse(Float64, ARGS[2]), parse(Float64, get(ARGS, 3, ARGS[2]))) :
-kind == "turek" ? turek(parse(Float64, ARGS[2])) : error("usage: generate.jl em n | hmre r [rv] | turek h")
+kind == "turek" ? turek(parse(Float64, ARGS[2])) : error("usage: generate.jl em n | hmre r [rv] | turek h | cell dim h [R]")
