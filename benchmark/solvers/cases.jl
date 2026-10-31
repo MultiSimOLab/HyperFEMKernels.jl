@@ -70,9 +70,37 @@ function hmre(r::Real, rv::Real=2)
     (; res, jac, U, V, D=Du, nls_kw=(maxiter=20, atol=1e-8, rtol=1e-2), nsteps=20, extra=(xh=uh, xh⁻=uh⁻))
 end
 
-"Case from command-line words: em_plate n | em_box nx ny nz | hmre r [rv]."
+# Mechanical block alone (the clean S1 measurement, D4 refined 2026-10-30): the EM geometries with the
+# neo-Hookean solid only, clamped at "fixedup" and sheared by a prescribed displacement of "topsuf".
+function mech_case(model, order, utop)
+    physmodel = NeoHookean3D(λ=10.0, μ=1.0)
+    k = Kinematics(Mechano, Solid)
+    Ω = Triangulation(model); dΩ = Measure(Ω, 2order)
+    Du = BoundaryConditions(BoundaryCondition("fixedup", [0.0, 0.0, 0.0]), BoundaryCondition("topsuf", utop, Λ -> Λ))
+    V = TestFESpace(model, ReferenceFE(lagrangian, VectorValue{3,Float64}, order), Du, conformity=:H1)
+    U = TrialFESpace(V, Du, 0.0)
+    res(Λ) = (u, v) -> HyperFEM.residual(physmodel, k, u, v, dΩ)
+    jac(Λ) = (u, du, v) -> HyperFEM.jacobian(physmodel, k, u, du, v, dΩ)
+    (; res, jac, U, V, D=Du, nls_kw=(maxiter=20, atol=1e-10, rtol=1e-8), nsteps=5, extra=(;))
+end
+
+"Mechanical plate: the EM plate mesh (8 × 0.8 × 40), order 1, top face sheared by 0.4 along z (shear strain 0.5)."
+mech_plate(n::Int) = mech_case(GmshDiscreteModel(joinpath(MESHDIR, "em_plate_n$(n).msh")), 1, [0.0, 0.0, 0.4])
+
+"Mechanical box: the EM box, order 2, top face sheared by 0.001 along x (shear strain 0.5)."
+function mech_box(nx::Int, ny::Int, nz::Int)
+    m = CartesianDiscreteModel((0.0, 0.1, 0.0, 0.01, 0.0, 0.002), (nx, ny, nz))
+    labels = get_face_labeling(m)
+    add_tag_from_tags!(labels, "fixedup", CartesianTags.face0YZ⁺)
+    add_tag_from_tags!(labels, "topsuf", CartesianTags.faceXY1⁺)
+    mech_case(m, 2, [0.001, 0.0, 0.0])
+end
+
+"Case from command-line words: em_plate n | em_box nx ny nz | hmre r [rv] | mech_plate n | mech_box nx ny nz."
 function build_case(words)
     kind = words[1]
+    kind == "mech_plate" && return mech_plate(parse(Int, words[2])), "mech_plate_n$(words[2])"
+    kind == "mech_box" && return mech_box(parse.(Int, words[2:4])...), "mech_box_$(join(words[2:4], 'x'))"
     kind == "em_plate" && return em_plate(parse(Int, words[2])), "em_plate_n$(words[2])"
     kind == "em_box" && return em_box(parse.(Int, words[2:4])...), "em_box_$(join(words[2:4], 'x'))"
     kind == "hmre" && return hmre(parse(Float64, words[2]), parse(Float64, get(words, 3, "2"))), "hmre_r$(words[2])"
