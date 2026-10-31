@@ -4,7 +4,6 @@
 using Test
 using HyperFEMKernels, HyperFEM
 using Gridap, GridapGmsh, Gridap.FESpaces, Gridap.Algebra, Gridap.CellData
-using GridapSolvers, GridapSolvers.NonlinearSolvers
 using LinearAlgebra, Random, SparseArrays
 
 const HK = HyperFEMKernels
@@ -127,7 +126,7 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
         @test c2.res < TOL && c2.jac < TOL
         # two time steps with Gridap's Newton on both operators give the same displacement
         f_mid(t) = VectorValue(0.0, 0.0, 20.0) * EvolutionFunctions.triangular(0.05)(t - Δt / 2)
-        nls = NewtonSolver(LUSolver(); maxiter=20, atol=1e-10, rtol=1e-10, verbose=false)
+        nls = NewtonRaphson(LUSolver(); maxiter=20, atol=1e-10, rtol=1e-10, verbose=0)
         xg = copy(x); xk = copy(x)
         for step in 1:2
             # Dirichlet-free problem: add the load as a volume body force on the centre cells is not
@@ -206,7 +205,7 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
             opk = KernelOperator(resk, jack, Uu, Vu)
             @test reldiff(Algebra.residual(opk, x0), Algebra.residual(gop(resg, jacg, Uu, Vu), x0)) < TOL
             # two time steps: kernel operator + kernel states vs Gridap operator + Gridap states
-            nls = NewtonSolver(LUSolver(); maxiter=20, atol=1e-10, rtol=1e-10, verbose=false)
+            nls = NewtonRaphson(LUSolver(); maxiter=20, atol=1e-10, rtol=1e-10, verbose=0)
             xg = copy(x0); xk = copy(x0)
             for step in 1:2
                 Algebra.solve!(xg, nls, gop(resg, jacg, Uu, Vu))
@@ -300,7 +299,7 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
             jac(Λ) = (u, du, v) -> jacobian(physmodel, k, u, du, v, dΩ)
             models = map((:lazy, :compiled)) do backend
                 V = TestFESpace(Ω, reffeu, D_bc, conformity=:H1); U = TrialFESpace(V, D_bc, 0.0)
-                StaticNonlinearModel(res, jac, U, V, D_bc; nls=NewtonSolver(LUSolver(); verbose=false), backend=backend)
+                StaticNonlinearModel(res, jac, U, V, D_bc; nls=NewtonRaphson(LUSolver(); verbose=0), backend=backend)
             end
             Random.seed!(3)
             x = 1e-3 .* randn(num_free_dofs(models[1].spaces[1]))
@@ -467,11 +466,11 @@ end
 # results are compared with Gridap's. They live in HyperFEM (their final place) and are included here, at top
 # level (they load packages and define constants). Skipped when the HyperFEM next to this package has no kernel
 # backend (e.g. main).
-let CM = HyperFEM.ComputationalModels, PM = HyperFEM.PhysicalModels
+let
     global hyperfem_sims = joinpath(pkgdir(HyperFEM), "test", "SimulationsTests", "runtests.jl")
-    global hyperfem_has_backend = isdefined(CM, :dirichlet_projection) && isdefined(CM, :linear_system) &&
-                                  isdefined(PM, :new_state) && isfile(hyperfem_sims) &&
-                                  occursin("run_backends", read(hyperfem_sims, String))
+    # Only the presence of the backend-aware suite is checked: probing for HyperFEM internals by name silently
+    # skipped the whole suite once they were renamed (dirichlet_projection → dirichlet_projection!, R3).
+    global hyperfem_has_backend = isfile(hyperfem_sims) && occursin("run_backends", read(hyperfem_sims, String))
 end
 if hyperfem_has_backend
     include(hyperfem_sims)
