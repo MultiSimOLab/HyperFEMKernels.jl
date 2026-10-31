@@ -28,6 +28,30 @@ end
 "EM plate of the HyperFEM README (test_static_EM geometry), Gmsh hexahedra (7n, 2n, 19n), order 1."
 em_plate(n::Int) = em_case(GmshDiscreteModel(joinpath(MESHDIR, "em_plate_n$(n).msh")), 1, 0.1)
 
+# EM plate with the electrodes constrained in the thickness direction (u_y = 0 on y = 0 and y = 0.8, besides the
+# clamped end): no bending, the in-plane electrostatic deformation only. The S2 case where the u block is AMG-friendly
+# (the free cantilever of em_plate has a bending-dominated u block on which GAMG needs 200-500 iterations).
+function em_case_constrained(model, order, φtop)
+    labels = get_face_labeling(model)
+    add_tag_from_vertex_filter!(labels, "botsuf", model, x -> abs(x[2]) < 1e-9)
+    physmodel = ElectroMechModel(IdealDielectric(ε=1.0), NeoHookean3D(λ=10.0, μ=1.0))
+    k = (Kinematics(Mechano, Solid), Kinematics(Electro, Solid))
+    Ω = Triangulation(model); dΩ = Measure(Ω, 2order)
+    Du = BoundaryConditions(BoundaryCondition("fixedup", [0.0, 0.0, 0.0]),
+                            BoundaryCondition("topsuf", [0.0, 0.0, 0.0]; mask=(false, true, false)),
+                            BoundaryCondition("botsuf", [0.0, 0.0, 0.0]; mask=(false, true, false)))
+    Dφ = BoundaryConditions(BoundaryCondition("midsuf", 0.0, Λ -> Λ), BoundaryCondition("topsuf", φtop, Λ -> Λ))
+    D = MultiFieldBC([Du, Dφ])
+    Vu = TestFESpace(model, ReferenceFE(lagrangian, VectorValue{3,Float64}, order), Du, conformity=:H1)
+    Vφ = TestFESpace(model, ReferenceFE(lagrangian, Float64, order), Dφ, conformity=:H1)
+    V = MultiFieldFESpace([Vu, Vφ])
+    U = MultiFieldFESpace([TrialFESpace(Vu, Du, 1.0), TrialFESpace(Vφ, Dφ, 1.0)])
+    res(Λ) = ((u, φ), (v, vφ)) -> HyperFEM.residual(physmodel, k, (u, φ), (v, vφ), dΩ)
+    jac(Λ) = ((u, φ), (du, dφ), (v, vφ)) -> HyperFEM.jacobian(physmodel, k, (u, φ), (du, dφ), (v, vφ), dΩ)
+    (; res, jac, U, V, D, nls_kw=(maxiter=20, atol=1e-10, rtol=1e-8), nsteps=5, extra=(;))
+end
+em_plate_c(n::Int) = em_case_constrained(GmshDiscreteModel(joinpath(MESHDIR, "em_plate_n$(n).msh")), 1, 0.1)
+
 "EM box 0.1 × 0.01 × 0.002, Cartesian (nx, ny, nz) hexahedra, order 2 (phase-0/1 case)."
 function em_box(nx::Int, ny::Int, nz::Int)
     m = CartesianDiscreteModel((0.0, 0.1, 0.0, 0.01, 0.0, 0.002), (nx, ny, nz))
@@ -102,6 +126,7 @@ function build_case(words)
     kind == "mech_plate" && return mech_plate(parse(Int, words[2])), "mech_plate_n$(words[2])"
     kind == "mech_box" && return mech_box(parse.(Int, words[2:4])...), "mech_box_$(join(words[2:4], 'x'))"
     kind == "em_plate" && return em_plate(parse(Int, words[2])), "em_plate_n$(words[2])"
+    kind == "em_plate_c" && return em_plate_c(parse(Int, words[2])), "em_plate_c_n$(words[2])"
     kind == "em_box" && return em_box(parse.(Int, words[2:4])...), "em_box_$(join(words[2:4], 'x'))"
     kind == "hmre" && return hmre(parse(Float64, words[2]), parse(Float64, get(words, 3, "2"))), "hmre_r$(words[2])"
     error("unknown case $kind")
