@@ -8,7 +8,9 @@
 #
 # configuration = lu | mumps | <ksp>_<pc>[_nonull][_lagN][_neg], ksp ∈ cg gmres, pc ∈ gamg boomer, e.g. gmres_gamg_lag3
 # (PETSc preconditioner reused for 3 Newton iterations), cg_gamg_nonull (without the rigid-body modes),
-# gmres_boomer_neg (the φ equations of a multi-field case negated: positive-real form of the saddle point).
+# gmres_boomer_neg (the φ equations of a multi-field case negated: positive-real form of the saddle point);
+# S2 block preconditioners: fs_schur_upper_a11, fs_schur_full_selfp, fs_additive, fs_multiplicative, with the
+# suffixes _fgmres (FGMRES outside), _lagN, _lublocks (MUMPS on every block: the exact block solve).
 # rtol is the Krylov tolerance (relative to the right-hand side); nsteps overrides the case's load steps.
 include(joinpath(@__DIR__, "cases.jl"))
 using HyperFEMKernels, GridapPETSc
@@ -36,6 +38,17 @@ function make_solver(config::String, N, rtol, U, bs, opts)
     config == "lu" && return LUSolver()
     config == "mumps" && return PETScSolver(:preonly, :mumps)
     parts = split(config, "_")
+    if parts[1] == "fs"                        # S2: fs_<split>[_<fact>_<prec>][_<ksp>][_lagN][_lublocks]
+        U isa MultiFieldFESpace || error("fs_* needs a multi-field case")
+        split_ = Symbol(parts[2])
+        fact = length(parts) ≥ 4 && parts[3] in ("upper", "lower", "full", "diag") ? Symbol(parts[3]) : :upper
+        prec = length(parts) ≥ 4 && parts[4] in ("a11", "selfp") ? Symbol(parts[4]) : :a11
+        ksp = "fgmres" in parts ? :fgmres : :gmres
+        lag = findfirst(startswith("lag"), parts)
+        reuse = lag === nothing ? 1 : parse(Int, parts[lag][4:end])
+        blocks = "lublocks" in parts ? fill(:mumps, num_fields(U)) : fill(:gamg, num_fields(U))
+        return PETScSolver(U; ksp, split=split_, schur=(fact=fact, precondition=prec), blocks, rtol, maxiter=300, reuse, options=opts)
+    end
     ksp = Symbol(parts[1]); pc = parts[2] == "boomer" ? :boomeramg : Symbol(parts[2])
     nullspace = "nonull" in parts ? nothing : N
     lag = findfirst(startswith("lag"), parts)
