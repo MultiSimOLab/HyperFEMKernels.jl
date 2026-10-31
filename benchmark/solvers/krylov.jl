@@ -10,7 +10,8 @@
 # (PETSc preconditioner reused for 3 Newton iterations), cg_gamg_nonull (without the rigid-body modes),
 # gmres_boomer_neg (the φ equations of a multi-field case negated: positive-real form of the saddle point);
 # S2 block preconditioners: fs_schur_upper_a11, fs_schur_full_selfp, fs_additive, fs_multiplicative, with the
-# suffixes _fgmres (FGMRES outside), _lagN, _lublocks (MUMPS on every block: the exact block solve).
+# suffixes _fgmres (FGMRES outside), _lagN, _lublocks (MUMPS on every block: the exact block solve), _boomer (BoomerAMG
+# on every block), _phiboomer (GAMG on u, BoomerAMG on the potentials).
 # rtol is the Krylov tolerance (relative to the right-hand side); nsteps overrides the case's load steps.
 include(joinpath(@__DIR__, "cases.jl"))
 using HyperFEMKernels, GridapPETSc
@@ -46,7 +47,10 @@ function make_solver(config::String, N, rtol, U, bs, opts)
         ksp = "fgmres" in parts ? :fgmres : :gmres
         lag = findfirst(startswith("lag"), parts)
         reuse = lag === nothing ? 1 : parse(Int, parts[lag][4:end])
-        blocks = "lublocks" in parts ? fill(:mumps, num_fields(U)) : fill(:gamg, num_fields(U))
+        blocks = "lublocks" in parts ? fill(:mumps, num_fields(U)) :
+                 "boomer" in parts ? fill(:boomeramg, num_fields(U)) :          # BoomerAMG on every block
+                 "phiboomer" in parts ? [:gamg; fill(:boomeramg, num_fields(U) - 1)] :   # GAMG on u, BoomerAMG on the potentials
+                 fill(:gamg, num_fields(U))
         return PETScSolver(U; ksp, split=split_, schur=(fact=fact, precondition=prec), blocks, rtol, maxiter=300, reuse, options=opts)
     end
     ksp = Symbol(parts[1]); pc = parts[2] == "boomer" ? :boomeramg : Symbol(parts[2])
