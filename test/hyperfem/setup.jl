@@ -5,6 +5,8 @@ Pkg.activate(@__DIR__)
 root = normpath(joinpath(@__DIR__, "..", ".."))
 Pkg.develop(path=root)
 Pkg.develop(path=joinpath(root, "..", "HyperFEM.jl"))
-Pkg.add(["Gridap", "GridapGmsh", "Test", "LinearAlgebra", "Random", "SparseArrays", "TimerOutputs"])
+# GridapSolvers: not used by the tests of this folder (they use HyperFEM's NewtonRaphson) but by HyperFEM's
+# Stokes and Turek simulation tests (block solvers), which runtests.jl includes.
+Pkg.add(["Gridap", "GridapGmsh", "GridapSolvers", "Test", "LinearAlgebra", "Random", "SparseArrays", "TimerOutputs"])
 Pkg.instantiate()
 Pkg.status()

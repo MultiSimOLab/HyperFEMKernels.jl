@@ -466,11 +466,11 @@ end
 # results are compared with Gridap's. They live in HyperFEM (their final place) and are included here, at top
 # level (they load packages and define constants). Skipped when the HyperFEM next to this package has no kernel
 # backend (e.g. main).
-let CM = HyperFEM.ComputationalModels, PM = HyperFEM.PhysicalModels
+let
     global hyperfem_sims = joinpath(pkgdir(HyperFEM), "test", "SimulationsTests", "runtests.jl")
-    global hyperfem_has_backend = isdefined(CM, :dirichlet_projection) && isdefined(CM, :linear_system) &&
-                                  isdefined(PM, :new_state) && isfile(hyperfem_sims) &&
-                                  occursin("run_backends", read(hyperfem_sims, String))
+    # Only the presence of the backend-aware suite is checked: probing for HyperFEM internals by name silently
+    # skipped the whole suite once they were renamed (dirichlet_projection → dirichlet_projection!, R3).
+    global hyperfem_has_backend = isfile(hyperfem_sims) && occursin("run_backends", read(hyperfem_sims, String))
 end
 if hyperfem_has_backend
     include(hyperfem_sims)
