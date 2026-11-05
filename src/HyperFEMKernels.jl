@@ -12,7 +12,8 @@ Integrals on a skeleton (interior facets, plus/minus/jump/mean) are assembled by
 that see both cells (`skeleton.jl`). Internal variables (`CellState`/`KernelState`) are updated by
 the same kind of kernels (`states.jl`). `check` compares with Gridap (`verify.jl`). `MatrixFreeSolver` solves the tangent systems of a
 Newton method on the matrix-free Jacobian with Krylov.jl and the preconditioner slots of
-`preconditioners.jl` (`LaggedAssembled`, `BlockJacobi`).
+`preconditioners.jl` (`LaggedAssembled`, `BlockJacobi`). `KernelFunctional` evaluates scalar functionals
+(energies, pointwise extrema such as the injectivity step) with the same kernels (`functionals.jl`).
 """
 module HyperFEMKernels
 
@@ -45,6 +46,7 @@ RuntimeGeneratedFunctions.init(@__MODULE__)
 
 export KernelOperator, update, check, allocations, MatrixFreeJacobian, prepare!
 export MatrixFreeSolver, LaggedAssembled, BlockJacobi, eigenvalue_bounds
+export KernelFunctional
 export KernelState, KernelUpdater, update_states!
 
 include("probes.jl")
@@ -61,6 +63,7 @@ include("tensorproduct.jl")
 include("matrixfree.jl")
 include("solvers.jl")
 include("preconditioners.jl")
+include("functionals.jl")
 include("states.jl")
 include("verify.jl")
 

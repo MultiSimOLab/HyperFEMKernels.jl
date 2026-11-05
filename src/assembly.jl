@@ -615,7 +615,7 @@ function _materialize!(M::Matrix, a, cells, np::Int)
     M
 end
 
-function aux_data(op::KernelOperator, g::Group{NSV,NSU,PF,TT,AUX}) where {NSV,NSU,PF,TT,AUX}
+function aux_data(op, g::Group{NSV,NSU,PF,TT,AUX}) where {NSV,NSU,PF,TT,AUX}   # op: KernelOperator or KernelFunctional (nthreads, cache_aux)
     if g.auxcache[] === nothing
         g.auxcache[] = materialize_aux(g, op.nthreads)                 # first assembly: allocate and fill
     elseif !op.cache_aux
