@@ -12,6 +12,7 @@ const TOL_OP = 1e-11   # summation order of the matrix-free product differs from
         x = randx(prob.U)
         A = allocate_jacobian(op, x)
         @test A isa MatrixFreeJacobian && size(A) == size(HK.sparsity_pattern(ref))
+        @test length(allocate_in_domain(A)) == size(A, 2) && length(allocate_in_range(A)) == size(A, 1)
         jacobian!(A, op, x)
         dx = randn(num_free_dofs(prob.U))
         Aref = jacobian(ref, x)
@@ -59,6 +60,13 @@ end
     jacobian!(A, op3, x)
     @test A.op === op3 && A.data !== data
     @test reldiff(A * dx, jacobian(KernelOperator(res3, jac3, e.U, e.V), x) * dx) < TOL_OP
+    # an operator on a space with the same free dofs (the increment space of a Dirichlet projection) is accepted
+    ΔU = TrialFESpace(e.V, x -> VectorValue(0.0, 0.0, 0.0))
+    opΔ = KernelOperator(e.res, e.jac, ΔU, e.V; jacobian=:matrixfree)
+    jacobian!(A, opΔ, x)
+    @test A.op === opΔ && reldiff(A * dx, jacobian(KernelOperator(e.res, e.jac, ΔU, e.V), x) * dx) < TOL_OP
+    jacobian!(A, op, x)
+    @test A.op === op && reldiff(A * dx, jacobian(KernelOperator(e.res, e.jac, e.U, e.V), x) * dx) < TOL_OP
     # an operator on other spaces is refused
     e4 = elasticity_3d(; order=1)
     op4 = KernelOperator(e4.res, e4.jac, e4.U, e4.V; jacobian=:matrixfree)

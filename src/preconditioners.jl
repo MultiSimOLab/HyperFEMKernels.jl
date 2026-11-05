@@ -11,10 +11,10 @@
 # rigid-body modes from it); here they fall back to Gridap's `numerical_setup`/`numerical_setup!`,
 # and HyperFEM's extension forwards them to its own.
 
-"Setup of a linear solver on the matrix `A` at the state `x` (Gridap's `numerical_setup` by default)."
-numerical_setup_state(ss::Algebra.SymbolicSetup, A, x) = numerical_setup(ss, A)
+"Setup of a linear solver on the matrix `A` at the state `x` (Gridap's `numerical_setup` by default; HyperFEM's extension adds its own)."
+numerical_setup_state(ss, A, x) = numerical_setup(ss, A)
 "Update of that setup (Gridap's `numerical_setup!` by default)."
-numerical_setup_state!(ns::Algebra.NumericalSetup, A, x) = numerical_setup!(ns, A)
+numerical_setup_state!(ns, A, x) = numerical_setup!(ns, A)
 
 "Supertype of the preconditioner slots of `MatrixFreeSolver`."
 abstract type OperatorPreconditioner end

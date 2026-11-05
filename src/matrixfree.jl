@@ -65,6 +65,8 @@ group_dim(::SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D}) where {NSV,NSU,PF,TT,AUX,S
 Base.size(mf::MatrixFreeJacobian) = (sum(num_free_dofs, field_spaces(mf.op.V)), sum(num_free_dofs, field_spaces(mf.op.U)))
 Base.size(mf::MatrixFreeJacobian, i::Int) = size(mf)[i]
 Base.eltype(::MatrixFreeJacobian) = Float64
+Algebra.allocate_in_domain(mf::MatrixFreeJacobian) = zeros(Float64, size(mf, 2))
+Algebra.allocate_in_range(mf::MatrixFreeJacobian) = zeros(Float64, size(mf, 1))
 Base.:*(mf::MatrixFreeJacobian, dx::AbstractVector) = LinearAlgebra.mul!(zeros(size(mf, 1)), mf, dx)
 
 """
@@ -85,7 +87,9 @@ group_shape(g::SkeletonGroup) = (true, nslots(g), g.geo.np, length(g.facets), ma
 
 function rebind!(mf::MatrixFreeJacobian, op::KernelOperator)
     mf.op === op && return mf
-    op.U === mf.op.U && op.V === mf.op.V || error("HyperFEMKernels: the MatrixFreeJacobian was built for an operator on other FE spaces")
+    # spaces with the same free dofs (U, or the increment space of a Dirichlet projection): same size and element layout
+    (sum(num_free_dofs, field_spaces(op.V)), sum(num_free_dofs, field_spaces(op.U))) == size(mf) && op.ndl == mf.op.ndl ||
+        error("HyperFEMKernels: the MatrixFreeJacobian was built for an operator on other FE spaces")
     same = length(op.jgroups) == length(mf.op.jgroups) &&
            all(((g, g0),) -> group_shape(g) == group_shape(g0), zip(op.jgroups, mf.op.jgroups)) &&
            (mf.Afb === nothing) == isempty(op.fallback.jtrians)
