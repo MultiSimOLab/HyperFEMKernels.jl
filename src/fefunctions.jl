@@ -100,6 +100,9 @@ function fe_array(a)
             is_inverse_jacobian(a.args[1], D) || return nothing
             N = uniform_matrix(b.args[2])
             N === nothing && return nothing
+            # reference gradients of the dimension of the space: on a manifold triangulation (cells of
+            # lower dimension) the gradient (pinvJt ⋅ ∇̂) stays a Gridap array
+            _tensor_dim(eltype(N)) == D || return nothing
             fe = fe_data(b, 1, size(N, 1))
             fe === nothing || return FEArray(a, fe)
         end

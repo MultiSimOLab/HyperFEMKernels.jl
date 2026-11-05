@@ -199,10 +199,11 @@ function compile_groups(forms::Vector{Form}, U, locs, D::Int, colors, previous=A
     groups = Any[]
     Us = field_spaces(U)
     strian = get_triangulation(Us[1])
+    Dc = num_cell_dims(strian)        # dimension of the cells of the spaces (< D on a manifold triangulation)
     for form in forms
         fgroups = Any[]
         try
-            if is_skeleton(form.trian, D)
+            if is_skeleton(form.trian, Dc)
                 # facets with two cells: the data of the skeleton (cells per facet, colouring) is shared by the
                 # classes of all the forms on it and reused from a previous operator (`update`)
                 k = findfirst(s -> s.trian === form.trian, skel)
@@ -221,7 +222,7 @@ function compile_groups(forms::Vector{Form}, U, locs, D::Int, colors, previous=A
                     haskey(bykey, kk) || (push!(order, kk); bykey[kk] = Term[])
                     push!(bykey[kk], t)
                 end
-                for kk in order, cls in skeleton_classes(form.trian, bykey[kk], D)
+                for kk in order, cls in skeleton_classes(form.trian, bykey[kk], Dc)
                     push!(fgroups, SkeletonGroup(bykey[kk], form.trian, Us, locs, D, ndl, sd, cls, previous; linear_maps))
                 end
                 append!(groups, fgroups)
@@ -238,14 +239,14 @@ function compile_groups(forms::Vector{Form}, U, locs, D::Int, colors, previous=A
                 haskey(bykey, k) || (push!(order, k); bykey[k] = Term[])
                 push!(bykey[k], t)
             end
-            if num_cell_dims(form.trian) == D
+            if num_cell_dims(form.trian) == Dc
                 gcolors = prev === nothing ? group_colors(colors, cmap, num_cells(strian)) : previous[prev].colors
                 for k in order
                     push!(fgroups, Group(bykey[k], form.trian, Us, locs, D, cmap, gcolors, previous; linear_maps))
                 end
             else
                 # boundary: one group per class of faces with the same points in the reference cell
-                for k in order, b in boundary_classes(form.trian, bykey[k], D)
+                for k in order, b in boundary_classes(form.trian, bykey[k], Dc)
                     gcolors = group_colors(colors, cmap, num_cells(strian); subset=b.faces)
                     push!(fgroups, Group(bykey[k], form.trian, Us, locs, D, cmap, gcolors, previous; linear_maps, boundary=b))
                 end
@@ -358,7 +359,7 @@ function KernelOperator(res, jac, U::FESpace, V::FESpace; nthreads::Int=Threads.
             error("HyperFEMKernels: only ConsecutiveMultiFieldStyle multi-field spaces are supported")
     end
     trian = get_triangulation(Us[1])
-    D = num_cell_dims(trian)
+    D = num_point_dims(trian)         # physical dimension (the cells may be lower-dimensional: manifold, see `GeoTable`)
     ncells = num_cells(trian)
     fields = FieldLayout[]
     toff, uoff, loc = 0, 0, 0
@@ -390,7 +391,7 @@ New operator with other `res`/`jac` (same spaces and structure), reusing the spa
 positions and colouring of `op`.
 """
 function update(op::KernelOperator, res, jac)
-    D = num_cell_dims(get_triangulation(field_spaces(op.U)[1]))
+    D = num_point_dims(get_triangulation(field_spaces(op.U)[1]))
     locs = Tuple(fl.loc for fl in op.fields)
     prev = vcat(op.rgroups, op.jgroups)
     lm = op.linear_maps
@@ -603,8 +604,44 @@ end
     @inbounds for n in 1:geo.ng
         Jt += outer(geo.dM[q, n], geo.coords[n, cell])
     end
+    geo.dc < D && (Jt = complete_frame(Jt, geo.dc))
     (geo.w[q] * measure(Jt, geo.Jf), inv(Jt), Jt)
 end
+
+"""
+    complete_frame(Jt, dc)
+
+`Jt` of a manifold cell (rows `1:dc`: the tangent vectors ∂x/∂ξ_K; rows `dc+1:D`: zero, from the
+zero-padded reference gradients) completed with an orthonormal frame of the normal space, so that
+`|det| = meas` of the cell and `inv(Jt)` restricted to the first `dc` columns is `pinvJt` of the
+rectangular Jacobian (the normal rows are orthogonal to the tangent ones). Branch-free arithmetic
+per point (GPU-compatible).
+"""
+@inline complete_frame(Jt::TensorValue{1,1}, dc::Int) = Jt
+@inline function complete_frame(Jt::TensorValue{2,2,Float64}, dc::Int)
+    t1, t2 = Jt[1, 1], Jt[1, 2]
+    s = 1.0 / sqrt(t1 * t1 + t2 * t2)
+    TensorValue{2,2,Float64,4}((t1, -t2 * s, t2, t1 * s))          # column-major: rows (t; n̂)
+end
+@inline function complete_frame(Jt::TensorValue{3,3,Float64}, dc::Int)
+    t = VectorValue(Jt[1, 1], Jt[1, 2], Jt[1, 3])
+    if dc == 2                                                      # surface: n̂ = t1 × t2 / |t1 × t2|
+        t2 = VectorValue(Jt[2, 1], Jt[2, 2], Jt[2, 3])
+        n = _cross3(t, t2)
+        n = n / sqrt(n ⋅ n)
+        return TensorValue{3,3,Float64,9}((t[1], t2[1], n[1], t[2], t2[2], n[2], t[3], t2[3], n[3]))
+    end
+    # curve: two unit normals, from the coordinate axis least aligned with t
+    a = abs(t[1]) <= abs(t[2]) && abs(t[1]) <= abs(t[3]) ? VectorValue(1.0, 0.0, 0.0) :
+        abs(t[2]) <= abs(t[3]) ? VectorValue(0.0, 1.0, 0.0) : VectorValue(0.0, 0.0, 1.0)
+    n1 = _cross3(t, a)
+    n1 = n1 / sqrt(n1 ⋅ n1)
+    n2 = _cross3(t, n1)
+    n2 = n2 / sqrt(n2 ⋅ n2)
+    TensorValue{3,3,Float64,9}((t[1], n1[1], n2[1], t[2], n1[2], n2[2], t[3], n1[3], n2[3]))
+end
+@inline _cross3(a::VectorValue{3}, b::VectorValue{3}) =
+    VectorValue(a[2] * b[3] - a[3] * b[2], a[3] * b[1] - a[1] * b[3], a[1] * b[2] - a[2] * b[1])
 
 """
 Signs of the local dofs of `cell` (±1 on the H(div) fields, 1 elsewhere) into `sg` from position

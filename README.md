@@ -29,7 +29,9 @@ backend for its drivers (`backend = :compiled`).
   normal) and skeleton integrals on interior facets (`plus`/`minus`, `jump`, `mean`).
 - **Spaces:** Lagrangian spaces of any order and H(div)-conforming Raviart–Thomas spaces (contravariant
   Piola map, per-cell dof signs) on hexahedra, quadrilaterals, tetrahedra and triangles; single- and
-  multi-field (e.g. Biot u–W, mixed Darcy); Dirichlet masks; subdomains.
+  multi-field (e.g. Biot u–W, mixed Darcy); Dirichlet masks; subdomains. Lagrangian spaces also on
+  manifold triangulations (curves in 2D/3D, surfaces in 3D, e.g. an interface
+  `BoundaryTriangulation(Ωsolid, tags = "Interface")`), with tangential gradients as in Gridap.
 - **Data in the form.** `FEFunction`s that are not the unknown (a previous state, a field interpolated
   from another physics or from boundary data) and their gradients are evaluated by the engine from
   their nodal values at every assembly, with the operations above them compiled into the integrand;
@@ -230,6 +232,9 @@ run with both backends as part of the test suite.
 - Lagrangian (`H1`) and Raviart–Thomas (`H(div)`) spaces in volume and boundary integrals and in the
   matrix-free Jacobian. Raviart–Thomas fields on skeleton integrals (the terms go to the Gridap fallback)
   and Nédélec (`H(curl)`) spaces are not supported yet.
+- On manifold triangulations (cells of lower dimension than the space): Lagrangian spaces in cell
+  integrals. Boundary and skeleton integrals of those spaces and Raviart–Thomas fields on them go to
+  the Gridap fallback; internal variables on them are not supported yet.
 - Shared-memory parallelism (threads). Distributed runs with GridapDistributed and GPU execution
   are design targets: kernels are allocation-free and states use a GPU-friendly layout.
 - Gridap is pinned to 0.19.9, because the engine reads Gridap's internal expression tree.
