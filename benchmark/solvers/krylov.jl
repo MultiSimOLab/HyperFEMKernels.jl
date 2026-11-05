@@ -12,6 +12,9 @@
 # S2 block preconditioners: fs_schur_upper_a11, fs_schur_full_selfp, fs_additive, fs_multiplicative, with the
 # suffixes _fgmres (FGMRES outside), _lagN, _lublocks (MUMPS on every block: the exact block solve), _boomer (BoomerAMG
 # on every block), _phiboomer (GAMG on u, BoomerAMG on the potentials).
+# The suffix _ew (R4a) adds the Eisenstat–Walker forcing term to the Newton (`forcing = EisenstatWalker()`): the Krylov
+# tolerance of every iteration is chosen by the Newton, rtol is then the tolerance the solver was set up with; ewmax=
+# sets its ηmax (the library default, 1e-2, if absent).
 # rtol is the Krylov tolerance (relative to the right-hand side); nsteps overrides the case's load steps.
 include(joinpath(@__DIR__, "cases.jl"))
 using HyperFEMKernels, GridapPETSc
@@ -31,7 +34,8 @@ function parse_args(args)
     nsteps = haskey(kw, "nsteps") ? parse(Int, kw["nsteps"]) : 0
     bs = parse(Int, get(kw, "bs", "1"))
     opts = replace(get(kw, "opts", ""), "," => " ")
-    words, backend, config, rtol, nsteps, bs, opts
+    ewmax = haskey(kw, "ewmax") ? parse(Float64, kw["ewmax"]) : nothing   # ηmax of the forcing term (_ew); library default if absent
+    words, backend, config, rtol, nsteps, bs, opts, ewmax
 end
 
 "Linear solver of a configuration word (needs the near-null space N and the trial space U)."
@@ -66,13 +70,14 @@ function make_solver(config::String, N, rtol, U, bs, opts)
 end
 
 function main(args)
-    words, backend, config, rtol, nsteps_arg, bs, opts = parse_args(args)
+    words, backend, config, rtol, nsteps_arg, bs, opts, ewmax = parse_args(args)
     t0 = time()
     t_case = @elapsed ((case, tag) = build_case(words))
     nsteps = nsteps_arg > 0 ? nsteps_arg : case.nsteps
     t_null = @elapsed (N = near_nullspace(case.U))
-    ls = make_solver(config, N, rtol, case.U, bs, opts)
-    nls = NewtonRaphson(ls; case.nls_kw..., verbose=1)
+    ew = endswith(config, "_ew")
+    ls = make_solver(ew ? config[1:end-3] : config, N, rtol, case.U, bs, opts)
+    nls = NewtonRaphson(ls; case.nls_kw..., verbose=1, forcing=!ew ? nothing : ewmax === nothing ? EisenstatWalker() : EisenstatWalker(ηmax=ewmax, η0=min(1e-2, ewmax)))
     t_build = @elapsed (m = StaticNonlinearModel(case.res, case.jac, case.U, case.V, case.D; nls, backend, case.extra...))
     n = length(m.caches.x)
     @printf("%s  backend=%s  config=%s  rtol=%.0e  bs=%d  opts=\"%s\"  threads=%d  DOFs=%d  nullspace %d modes (%.2f s)  build %.1f s  rss %.2f GB\n",
