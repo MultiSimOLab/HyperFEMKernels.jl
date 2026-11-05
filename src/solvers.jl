@@ -17,8 +17,8 @@
 
 Gridap `LinearSolver` for a `KernelOperator` with `jacobian = :matrixfree`: a Krylov method of
 Krylov.jl (`:gmres`, `:fgmres`, `:cg`) applied to the `MatrixFreeJacobian` returned by
-`allocate_jacobian`, right-preconditioned by `preconditioner` (an operator slot: `LaggedAssembled`;
-`nothing` = none). The stopping test is on the true residual,
+`allocate_jacobian`, right-preconditioned by `preconditioner` (an operator slot: `LaggedAssembled`,
+`BlockJacobi`; `nothing` = none). The stopping test is on the true residual,
 `‖b − J x‖ ≤ atol + rtol ‖b‖`; `restart` is the GMRES memory; `maxiter` counts all iterations.
 `:cg` applies the preconditioner on the left (symmetric form; the monitored norm is then the
 preconditioned one, as in Krylov.jl). `vector` is the vector type of the Krylov workspace.

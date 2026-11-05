@@ -1,4 +1,4 @@
-# S3 — `MatrixFreeSolver` (Krylov.jl on the matrix-free Jacobian) and the `LaggedAssembled` slot.
+# S3 — `MatrixFreeSolver` (Krylov.jl on the matrix-free Jacobian) and the preconditioner slots.
 Random.seed!(4)
 const TOL_KRY = 1e-7    # solutions to rtol = 1e-10 compared with LU (error ≤ cond · residual; cond ~1e4 on the Q2 elasticity cube)
 
@@ -28,8 +28,8 @@ end
         t = mf_setup(prob)
         dx_ref = t.A \ t.b
         configs = Any[(:gmres, nothing), (:fgmres, nothing), (:gmres, LaggedAssembled(LUSolver())),
-                      (:gmres, LaggedAssembled(LUSolver(); every=2))]
-        spd && push!(configs, (:cg, nothing))
+                      (:gmres, LaggedAssembled(LUSolver(); every=2)), (:gmres, BlockJacobi()), (:fgmres, BlockJacobi())]
+        spd && push!(configs, (:cg, nothing), (:cg, BlockJacobi()))
         for (kry, prec) in configs
             s = MatrixFreeSolver(; krylov=kry, rtol=1e-10, maxiter=4000, restart=t.n, preconditioner=prec)
             dx, ns = mf_solve(s, t.mf, t.b)
@@ -39,6 +39,8 @@ end
             @test 0 < its ≤ t.n + 1
             if prec isa LaggedAssembled
                 @test its ≤ 2                              # exact (right) preconditioner at the setup state
+                @test HK.preconditioner_builds(ns) == 1
+            elseif prec isa BlockJacobi
                 @test HK.preconditioner_builds(ns) == 1
             else
                 @test HK.preconditioner_builds(ns) == 0
@@ -63,7 +65,7 @@ end
 
 @testset "set_tolerance!/tolerance: the forcing-term hook" begin
     t = mf_setup(poisson_2d(; n=(8, 6), order=2))
-    s = MatrixFreeSolver(; rtol=1e-10, maxiter=4000, restart=t.n)
+    s = MatrixFreeSolver(; rtol=1e-10, maxiter=4000, restart=t.n, preconditioner=BlockJacobi())
     ns = numerical_setup(symbolic_setup(s, t.mf), t.mf)
     dx = zeros(t.n)
     @test HK.tolerance(ns) == 1e-10
@@ -101,6 +103,61 @@ end
     @test its[1] ≤ 2 && its[4] ≤ 2 && all(>(0), its)                     # exact where rebuilt
 end
 
+@testset "BlockJacobi: blocks equal the inverse of the assembled nodal blocks (free components)" begin
+    for prob in (elasticity_3d(; order=2), coupled_3d(), poisson_2d(; order=2))
+        t = mf_setup(prob)
+        st = HK.preconditioner_setup(BlockJacobi(), t.mf)
+        ncheck = 0
+        for fb in st.fields
+            nc, nb = size(fb.dofs)
+            for blk in 1:nb
+                free = [c for c in 1:nc if fb.dofs[c, blk] != 0]
+                isempty(free) && continue
+                ids = fb.dofs[free, blk]
+                D = Matrix(t.A[ids, ids])
+                @test fb.Binv[free, free, blk] ≈ inv(D) atol = 1e-10 * max(1.0, norm(inv(D)))
+                ncheck += 1
+            end
+        end
+        @test ncheck > 0
+        # ldiv! applies the inverse blocks: on a block-diagonal rhs it is exact
+        r = randn(t.n); y = zeros(t.n)
+        ldiv!(y, st, r)
+        Dfull = zeros(t.n, t.n)
+        for fb in st.fields, blk in 1:size(fb.dofs, 2)
+            ids = [fb.dofs[c, blk] for c in 1:size(fb.dofs, 1) if fb.dofs[c, blk] != 0]
+            Dfull[ids, ids] = t.A[ids, ids]
+        end
+        @test reldiff(Dfull * y, r) < 1e-10
+        # the update at a new state follows the tangent there
+        x2 = randx(prob.U); jacobian!(t.mf, t.op, x2); HK.preconditioner_update!(st, t.mf)
+        @test HK.preconditioner_builds(st) == 2
+        A2 = jacobian(t.ref, x2)
+        fb = st.fields[1]; blk = findfirst(b -> all(!=(0), fb.dofs[:, b]), 1:size(fb.dofs, 2))
+        ids = fb.dofs[:, blk]
+        @test fb.Binv[:, :, blk] ≈ inv(Matrix(A2[ids, ids])) atol = 1e-10 * norm(inv(Matrix(A2[ids, ids])))
+    end
+end
+
+@testset "eigenvalue_bounds: Arnoldi estimate of the preconditioned spectrum vs the dense one" begin
+    t = mf_setup(poisson_2d(; n=(8, 6), order=2))
+    st = HK.preconditioner_setup(BlockJacobi(), t.mf)
+    Dinv = zeros(t.n, t.n)
+    fb = st.fields[1]
+    for blk in 1:size(fb.dofs, 2)
+        id = fb.dofs[1, blk]; id == 0 && continue
+        Dinv[id, id] = fb.Binv[1, 1, blk]
+    end
+    λ = eigvals(Matrix(t.A) * Dinv)
+    λmin, λmax = eigenvalue_bounds(t.mf, st; k=min(30, t.n))
+    @test 0.9 * maximum(real, λ) ≤ λmax ≤ 1.1 * maximum(real, λ)              # within 10 %
+    @test λmin > 0
+    # without preconditioner: the operator's own spectrum
+    λmin0, λmax0 = eigenvalue_bounds(t.mf, nothing; k=min(30, t.n))
+    λA = maximum(real, eigvals(Matrix(t.A)))
+    @test 0.9λA ≤ λmax0 ≤ 1.1λA
+end
+
 @testset "a Newton loop with the matrix-free solver follows the LU trajectory (nonlinear elasticity)" begin
     e = elasticity_3d(; order=2)
     bodyf = VectorValue(0.0, 0.0, -0.4); dΩe = e.dΩ
@@ -125,7 +182,7 @@ end
     end
     x_lu, h_lu = newton(KernelOperator(res, jac, e.U, e.V), LUSolver())
     n = num_free_dofs(e.U)
-    for prec in (LaggedAssembled(LUSolver(); every=2),)
+    for prec in (LaggedAssembled(LUSolver(); every=2), BlockJacobi())
         s = MatrixFreeSolver(; rtol=1e-10, maxiter=4000, restart=n, preconditioner=prec)
         x_mf, h_mf = newton(KernelOperator(res, jac, e.U, e.V; jacobian=:matrixfree), s)
         @test length(h_mf) == length(h_lu)

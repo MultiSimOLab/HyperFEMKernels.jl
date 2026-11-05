@@ -960,8 +960,10 @@ function cells!(::Val{K}, b, A, op::KernelOperator, g::Group{NSV,NSU,PF,TT,AUX,S
     else
         dNb = map(t -> zeros(t.nn, wcols(t)), g.tables)
         KeT = zeros(ndl, ndl)
-        nzv = nonzeros(A)
-        nzpos = op.pattern.nzpos
+        if K === :jac
+            nzv = nonzeros(A)
+            nzpos = op.pattern.nzpos
+        end
         mm = MATRIX_PRODUCTS && contiguous(g)
         Wb, Bb, Gb = mm ? mm_buffers(g) : (nothing, nothing, nothing)
         for cell in cells
@@ -974,7 +976,11 @@ function cells!(::Val{K}, b, A, op::KernelOperator, g::Group{NSV,NSU,PF,TT,AUX,S
                 element_jacobian!(KeT, g, xl, auxd, cell, dNb)
             end
             signed && apply_signs!(KeT, sg, ndl)
-            scatter_jacobian!(nzv, nzpos, KeT, ndl, sc)
+            if K === :jac
+                scatter_jacobian!(nzv, nzpos, KeT, ndl, sc)
+            else                                   # :blocks — nodal block diagonal (preconditioners.jl)
+                scatter_blocks!(A, KeT, sc)
+            end
         end
     end
     nothing
