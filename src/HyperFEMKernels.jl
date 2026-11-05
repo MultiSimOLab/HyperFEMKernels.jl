@@ -10,7 +10,9 @@ pointwise Julia function (`codegen.jl`) evaluated by fused kernels (`tables.jl`,
 and assembled in parallel with a precomputed sparsity pattern (`assembly.jl`, `coloring.jl`).
 Integrals on a skeleton (interior facets, plus/minus/jump/mean) are assembled by facet kernels
 that see both cells (`skeleton.jl`). Internal variables (`CellState`/`KernelState`) are updated by
-the same kind of kernels (`states.jl`). `check` compares with Gridap (`verify.jl`).
+the same kind of kernels (`states.jl`). `check` compares with Gridap (`verify.jl`). `MatrixFreeSolver` solves the tangent systems of a
+Newton method on the matrix-free Jacobian with Krylov.jl and the preconditioner slots of
+`preconditioners.jl` (`LaggedAssembled`).
 """
 module HyperFEMKernels
 
@@ -19,6 +21,7 @@ using SparseArrays
 using StaticArrays
 using ForwardDiff
 using RuntimeGeneratedFunctions
+using Krylov
 using Gridap
 using Gridap.Arrays
 using Gridap.Fields
@@ -41,6 +44,7 @@ import Gridap.Helpers: first_and_tail
 RuntimeGeneratedFunctions.init(@__MODULE__)
 
 export KernelOperator, update, check, allocations, MatrixFreeJacobian, prepare!
+export MatrixFreeSolver, LaggedAssembled
 export KernelState, KernelUpdater, update_states!
 
 include("probes.jl")
@@ -55,6 +59,8 @@ include("coloring.jl")
 include("skeleton.jl")
 include("tensorproduct.jl")
 include("matrixfree.jl")
+include("solvers.jl")
+include("preconditioners.jl")
 include("states.jl")
 include("verify.jl")
 

@@ -32,6 +32,7 @@ mutable struct MatrixFreeJacobian{TP,GD}
     data::GD                 # per Jacobian group: GroupData
     nthreads::Int
     Afb::Union{Nothing,SparseMatrixCSC{Float64,Int}}   # Gridap-assembled part (hybrid fallback)
+    x::AbstractVector        # state of the last `prepare!` (read by the preconditioner slots)
 end
 
 function MatrixFreeJacobian(op::KernelOperator)
@@ -53,7 +54,7 @@ function MatrixFreeJacobian(op::KernelOperator)
         end
     end
     Afb = isempty(op.fallback.jtrians) ? nothing : fallback_pattern(op.fallback, op.U, op.V, op.jac)
-    MatrixFreeJacobian(op, Tuple(tps), Tuple(data), op.nthreads, Afb)
+    MatrixFreeJacobian(op, Tuple(tps), Tuple(data), op.nthreads, Afb, Float64[])
 end
 
 nslots(::Group{NSV,NSU}) where {NSV,NSU} = (NSV, NSU)
@@ -109,6 +110,7 @@ Algebra.symbolic_setup(ls::Algebra.LinearSolver, ::MatrixFreeJacobian) =
 "Evaluate tangents and geometry at the state `x` (once per Newton iteration)."
 function prepare!(mf::MatrixFreeJacobian, x::AbstractVector)
     op = mf.op
+    mf.x = x
     dvals = [get_dirichlet_dof_values(s) for s in field_spaces(op.U)]
     for (gi, g) in enumerate(op.jgroups)
         auxd = aux_data(op, g)
