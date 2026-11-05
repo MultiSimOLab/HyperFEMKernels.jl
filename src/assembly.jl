@@ -96,7 +96,20 @@ function Group(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int,
 end
 
 """
-    KernelOperator(res, jac, U, V; nthreads = Threads.nthreads(), cache_aux = false)
+Sparsity pattern of the Jacobian (`A0`, structural zeros) and positions of the element entries in
+its nonzeros (`nzpos`, `ndl² × ncells`). Built at construction with `jacobian = :assembled`; with
+`jacobian = :matrixfree` only on first use (an assembled matrix requested through
+`sparsity_pattern`/`jacobian`), so that a purely matrix-free run never allocates it.
+"""
+mutable struct Sparsity
+    A0::Union{Nothing,SparseMatrixCSC{Float64,Int}}
+    nzpos::Matrix{Int32}
+end
+Sparsity() = Sparsity(nothing, zeros(Int32, 0, 0))
+
+"""
+    KernelOperator(res, jac, U, V; nthreads = Threads.nthreads(), cache_aux = false, linear_maps = true,
+                   jacobian = :assembled)
 
 Gridap `NonlinearOperator` that assembles `res(u, v)` and `jac(u, du, v)` with fused, threaded
 kernels. `res` and `jac` are written as for Gridap's `FEOperator`. Use [`update`](@ref) to change
@@ -113,6 +126,11 @@ the first assembly and refilled in place at every assembly. With `cache_aux = tr
 only once per operator (the buffers are not refilled). Only safe when that data does not change
 while the operator is used (e.g. it must not be built from the FE function that holds the current
 Newton iterate).
+
+`jacobian = :assembled` (default): `allocate_jacobian` returns the sparse matrix and `jacobian!`
+assembles it. `jacobian = :matrixfree`: `allocate_jacobian` returns a [`MatrixFreeJacobian`](@ref)
+and `jacobian!` prepares it at the state (`prepare!`), so a Newton solver applies the tangent
+without forming it; the sparsity pattern is then only built if an assembled matrix is requested.
 """
 struct KernelOperator{R,J,US,VS} <: NonlinearOperator
     res::R
@@ -123,8 +141,7 @@ struct KernelOperator{R,J,US,VS} <: NonlinearOperator
     ndl::Int
     rgroups::Vector{Any}
     jgroups::Vector{Any}
-    A0::SparseMatrixCSC{Float64,Int}
-    nzpos::Matrix{Int32}
+    pattern::Sparsity                # sparsity pattern and nonzero positions (see `Sparsity`)
     colors::Vector{Vector{Int32}}
     nthreads::Int
     cache_aux::Bool
@@ -132,6 +149,7 @@ struct KernelOperator{R,J,US,VS} <: NonlinearOperator
     fallback::Fallback
     skel::Vector{SkeletonData}       # skeleton triangulations with groups (facet cells, colours, positions)
     signed::Bool                     # some field has dof signs (H(div)): applied at gather/scatter
+    jacobian::Symbol                 # :assembled (allocate_jacobian gives the sparse matrix) or :matrixfree (a MatrixFreeJacobian)
 end
 
 "A skeleton (interior facets with a plus and a minus cell): its glue to the cells is a `SkeletonPair`."
@@ -351,7 +369,8 @@ function warn_fallback(kind, list)
 end
 
 function KernelOperator(res, jac, U::FESpace, V::FESpace; nthreads::Int=Threads.nthreads(), cache_aux::Bool=false,
-                        linear_maps::Bool=true)
+                        linear_maps::Bool=true, jacobian::Symbol=:assembled)
+    jacobian in (:assembled, :matrixfree) || throw(ArgumentError("HyperFEMKernels: jacobian must be :assembled or :matrixfree (got :$jacobian)"))
     Us, Vs = field_spaces(U), field_spaces(V)
     length(Us) == length(Vs) || error("HyperFEMKernels: test and trial spaces have different numbers of fields")
     if U isa MultiFieldFESpace
@@ -379,9 +398,10 @@ function KernelOperator(res, jac, U::FESpace, V::FESpace; nthreads::Int=Threads.
     jgroups = compile_groups(jforms, U, locs, D, colors, rgroups; linear_maps, fallback=jfb, skel, fields, nrows=toff, ndl=loc)   # tables shared with the residual
     warn_fallback("residual", rfb); warn_fallback("Jacobian", jfb)
     fb = Fallback(Any[t for (t, _) in rfb], Any[t for (t, _) in jfb], SparseMatrixAssembler(U, V))
-    A0, nzpos = sparsity(fields, loc, ncells, toff, uoff, fallback_pattern(fb, U, V, jac); skel=jacobian_skeletons(skel, jgroups))
-    KernelOperator(res, jac, U, V, fields, loc, rgroups, jgroups, A0, nzpos, colors, nthreads, cache_aux, linear_maps, fb, skel,
-                   any(has_signs, fields))
+    op = KernelOperator(res, jac, U, V, fields, loc, rgroups, jgroups, Sparsity(), colors, nthreads, cache_aux, linear_maps, fb, skel,
+                        any(has_signs, fields), jacobian)
+    jacobian === :assembled && build_pattern!(op)
+    op
 end
 
 """
@@ -408,16 +428,38 @@ function update(op::KernelOperator, res, jac)
     jskel, jskel0 = jacobian_skeletons(skel, jgroups), jacobian_skeletons(op.skel, op.jgroups)
     same = length(fb.jtrians) == length(op.fallback.jtrians) && all(t -> any(s -> s === t, op.fallback.jtrians), fb.jtrians) &&
            length(jskel) == length(jskel0) && all(s -> any(t -> t.trian === s.trian, jskel0), jskel)
-    A0, nzpos = same ? (op.A0, op.nzpos) : begin
-        ncells = num_cells(get_triangulation(field_spaces(op.U)[1]))
-        sparsity(op.fields, op.ndl, ncells, nrows, sum(num_free_dofs, field_spaces(op.U)), fallback_pattern(fb, op.U, op.V, jac); skel=jskel)
-    end
-    KernelOperator(res, jac, op.U, op.V, op.fields, op.ndl, rgroups, jgroups, A0, nzpos, op.colors, op.nthreads, op.cache_aux, op.linear_maps, fb, skel,
-                   op.signed)
+    pattern = same ? op.pattern : Sparsity()
+    newop = KernelOperator(res, jac, op.U, op.V, op.fields, op.ndl, rgroups, jgroups, pattern, op.colors, op.nthreads, op.cache_aux,
+                           op.linear_maps, fb, skel, op.signed, op.jacobian)
+    op.jacobian === :assembled && build_pattern!(newop)
+    newop
 end
 
 # ---------------------------------------------------------------------------------------------
 # Sparsity pattern and nonzero positions
+
+"Build the sparsity pattern and the nonzero positions of `op` if not built yet (also the facet positions of its skeletons)."
+function build_pattern!(op::KernelOperator)
+    p = op.pattern
+    p.A0 === nothing || return p
+    ncells = num_cells(get_triangulation(field_spaces(op.U)[1]))
+    nrows, ncols = sum(num_free_dofs, field_spaces(op.V)), sum(num_free_dofs, field_spaces(op.U))
+    A0, nzpos = sparsity(op.fields, op.ndl, ncells, nrows, ncols, fallback_pattern(op.fallback, op.U, op.V, op.jac);
+                         skel=jacobian_skeletons(op.skel, op.jgroups))
+    p.A0, p.nzpos = A0, nzpos
+    p
+end
+
+"""
+    sparsity_pattern(op) -> SparseMatrixCSC
+
+Sparsity pattern of the Jacobian of `op` (structural zeros; `allocate_jacobian` copies it). Built on
+first use with `jacobian = :matrixfree`.
+"""
+sparsity_pattern(op::KernelOperator) = build_pattern!(op).A0::SparseMatrixCSC{Float64,Int}
+
+"Positions of the `ndl × ndl` element Jacobian entries in the nonzeros of the pattern (0 = not stored)."
+nonzero_positions(op::KernelOperator) = build_pattern!(op).nzpos
 
 function sparsity(fields::Vector{FieldLayout}, ndl::Int, ncells::Int, nrows::Int, ncols::Int, extra=nothing;
                   skel::Vector{SkeletonData}=SkeletonData[])
@@ -486,7 +528,8 @@ end
 # Algebra interface
 
 Algebra.allocate_residual(op::KernelOperator, x::AbstractVector) = zeros(sum(num_free_dofs, field_spaces(op.V)))
-Algebra.allocate_jacobian(op::KernelOperator, x::AbstractVector) = copy(op.A0)
+Algebra.allocate_jacobian(op::KernelOperator, x::AbstractVector) =
+    op.jacobian === :matrixfree ? MatrixFreeJacobian(op) : copy(sparsity_pattern(op))
 Algebra.zero_initial_guess(op::KernelOperator) = zeros(sum(num_free_dofs, field_spaces(op.U)))
 
 function Algebra.residual!(b::AbstractVector, op::KernelOperator, x::AbstractVector)
@@ -499,6 +542,7 @@ function Algebra.residual!(b::AbstractVector, op::KernelOperator, x::AbstractVec
 end
 
 function Algebra.jacobian!(A::SparseMatrixCSC, op::KernelOperator, x::AbstractVector)
+    build_pattern!(op)      # positions (cells and facets) exist even if `A` was not allocated by `op`
     fill!(nonzeros(A), 0.0)
     dvals = [get_dirichlet_dof_values(s) for s in field_spaces(op.U)]
     for g in op.jgroups
@@ -917,6 +961,7 @@ function cells!(::Val{K}, b, A, op::KernelOperator, g::Group{NSV,NSU,PF,TT,AUX,S
         dNb = map(t -> zeros(t.nn, wcols(t)), g.tables)
         KeT = zeros(ndl, ndl)
         nzv = nonzeros(A)
+        nzpos = op.pattern.nzpos
         mm = MATRIX_PRODUCTS && contiguous(g)
         Wb, Bb, Gb = mm ? mm_buffers(g) : (nothing, nothing, nothing)
         for cell in cells
@@ -929,7 +974,7 @@ function cells!(::Val{K}, b, A, op::KernelOperator, g::Group{NSV,NSU,PF,TT,AUX,S
                 element_jacobian!(KeT, g, xl, auxd, cell, dNb)
             end
             signed && apply_signs!(KeT, sg, ndl)
-            scatter_jacobian!(nzv, op.nzpos, KeT, ndl, sc)
+            scatter_jacobian!(nzv, nzpos, KeT, ndl, sc)
         end
     end
     nothing

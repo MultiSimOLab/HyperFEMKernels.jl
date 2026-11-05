@@ -4,18 +4,18 @@ Random.seed!(1)
     for prob in (poisson_2d(), elasticity_3d(), coupled_3d())
         op = KernelOperator(prob.res, prob.jac, prob.U, prob.V)
         Ag = Algebra.jacobian(gridap_op(prob), randx(prob.U))
-        @test size(op.A0) == size(Ag)
-        @test op.A0.colptr == Ag.colptr && op.A0.rowval == Ag.rowval
-        @test all(p -> p == 0 || 1 <= p <= nnz(op.A0), op.nzpos)
+        @test size(HK.sparsity_pattern(op)) == size(Ag)
+        @test HK.sparsity_pattern(op).colptr == Ag.colptr && HK.sparsity_pattern(op).rowval == Ag.rowval
+        @test all(p -> p == 0 || 1 <= p <= nnz(HK.sparsity_pattern(op)), HK.nonzero_positions(op))
         ndl = op.ndl
-        for cell in (1, size(op.nzpos, 2)), ii in 1:ndl, jj in 1:ndl
-            pos = op.nzpos[ii+(jj-1)*ndl, cell]
+        for cell in (1, size(HK.nonzero_positions(op), 2)), ii in 1:ndl, jj in 1:ndl
+            pos = HK.nonzero_positions(op)[ii+(jj-1)*ndl, cell]
             pos == 0 && continue
             r = findfirst(fl -> fl.loc < ii <= fl.loc + fl.nd, op.fields)
             c = findfirst(fl -> fl.loc < jj <= fl.loc + fl.nd, op.fields)
             row = op.fields[r].test_off + op.fields[r].test_ids[ii-op.fields[r].loc, cell]
             col = op.fields[c].trial_off + op.fields[c].trial_ids[jj-op.fields[c].loc, cell]
-            @test op.A0.rowval[pos] == row && op.A0.colptr[col] <= pos < op.A0.colptr[col+1]
+            @test HK.sparsity_pattern(op).rowval[pos] == row && HK.sparsity_pattern(op).colptr[col] <= pos < HK.sparsity_pattern(op).colptr[col+1]
         end
     end
 end
@@ -52,7 +52,7 @@ end
     x = randx(p.U)
     b = allocate_residual(op, x); A = allocate_jacobian(op, x)
     @test length(b) == num_free_dofs(p.V) && size(A) == (num_free_dofs(p.V), num_free_dofs(p.U))
-    @test A !== op.A0 && nnz(A) == nnz(op.A0)
+    @test A !== HK.sparsity_pattern(op) && nnz(A) == nnz(HK.sparsity_pattern(op))
     fill!(b, 7.0); fill!(nonzeros(A), 7.0)
     residual!(b, op, x); jacobian!(A, op, x)
     @test reldiff(b, Algebra.residual(gridap_op(p), x)) < TOL
@@ -79,7 +79,7 @@ end
     jac(Λ) = (u, du, v) -> ∫(Λ * ∇(v) ⋅ ∇(du))p.dΩ
     op = KernelOperator(res(1.0), jac(1.0), p.U, p.V)
     op2 = HK.update(op, res(2.0), jac(3.0))
-    @test op2.A0 === op.A0 && op2.nzpos === op.nzpos && op2.colors === op.colors
+    @test op2.pattern === op.pattern && op2.colors === op.colors
     @test op2.rgroups[1].geo === op.rgroups[1].geo          # tables reused
     x = randx(p.U)
     @test reldiff(Algebra.residual(op2, x), Algebra.residual(get_algebraic_operator(FEOperator(res(2.0), jac(3.0), p.U, p.V)), x)) < TOL

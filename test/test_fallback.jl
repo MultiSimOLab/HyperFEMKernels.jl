@@ -38,7 +38,7 @@ end
     x = randx(p.U)
     Ak = Algebra.jacobian(op, x)
     Ag = Algebra.jacobian(gridap_op((; s.res, s.jac, p.U, p.V)), x)
-    @test nnz(Ak) > nnz(op0.A0) && reldiff(Ak, Ag) < TOL
+    @test nnz(Ak) > nnz(HK.sparsity_pattern(op0)) && reldiff(Ak, Ag) < TOL
     # the fallback part of the Jacobian (here the whole Jacobian) in a matrix with its own pattern
     Afb = HK.fallback_pattern(op.fallback, p.U, p.V, s.jac)
     HK.fallback_jacobian!(Afb, op, x)
@@ -78,12 +78,12 @@ end
     r1, j1 = mk(1.0); r2, j2 = mk(2.0)
     op1 = fallback_op(KernelOperator, r1, j1, p.U, p.V)
     op2 = fallback_op(update, op1, r2, j2)
-    @test op2.A0 === op1.A0 && op2.nzpos === op1.nzpos
+    @test op2.pattern === op1.pattern
     c = check(r2, j2, p.U, p.V, randx(p.U); op=op2)
     @test c.res < TOL && c.jac < TOL
     # a fallback appearing in update: pattern recomputed
     op3 = fallback_op(update, KernelOperator(p.res, p.jac, p.U, p.V), r2, j2)
-    @test op3.A0 !== op1.A0
+    @test op3.pattern !== op1.pattern
     c3 = check(r2, j2, p.U, p.V, randx(p.U); op=op3)
     @test c3.res < TOL && c3.jac < TOL
 end

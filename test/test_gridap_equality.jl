@@ -167,6 +167,6 @@ begin
         c = check(res(2.0), jac(2.0), U, V, x; op=op2)
         @test c.res < TOL
         @test c.jac < TOL
-        @test op2.A0 === op.A0
+        @test op2.pattern === op.pattern
     end
 end

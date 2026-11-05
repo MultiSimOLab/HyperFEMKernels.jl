@@ -122,7 +122,7 @@ end
     p.Pc[] = -1.3
     op1 = HyperFEMKernels.update(op, p.res, p.jac)
     @test same_code(op, op1)
-    @test op1.A0 === op.A0
+    @test op1.pattern === op.pattern
     Ag, bg = gridap_system(p)
     @test reldiff(-residual(op1, x0), bg) < TOL
     @test reldiff(jacobian(op1, x0), Ag) < TOL

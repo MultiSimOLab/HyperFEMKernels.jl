@@ -109,7 +109,7 @@ end
     res2(u, v) = ∫(∇(v) ⋅ ∇(u))p.dΩ + ∫(7.0 * v * u)dΓ
     jac2(u, du, v) = ∫(∇(v) ⋅ ∇(du))p.dΩ + ∫(7.0 * v * du)dΓ
     op2 = update(op, res2, jac2)
-    @test op2.A0 === op.A0 && (op2.jgroups[end].geo === op.jgroups[end].geo || op2.jgroups[end].geo === op.rgroups[end].geo)
+    @test op2.pattern === op.pattern && (op2.jgroups[end].geo === op.jgroups[end].geo || op2.jgroups[end].geo === op.rgroups[end].geo)
     c = check(res2, jac2, p.U, p.V, x; op=op2)
     @test c.res < TOL && c.jac < TOL
     @test all(a -> a.bytes == 0, allocations(op, x))

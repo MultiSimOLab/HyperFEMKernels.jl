@@ -26,8 +26,8 @@ state `x`, then use `mul!`/`*` (e.g. inside an iterative solver). Sum factorisat
 fields on quadrilaterals/hexahedra with tensor-product quadrature; other fields use the dense
 shape-function weights.
 """
-mutable struct MatrixFreeJacobian{OP,TP,GD}
-    op::OP
+mutable struct MatrixFreeJacobian{TP,GD}
+    op::KernelOperator       # rebound by `jacobian!` when the operator is `update`d (same structure)
     tps::TP                  # per Jacobian group: tuple of TPTable or nothing per field
     data::GD                 # per Jacobian group: GroupData
     nthreads::Int
@@ -61,10 +61,50 @@ nslots(::SkeletonGroup{NSV,NSU}) where {NSV,NSU} = (NSV, NSU)
 group_dim(::Group{NSV,NSU,PF,TT,AUX,SV,SU,D}) where {NSV,NSU,PF,TT,AUX,SV,SU,D} = D
 group_dim(::SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D}) where {NSV,NSU,PF,TT,AUX,SV,SU,D} = D
 
-Base.size(mf::MatrixFreeJacobian) = size(mf.op.A0)
-Base.size(mf::MatrixFreeJacobian, i::Int) = size(mf.op.A0, i)
+Base.size(mf::MatrixFreeJacobian) = (sum(num_free_dofs, field_spaces(mf.op.V)), sum(num_free_dofs, field_spaces(mf.op.U)))
+Base.size(mf::MatrixFreeJacobian, i::Int) = size(mf)[i]
 Base.eltype(::MatrixFreeJacobian) = Float64
 Base.:*(mf::MatrixFreeJacobian, dx::AbstractVector) = LinearAlgebra.mul!(zeros(size(mf, 1)), mf, dx)
+
+"""
+    jacobian!(mf::MatrixFreeJacobian, op, x)
+
+Gridap's `jacobian!` for an operator with `jacobian = :matrixfree`: prepares `mf` at the state `x`
+(no matrix is formed). If `op` is an `update` of the operator `mf` was built for, `mf` is rebound to
+it (its buffers are reused when the groups have the same shape, reallocated otherwise).
+"""
+function Algebra.jacobian!(mf::MatrixFreeJacobian, op::KernelOperator, x::AbstractVector)
+    rebind!(mf, op)
+    prepare!(mf, x)
+end
+
+"Buffer shape of a Jacobian group: skeleton or cell group, slots, points, number of cells/facets."
+group_shape(g::Group) = (false, nslots(g), g.geo.np, length(g.cellmap), map(t -> t.nn, g.tables))
+group_shape(g::SkeletonGroup) = (true, nslots(g), g.geo.np, length(g.facets), map(t -> t.nn, g.tables))
+
+function rebind!(mf::MatrixFreeJacobian, op::KernelOperator)
+    mf.op === op && return mf
+    op.U === mf.op.U && op.V === mf.op.V || error("HyperFEMKernels: the MatrixFreeJacobian was built for an operator on other FE spaces")
+    same = length(op.jgroups) == length(mf.op.jgroups) &&
+           all(((g, g0),) -> group_shape(g) == group_shape(g0), zip(op.jgroups, mf.op.jgroups)) &&
+           (mf.Afb === nothing) == isempty(op.fallback.jtrians)
+    if same
+        mf.op = op
+    else
+        new = MatrixFreeJacobian(op)
+        mf.op, mf.tps, mf.data, mf.Afb = new.op, new.tps, new.data, new.Afb
+    end
+    mf
+end
+
+function Algebra.residual_and_jacobian!(b::AbstractVector, mf::MatrixFreeJacobian, op::KernelOperator, x::AbstractVector)
+    residual!(b, op, x)
+    jacobian!(mf, op, x)
+    (b, mf)
+end
+
+Algebra.symbolic_setup(ls::Algebra.LinearSolver, ::MatrixFreeJacobian) =
+    error("HyperFEMKernels: $(nameof(typeof(ls))) needs an assembled matrix; with jacobian = :matrixfree use a solver that applies the operator (MatrixFreeSolver), or jacobian = :assembled")
 
 "Evaluate tangents and geometry at the state `x` (once per Newton iteration)."
 function prepare!(mf::MatrixFreeJacobian, x::AbstractVector)
