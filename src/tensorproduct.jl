@@ -54,6 +54,7 @@ equispaced Lagrange nodes and P^D tensor-product quadrature points, or `nothing`
 """
 TPTable(::PiolaTable, xq::AbstractVector) = nothing
 function TPTable(t::FieldTable{D,T,NN}, xq::AbstractVector) where {D,T,NN}
+    length(first(xq)) == D || return nothing          # manifold cells (lower-dimensional reference points)
     Q = round(Int, NN^(1 / D)); Q^D == NN || return nothing
     np = length(xq)
     P = round(Int, np^(1 / D)); P^D == np || return nothing

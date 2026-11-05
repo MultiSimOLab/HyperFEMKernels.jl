@@ -111,7 +111,7 @@ function probes(space::FESpace, role::Symbol)
     fs = field_spaces(space)
     ps = map(enumerate(fs)) do (i, s)
         trian = get_triangulation(s)
-        ProbeField(role, i, 0, field_valtype(s), num_cell_dims(trian), trian)
+        ProbeField(role, i, 0, field_valtype(s), num_point_dims(trian), trian)   # gradients live in the physical space (also on a manifold triangulation)
     end
     length(ps) == 1 ? ps[1] : Tuple(ps)
 end

@@ -29,14 +29,24 @@ Geometry: gradients of the geometric shape functions at the quadrature points, w
 coordinates. For a boundary group `Jf` is the (constant) Jacobian of the map from the reference
 face to the reference cell, so that the surface measure is `w * meas(Jf ⋅ Jt)`; `nothing` for
 volume groups.
+
+`D` is the dimension of the physical space and `dc` that of the cells. On a manifold triangulation
+(`dc < D`: an FE space on a curve in 2D/3D or on a surface in 3D, e.g. on an interface) the
+reference gradients are padded with zeros to `D` components, so that `Jt` has zero rows in the
+directions normal to the cell; `point_geometry` fills them with an orthonormal frame of the normal
+space (`complete_frame`). The completed `Jt` is square: `meas(Jt)` is the measure of the manifold
+cell (√det(Jt Jtᵀ) of the rectangular Jacobian) and `inv(Jt)` applied to a zero-padded reference
+gradient is the tangential gradient `pinvJt(Jt) ⋅ ∇̂` that Gridap uses, so the kernels need no other
+change.
 """
 struct GeoTable{D,JF}
     np::Int
     ng::Int
-    dM::Matrix{VectorValue{D,Float64}}      # np × ng, reference gradients (at the cell points)
+    dM::Matrix{VectorValue{D,Float64}}      # np × ng, reference gradients (at the cell points), zero-padded to D
     w::Vector{Float64}                       # np
     coords::Matrix{VectorValue{D,Float64}}   # ng × ncells (of the integration triangulation)
     Jf::JF
+    dc::Int                                  # dimension of the cells (dc < D: manifold)
 end
 
 """
@@ -62,8 +72,20 @@ function GeoTable(trian::Triangulation, xq::AbstractVector, w::AbstractVector; c
             coords[n, i] = xc[n]
         end
     end
-    GeoTable{D,typeof(Jf)}(length(xq), ng, Matrix{VectorValue{D,Float64}}(dM), collect(Float64, w), coords, Jf)
+    dc = num_cell_dims(trian)
+    dc >= 1 || error("HyperFEMKernels: integrals on 0-dimensional cells are not supported")
+    dc == D || Jf === nothing ||
+        error("HyperFEMKernels: boundary or skeleton integrals of FE spaces on a manifold triangulation (cells of dimension $dc in $D-D) are not supported yet")
+    dMp = Matrix{VectorValue{D,Float64}}(undef, size(dM))
+    for i in eachindex(dM)
+        dMp[i] = pad_vector(dM[i], Val(D))
+    end
+    GeoTable{D,typeof(Jf)}(length(xq), ng, dMp, collect(Float64, w), coords, Jf, dc)
 end
+
+"A reference gradient (`VectorValue{dc}`) zero-padded to `D` components (manifold cells, `dc < D`)."
+@inline pad_vector(v::VectorValue{D}, ::Val{D}) where {D} = VectorValue{D,Float64}(v.data)
+@inline pad_vector(v::VectorValue{d}, ::Val{D}) where {d,D} = VectorValue{D,Float64}(ntuple(i -> i <= d ? Float64(v[i]) : 0.0, Val(D)))
 
 "Scalar nodal shape functions of one field at the quadrature points and the local dof layout.
 `T` is the value type of the field (`Float64` or `VectorValue{nc,Float64}`)."
@@ -82,8 +104,12 @@ end
 function FieldTable(space::SingleFieldFESpace, xq::AbstractVector, D::Int)
     is_piola(space) && error("HyperFEMKernels: Piola-mapped (H(div)) spaces are not supported on skeletons yet")
     fields = uniform_value(get_data(get_fe_basis(space)), "the FE basis")
+    # reference dimension of the cells: < D on a manifold triangulation, where the reference
+    # gradients are zero-padded to D components (see `GeoTable`)
+    dc = length(first(xq))
+    dc <= D || error("HyperFEMKernels: reference points of dimension $dc in a $D-D space")
     # extra points make node identification robust when quadrature points are few
-    probe_pts = [Point(ntuple(i -> 0.1 + 0.07 * (k + i) % 0.6, D)) for k in 1:7]
+    probe_pts = [Point(ntuple(i -> 0.1 + 0.07 * (k + i) % 0.6, dc)) for k in 1:7]
     pts = vcat(collect(xq), probe_pts)
     vals = evaluate(fields, pts)
     grads = evaluate(Broadcasting(∇)(fields), pts)
@@ -100,7 +126,7 @@ function FieldTable(space::SingleFieldFESpace, xq::AbstractVector, D::Int)
         end
     end
     scalar(q, j) = nc == 1 ? vals[q, j] : vals[q, j][comp[j]]
-    sgrad(q, j) = nc == 1 ? grads[q, j] : VectorValue(ntuple(J -> grads[q, j][J, comp[j]], D))
+    sgrad(q, j) = VectorValue{D,Float64}(ntuple(J -> J > dc ? 0.0 : nc == 1 ? grads[q, j][J] : grads[q, j][J, comp[j]], D))
     keyof(j) = [scalar(q, j) for q in axes(vals, 1)]
     reps = Vector{Float64}[]          # one representative key per node (approximate matching:
     node = zeros(Int, nd)             # Gridap evaluates each component with its own round-off)
@@ -164,6 +190,8 @@ end
 function PiolaTable(space::SingleFieldFESpace, xq::AbstractVector, D::Int)
     a = piola_basis(space)
     a === nothing && error("HyperFEMKernels: not a Piola-mapped space")
+    length(first(xq)) == D ||
+        error("HyperFEMKernels: H(div) spaces on a manifold triangulation (cells of lower dimension than the space) are not supported")
     ref = uniform_value(a.args[1], "the reference H(div) basis")
     vals = evaluate(ref, xq)                         # np × nd, VectorValue{D}
     grads = evaluate(Broadcasting(∇)(ref), xq)       # np × nd, TensorValue{D,D}
