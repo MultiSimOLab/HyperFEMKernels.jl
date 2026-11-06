@@ -65,3 +65,62 @@ quad_weights(dΩ) = HK.uniform_value(Gridap.CellData.get_cell_quadrature(dΩ).ce
 
 "Contraction of a flattened 4th-order tensor C[(iJ),(kL)] with a 2nd-order tensor A[kL] (pointwise)."
 dbl_contract(C::TensorValue{9,9}, A::TensorValue{3,3}) = TensorValue{3,3}(ntuple(i -> sum(C[i, j] * A[j] for j in 1:9), 9))
+
+# ---------------------------------------------------------------------------------------------
+# Hessians on non-affine cells: reference reproduced from HyperFEM.jl (src/TensorAlgebra/Hessian.jl,
+# PR #274): `push_hessian` pushes a reference Hessian forward with the curvature of the cell map,
+#   H_abk = Jinv_ai Jinv_bj (Ĥ_ijk − ∇̂∇̂φ_ijc ∇u_ck),  ∇u = Jinv ⋅ ∇̂u,  Jinv = inv(Jt),
+# and `hessian_nonaffine(u)` builds it for an FE function or basis (Gridap's ∇∇ only supports affine maps).
+using Gridap.Fields: Operation
+using Gridap.CellData: similar_cell_field
+using Gridap.Geometry: get_cell_map
+
+function push_hessian(Ĥ::ThirdOrderTensorValue{D,D,N}, ∇̂u::TensorValue{D,N},
+                      Jt::TensorValue{D,D}, ∇∇φ::ThirdOrderTensorValue{D,D,D}) where {D,N}
+    Jinv = inv(Jt)
+    ∇u = Jinv ⋅ ∇̂u
+    T = promote_type(eltype(Ĥ), eltype(Jinv))
+    ThirdOrderTensorValue{D,D,N}(ntuple(Val(D * D * N)) do l
+        a, b, k = Tuple(CartesianIndices((D, D, N))[l])
+        s = zero(T)
+        for i in 1:D, j in 1:D
+            t = Ĥ[i, j, k]
+            for c in 1:D
+                t -= ∇∇φ[i, j, c] * ∇u[c, k]
+            end
+            s += Jinv[a, i] * Jinv[b, j] * t
+        end
+        s
+    end)
+end
+function push_hessian(Ĥ::TensorValue{D,D}, ∇̂u::VectorValue{D},
+                      Jt::TensorValue{D,D}, ∇∇φ::ThirdOrderTensorValue{D,D,D}) where {D}
+    Jinv = inv(Jt)
+    ∇u = Jinv ⋅ ∇̂u
+    G = TensorValue{D,D}(ntuple(Val(D * D)) do l
+        i, j = Tuple(CartesianIndices((D, D))[l])
+        Ĥ[i, j] - sum(∇∇φ[i, j, c] * ∇u[c] for c in 1:D)
+    end)
+    Jinv ⋅ G ⋅ transpose(Jinv)
+end
+function hessian_nonaffine(a::CellField)
+    trian = get_triangulation(a)
+    cell_a = get_data(a)
+    cell_Ĥ = lazy_map(Broadcasting(∇∇), cell_a)
+    cell_∇̂ = lazy_map(Broadcasting(∇), cell_a)
+    cell_map = get_cell_map(trian)
+    cell_Jt = lazy_map(∇, cell_map)
+    cell_∇∇φ = lazy_map(∇∇, cell_map)
+    h = lazy_map(Broadcasting(Operation(push_hessian)), cell_Ĥ, cell_∇̂, cell_Jt, cell_∇∇φ)
+    similar_cell_field(a, h, trian, DomainStyle(a))
+end
+
+"Cartesian model with a non-affine (bilinear/trilinear, through the mapped nodes) geometry; identity map when `mapped = false`."
+function cartesian_model(D::Int, n; mapped=false, simplex=false)
+    dom = D == 2 ? (0, 1, 0, 1) : (0, 1, 0, 1, 0, 1)
+    cells = D == 2 ? n[1:2] : n
+    f(x) = D == 2 ? VectorValue(x[1] + 0.1 * x[1] * x[2], x[2] + 0.05 * x[1]^2) :
+           VectorValue(x[1] + 0.1 * x[1] * x[2], x[2] + 0.05 * x[3]^2, x[3] - 0.07 * x[1] * x[2])
+    model = mapped ? CartesianDiscreteModel(dom, cells; map=f) : CartesianDiscreteModel(dom, cells)
+    simplex ? simplexify(model) : model
+end

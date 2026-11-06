@@ -38,7 +38,7 @@ using Gridap.Algebra
 import Gridap.Arrays: CompressedArray, LazyArray, Broadcasting, testitem, array_cache, getindex!, evaluate
 import Gridap.Fields: BroadcastingFieldOpMap, IntegrationMap
 import Gridap.CellData: CellField, CellPoint, DomainContribution, ReferenceDomain
-import Gridap.TensorValues: MultiValue, meas, outer
+import Gridap.TensorValues: MultiValue, ThirdOrderTensorValue, meas, outer
 import Gridap.MultiField: MultiFieldStyle, ConsecutiveMultiFieldStyle
 import Gridap.Algebra: NonlinearOperator
 import Gridap.Helpers: first_and_tail

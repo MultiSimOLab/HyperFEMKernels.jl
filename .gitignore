@@ -32,3 +32,4 @@ docs/*.pdf
 
 # Compiled cross-code benchmark binaries (built from the crosscode-benchmark branch)
 benchmark/crosscode/mfem/bench
+!CHANGELOG.md

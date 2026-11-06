@@ -1,8 +1,9 @@
 # Fused element kernels.
 #
-# Per cell and quadrature point: geometry, shape-function weights W (values and physical
-# gradients, stored node-contiguous), values and gradients of the unknowns, auxiliary values;
-# then the residual coefficients R (or the tangent T) in slot space, contracted with W:
+# Per cell and quadrature point: geometry, shape-function weights W (values, physical gradients
+# and physical Hessians, stored node-contiguous), values, gradients and Hessians of the unknowns,
+# auxiliary values; then the residual coefficients R (or the tangent T) in slot space, contracted
+# with W:
 #
 #     r[(n,c)]          += dV Σ_jj W[n, jj] R[slot(c, jj)]
 #     K[(n,c), (m,k)]   += dV Σ_jj Σ_ll W_f[n, jj] T[slot_f(c, jj), slot_g(k, ll)] W_g[m, ll]
@@ -15,54 +16,129 @@
 # map of the reference tables, applied per point (see "H(div) fields" below and `PiolaTable`).
 
 """
-    SlotSpec{NC,LV,HV,HG,S,COLS}
+    SlotSpec{NC,LV,HV,HG,HH,S,COLS}
 
 Slots of the leaves of one field (test or trial) in the slot vector: `sm[c, jj]` is the slot of
-component `c` and "derivative index" `jj`, where the value comes first if present (`HV`) and then
-∂/∂x_1…∂/∂x_D if the gradient is present (`HG`). `LV` = number of derivative indices; `COLS[jj]`
-is the column of the physical weight matrix W (`point_weights!`) of derivative index `jj`.
+component `c` and "derivative index" `jj`, where the value comes first if present (`HV`), then
+∂/∂x_1…∂/∂x_D if the gradient is present (`HG`), then the unique Hessian entries (`hess_pairs`) if
+the Hessian is present (`HH`). `LV` = number of derivative indices; `COLS[jj]` is the column of the
+physical weight matrix W (`point_weights!`) of derivative index `jj`.
 
 For an H(div) field (`PiolaTable`) there is one pseudo-component and the derivative indices run over
 the value components (D) and then the gradient entries [J,c] column-major (D²), in the order of the
-columns of W.
+columns of W (no Hessians).
 """
-struct SlotSpec{NC,LV,HV,HG,S,COLS}
+struct SlotSpec{NC,LV,HV,HG,HH,S,COLS}
     sm::S
 end
 
 SlotSpec(::FieldTable, smap::Matrix{Int}, D::Int) = SlotSpec(smap, D)
 SlotSpec(::PiolaTable{D}, smap::Matrix{Int}, ::Int) where {D} = piola_slotspec(smap, D)
 
-"Nodal field: `smap[c, 1 + J]` = slot of component `c`, value (`J = 0`) or ∂/∂x_J (`slot_map`)."
+"Nodal field: `smap[c, 1 + J]` = slot of component `c`, value (`J = 0`) or ∂/∂x_J; `smap[c, 1 + D + p]` of Hessian entry `p` (`slot_map`)."
 function SlotSpec(smap::Matrix{Int}, D::Int)
     nc = size(smap, 1)
+    nh = nhess(D)
+    size(smap, 2) == D + 1 && (smap = hcat(smap, zeros(Int, nc, nh)))   # value and gradient columns only
+    size(smap, 2) == 1 + D + nh || error("HyperFEMKernels: a slot map of a $D-D field has $(1 + D) or $(1 + D + nh) columns")
     hv = any(>(0), smap[:, 1])
-    hg = any(>(0), smap[:, 2:end])
-    cols = vcat(hv ? [1] : Int[], hg ? collect(2:D+1) : Int[])
+    hg = any(>(0), smap[:, 2:D+1])
+    hh = any(>(0), smap[:, D+2:end])
+    cols = vcat(hv ? [1] : Int[], hg ? collect(2:D+1) : Int[], hh ? collect(D+2:D+1+nh) : Int[])
     lv = length(cols)
     sm = SMatrix{nc,lv,Int,nc * lv}(smap[:, cols])
     all(>(0), sm) || error("HyperFEMKernels: partial use of a field's components is not supported")
-    SlotSpec{nc,lv,hv,hg,typeof(sm),Tuple(cols)}(sm)
+    SlotSpec{nc,lv,hv,hg,hh,typeof(sm),Tuple(cols)}(sm)
 end
 
 "H(div) field: the slots of all D value components and/or all D² gradient entries, in one row."
 function piola_slotspec(smap::Matrix{Int}, D::Int)
     size(smap, 1) == D || error("HyperFEMKernels: an H(div) field has $D components")
+    size(smap, 2) > D + 1 && any(>(0), smap[:, D+2:end]) &&
+        error("HyperFEMKernels: second derivatives (∇∇) of H(div) fields are not supported")
     hv = any(>(0), smap[:, 1])
-    hg = any(>(0), smap[:, 2:end])
-    slots = vcat(hv ? smap[:, 1] : Int[], hg ? vec(permutedims(smap[:, 2:end])) : Int[])   # [J,c] column-major: J fastest
+    hg = any(>(0), smap[:, 2:D+1])
+    slots = vcat(hv ? smap[:, 1] : Int[], hg ? vec(permutedims(smap[:, 2:D+1])) : Int[])   # [J,c] column-major: J fastest
     cols = vcat(hv ? collect(1:D) : Int[], hg ? collect(D+1:D+D*D) : Int[])
     lv = length(slots)
     sm = SMatrix{1,lv,Int,lv}(permutedims(slots))
     all(>(0), sm) || error("HyperFEMKernels: partial use of a field's components is not supported")
-    SlotSpec{1,lv,hv,hg,typeof(sm),Tuple(cols)}(sm)
+    SlotSpec{1,lv,hv,hg,false,typeof(sm),Tuple(cols)}(sm)
 end
 
-"Column of the weight matrix W for derivative index jj (nodal: W[:,1] = values, W[:,1+J] = ∂_J)."
-@inline wcol(::SlotSpec{NC,LV,HV,HG,S,COLS}, jj) where {NC,LV,HV,HG,S,COLS} = COLS[jj]
+"Whether a slot spec (or a `FieldUse`) has Hessian slots."
+has_hess(::SlotSpec{NC,LV,HV,HG,HH}) where {NC,LV,HV,HG,HH} = HH
 
-"Shape-function weights of `t` at point `q`: W[n,1] = N_n, W[n,1+J] = ∂N_n/∂x_J."
+"Column of the weight matrix W for derivative index jj (nodal: W[:,1] = values, W[:,1+J] = ∂_J, W[:,1+D+p] = Hessian entry p)."
+@inline wcol(::SlotSpec{NC,LV,HV,HG,HH,S,COLS}, jj) where {NC,LV,HV,HG,HH,S,COLS} = COLS[jj]
+
+# ---------------------------------------------------------------------------------------------
+# Hessians (second derivatives) of nodal fields
+#
+# With Jinv = Jt⁻¹ (iJt, so that ∂/∂x_a = Σ_i Jinv[a,i] ∂/∂ξ_i) and Φ the Hessian of the cell map,
+# Φ[i,j,c] = ∂²x_c/∂ξ_i∂ξ_j (zero for affine cells), the physical Hessian of a scalar function is
+#
+#     H_ab = Σ_ij Jinv_ai Jinv_bj (Ĥ_ij − Σ_c Φ_ijc ∇u_c),   ∇u = Jinv ⋅ ∇̂u
+#
+# (Gridap's `∇∇` is the affine case; the curvature term makes it exact on bilinear quadrilaterals and
+# trilinear hexahedra). For a vector field the same holds per component k (H[a,b,k]). Hessians are
+# symmetric: the slots, the reference tables (`ddNt`) and the columns of W hold the unique entries
+# (a ≤ b, `hess_pairs`); Φ is kept as one `D × D` static matrix per physical direction c.
+
+"Static matrix of a `TensorValue{D,D}` (both column-major)."
+@inline _smat(iJt::TensorValue{D,D,Float64}) where {D} = SMatrix{D,D,Float64,D * D}(iJt.data)
+
+"Static indices (a, b) of the unique Hessian entries, as two tuples (generated: literal tuples, no allocation)."
+@generated hess_a(::Val{D}) where {D} = Tuple(a for (a, b) in hess_pairs(D))
+@generated hess_b(::Val{D}) where {D} = Tuple(b for (a, b) in hess_pairs(D))
+
+"Symmetric `D × D` static matrix from its unique entries (`scale` multiplies the off-diagonal ones)."
+@inline function sym_matrix(h::SVector{NH,Float64}, ::Val{D}, scale::Float64=1.0) where {NH,D}
+    SMatrix{D,D,Float64,D * D}(ntuple(i -> begin
+            a, b = (i - 1) % D + 1, (i - 1) ÷ D + 1
+            v = h[hess_index(a, b)]
+            a == b ? v : scale * v
+        end, Val(D * D)))
+end
+"Unique entries of a symmetric static matrix (`scale` multiplies the off-diagonal ones)."
+@inline function unique_entries(H::SMatrix{D,D,Float64}, scale::Float64=1.0) where {D}
+    SVector{nhess(D),Float64}(ntuple(p -> begin
+            a, b = hess_a(Val(D))[p], hess_b(Val(D))[p]
+            a == b ? H[a, b] : scale * H[a, b]
+        end, Val(nhess(D))))
+end
+
+"Curvature of the cell map at a point: `Φ[c]` is the `D × D` matrix ∂²x_c/∂ξ_i∂ξ_j (`nothing` when no Hessian is used)."
+const Curvature{D} = NTuple{D,SMatrix{D,D,Float64}}
+@inline point_curvature(geo::GeoTable{D}, q::Int, cell::Integer, ::Val{false}) where {D} = nothing
+@inline function point_curvature(geo::GeoTable{D}, q::Int, cell::Integer, ::Val{true}) where {D}
+    geo.affine && return ntuple(_ -> zero(SMatrix{D,D,Float64,D * D}), Val(D))
+    # one pass over the geometry nodes per direction (no closure over a reassigned accumulator)
+    ntuple(Val(D)) do c
+        acc = zero(SMatrix{D,D,Float64,D * D})
+        @inbounds for n in 1:geo.ng
+            h = SMatrix{D,D,Float64,D * D}(ntuple(i -> geo.ddM[i, q, n], Val(D * D)))
+            acc = muladd.(h, geo.coords[n, cell][c], acc)
+        end
+        acc
+    end
+end
+
+"`Σ_c Φ[c] g[c]` (the curvature term of the Hessian of a function with physical gradient `g`)."
+@inline function curvature_term(Φ::Curvature{D}, g::SVector{D,Float64}) where {D}
+    acc = zero(SMatrix{D,D,Float64,D * D})
+    for c in 1:D
+        acc = muladd.(Φ[c], g[c], acc)
+    end
+    acc
+end
+"`Σ_ij R̂_ij Φ[c]_ij` for every c: the gradient coefficient the pulled-back Hessian coefficient R̂ induces."
+@inline curvature_coefs(Φ::Curvature{D}, R̂::SMatrix{D,D,Float64}) where {D} =
+    SVector{D,Float64}(ntuple(c -> sum(R̂ .* Φ[c]), Val(D)))
+
+"Shape-function weights of `t` at point `q`: W[n,1] = N_n, W[n,1+J] = ∂N_n/∂x_J (and, with `Val(true)`, W[n,1+D+p] = ∂²N_n/∂x_a∂x_b)."
 @inline point_weights!(W::Matrix{Float64}, t::FieldTable, q::Int, iJt, Jt) = point_weights!(W, t, q, iJt)
+@inline point_weights!(W::Matrix{Float64}, t::FieldTable, q::Int, iJt, Jt, Φ, ::Val{false}) = point_weights!(W, t, q, iJt)
 @inline function point_weights!(W::Matrix{Float64}, t::FieldTable{D,T,NN}, q::Int, iJt) where {D,T,NN}
     @inbounds @simd for n in 1:NN
         W[n, 1] = t.Nt[n, q]
@@ -75,6 +151,20 @@ end
                 s += a[K] * t.dNt[n, K, q]
             end
             W[n, 1+J] = s
+        end
+    end
+    W
+end
+@inline function point_weights!(W::Matrix{Float64}, t::FieldTable{D,T,NN}, q::Int, iJt, Jt, Φ::Curvature{D}, ::Val{true}) where {D,T,NN}
+    point_weights!(W, t, q, iJt)
+    M = _smat(iJt)
+    NH = nhess(D)
+    @inbounds for n in 1:NN
+        Ĥ = sym_matrix(SVector{NH,Float64}(ntuple(p -> t.ddNt[n, p, q], Val(NH))), Val(D))
+        g = SVector{D,Float64}(ntuple(c -> W[n, 1+c], Val(D)))
+        H = M * (Ĥ - curvature_term(Φ, g)) * transpose(M)
+        for p in 1:NH
+            W[n, 1+D+p] = H[hess_a(Val(D))[p], hess_b(Val(D))[p]]
         end
     end
     W
@@ -95,37 +185,50 @@ end
 # gradient tables. The tables are shared by all cells (GPU: constant memory); no per-cell buffer.
 
 """
-    FieldUse{HV,HG}
+    FieldUse{HV,HG,HH}
 
-Which derivatives of an unknown field the weak form evaluates at the points: its value (`HV`)
-and/or its gradient (`HG`). What is not used is not computed.
+Which derivatives of an unknown field the weak form evaluates at the points: its value (`HV`),
+its gradient (`HG`) and/or its Hessian (`HH`). What is not used is not computed.
 """
-struct FieldUse{HV,HG} end
+struct FieldUse{HV,HG,HH} end
+has_hess(::FieldUse{HV,HG,HH}) where {HV,HG,HH} = HH
 
-@inline _smat(iJt::TensorValue{D,D,Float64}) where {D} = SMatrix{D,D,Float64,D * D}(iJt.data)   # both column-major [J,K]
+"Hessian value type of a nodal field (Gridap's convention: `H[a,b,k] = ∂²u_k/∂x_a∂x_b`)."
+hess_type(::Type{Float64}, ::Val{D}) where {D} = TensorValue{D,D,Float64,D * D}
+hess_type(::Type{VectorValue{NC,Float64}}, ::Val{D}) where {D,NC} = ThirdOrderTensorValue{D,D,NC,Float64,D * D * NC}
 
 """
-    field_point_values(t, xl, off, q, iJt, use) -> (u, ∇u)
+    field_point_values(t, xl, off, q, iJt, Jt, Φ, use) -> (u, ∇u, ∇∇u)
 
-Value and gradient (Gridap convention: `∇u[J,c] = ∂u_c/∂x_J`) of a field at point `q` from its
-local dof values (from position `off` of `xl`) and the reference tables, in a single pass over
-the nodes. Derivatives not in `use` are returned as zero.
+Value, gradient (Gridap convention: `∇u[J,c] = ∂u_c/∂x_J`) and Hessian (`∇∇u[a,b,c]`, see
+"Hessians" above) of a field at point `q` from its local dof values (from position `off` of `xl`)
+and the reference tables, in a single pass over the nodes. `Φ` is the curvature of the cell map
+(`point_curvature`; `nothing` when the Hessian is not used). Derivatives not in `use` are returned as zero.
 """
-@inline field_point_values(t::FieldTable, xl, off::Int, q::Int, iJt, Jt, use::FieldUse) = field_point_values(t, xl, off, q, iJt, use)
-@inline function field_point_values(t::FieldTable{D,T,NN,NC}, xl, off::Int, q::Int, iJt,
-                                    ::FieldUse{HV,HG}) where {D,T,NN,NC,HV,HG}
+@inline field_point_values(t::FieldTable, xl, off::Int, q::Int, iJt, use::FieldUse) = field_point_values(t, xl, off, q, iJt, nothing, nothing, use)
+@inline field_point_values(t::FieldTable, xl, off::Int, q::Int, iJt, Jt, use::FieldUse) = field_point_values(t, xl, off, q, iJt, Jt, nothing, use)
+@inline function field_point_values(t::FieldTable{D,T,NN,NC}, xl, off::Int, q::Int, iJt, Jt, Φ,
+                                    ::FieldUse{HV,HG,HH}) where {D,T,NN,NC,HV,HG,HH}
+    NH = nhess(D)
     v = zero(SVector{NC,Float64})
     G = zero(SMatrix{NC,D,Float64,NC * D})          # Ĝ[c,K]
+    Hr = zero(SMatrix{NC,NH,Float64,NC * NH})       # Ĥ[c,p] (unique entries)
     @inbounds for n in 1:NN
         x = SVector{NC,Float64}(ntuple(c -> xl[off+ldofidx(t, n, c)], Val(NC)))
         HV && (v = muladd.(x, t.Nt[n, q], v))
-        if HG
+        if HG || HH
             d = SVector{D,Float64}(ntuple(K -> t.dNt[n, K, q], Val(D)))
             G = muladd.(x * transpose(d), 1.0, G)
         end
+        if HH
+            h = SVector{NH,Float64}(ntuple(p -> t.ddNt[n, p, q], Val(NH)))
+            Hr = muladd.(x * transpose(h), 1.0, Hr)
+        end
     end
-    g = HG ? _smat(iJt) * transpose(G) : zero(SMatrix{D,NC,Float64,D * NC})   # [J,c]
-    _field_values(T, v, g)
+    M = _smat(iJt)
+    g = (HG || HH) ? M * transpose(G) : zero(SMatrix{D,NC,Float64,D * NC})   # [J,c]
+    HH || return (_field_values(T, v, g)..., zero(hess_type(T, Val(D))))
+    (_field_values(T, v, g)..., physical_hessian(T, Hr, g, M, Φ))
 end
 @inline _field_values(::Type{Float64}, v::SVector{1}, g::SMatrix{D,1}) where {D} =
     (v[1], VectorValue{D,Float64}(Tuple(g)))
@@ -133,13 +236,30 @@ end
     (VectorValue{NC,Float64}(Tuple(v)), TensorValue{D,NC,Float64,D * NC}(Tuple(g)))
 
 """
-    field_values(tables, locs, use, xl, q, iJt, Jt) -> FV
+Physical Hessian of a field (Gridap's layout, `[a,b,k]` column-major) from the unique entries of
+its reference Hessian per component `Hr[k, p]`, its physical gradient `g[c,k]`, `M = Jt⁻¹` and the
+curvature `Φ`. A separate function: the accumulators of `field_point_values` are reassigned in its
+node loop, and a closure capturing them there would box them (allocations).
+"""
+@inline function physical_hessian(::Type{T}, Hr::SMatrix{NC,NH,Float64}, g::SMatrix{D,NC,Float64}, M::SMatrix{D,D,Float64},
+                                  Φ::Curvature{D}) where {T,NC,NH,D}
+    Hs = ntuple(Val(NC)) do k
+        Ĥk = sym_matrix(SVector{NH,Float64}(ntuple(p -> Hr[k, p], Val(NH))), Val(D))
+        gk = SVector{D,Float64}(ntuple(c -> g[c, k], Val(D)))
+        M * (Ĥk - curvature_term(Φ, gk)) * transpose(M)
+    end
+    hess_type(T, Val(D))(ntuple(i -> Hs[(i-1)÷(D*D)+1][(i-1)%(D*D)+1], Val(D * D * NC)))
+end
+
+"""
+    field_values(tables, locs, use, xl, q, iJt, Jt, Φ) -> FV
 
 `field_point_values` of every field, as a tuple. Generated (no closures) and inlined, so that the
-node loops of every field are compiled in the caller's loop.
+node loops of every field are compiled in the caller's loop. `Φ` is the curvature of the cell map
+(`point_curvature`; `nothing` when no field uses Hessians).
 """
-@inline @generated function field_values(tables::NTuple{NF,Any}, locs, use, xl, q, iJt, Jt) where {NF}
-    ex = [:(field_point_values(tables[$i], xl, locs[$i], q, iJt, Jt, use[$i])) for i in 1:NF]
+@inline @generated function field_values(tables::NTuple{NF,Any}, locs, use, xl, q, iJt, Jt, Φ) where {NF}
+    ex = [:(field_point_values(tables[$i], xl, locs[$i], q, iJt, Jt, Φ, use[$i])) for i in 1:NF]
     :(($(ex...),))
 end
 
@@ -153,65 +273,107 @@ end
     residual_weights(t, sp, np) -> B (nn × np·LV)
 
 Reference weights of the slots of one field at all points: `B[n, (q-1)LV + jj] = N_n(ξ_q)` for the
-value slot and `∂N_n/∂ξ_K(ξ_q)` for the gradient slots. Shared by all cells; the element residual
-of a cell is `re_f = B · C_f`, with `C_f[(q-1)LV + jj, c]` the transformed coefficients of the cell
-(`residual_coefs!`).
+value slot, `∂N_n/∂ξ_K(ξ_q)` for the gradient slots and the unique reference Hessian entries for the
+Hessian slots. Shared by all cells; the element residual of a cell is `re_f = B · C_f`, with
+`C_f[(q-1)LV + jj, c]` the transformed coefficients of the cell (`residual_coefs!`).
 """
-function residual_weights(t::FieldTable{D,T,NN,NC}, sp::SlotSpec{NC,LV,HV,HG}, np::Int) where {D,T,NN,NC,LV,HV,HG}
-    B = zeros(NN, np * LV)
+function residual_weights(t::FieldTable{D,T,NN,NC}, sp::SlotSpec{NC,LV,HV,HG,HH}, np::Int) where {D,T,NN,NC,LV,HV,HG,HH}
+    LR = lvref(t, sp)
+    B = zeros(NN, np * LR)
+    og = HV ? 1 : 0
+    oh = og + ((HG || HH) ? D : 0)
     for q in 1:np, n in 1:NN
-        HV && (B[n, (q-1)*LV+1] = t.Nt[n, q])
-        HG && for K in 1:D
-            B[n, (q-1)*LV+(HV ? 1 : 0)+K] = t.dNt[n, K, q]
+        HV && (B[n, (q-1)*LR+1] = t.Nt[n, q])
+        (HG || HH) && for K in 1:D
+            B[n, (q-1)*LR+og+K] = t.dNt[n, K, q]
+        end
+        HH && for p in 1:nhess(D)
+            B[n, (q-1)*LR+oh+p] = t.ddNt[n, p, q]
         end
     end
     B
 end
 
+"""
+Rows per point of the reference weights `B` and coefficients `C` of a field: value, reference
+gradients (also needed by the curvature term of the Hessian) and unique reference Hessian entries.
+"""
+@inline lvref(::FieldTable{D}, ::SlotSpec{NC,LV,HV,HG,HH}) where {D,NC,LV,HV,HG,HH} = (HV ? 1 : 0) + ((HG || HH) ? D : 0) + (HH ? nhess(D) : 0)
+@inline lvref(::PiolaTable, ::SlotSpec{1,LV}) where {LV} = LV      # H(div): one row per slot
+
+"""
+    slot_coefs(sp, R, c, iJt, Φ, dV) -> (r0, rt, rh)
+
+Coefficients of component `c` of a nodal field at a point, pulled back to the reference tables:
+`r0` of the value, `rt[K]` of the reference gradients and `rh[p]` of the unique reference Hessian
+entries (all times `dV`). With `Rf` the symmetric full-tensor Hessian coefficient (the slot
+coefficient of an off-diagonal unique entry split in halves) and `R̂ = Jinvᵀ Rf Jinv` its pull-back,
+`rh` holds `R̂` with the off-diagonal entries doubled, and the gradient coefficients gain the
+curvature term `−Σ_ij R̂_ij Φ_ijc` before their own pull-back `rt[K] = Σ_J iJt[J,K] R_J`.
+"""
+@inline function slot_coefs(sp::SlotSpec{NC,LV,HV,HG,HH}, R, c::Int, iJt::TensorValue{D,D}, Φ, dV) where {NC,LV,HV,HG,HH,D}
+    NH = nhess(D)
+    og = HV ? 1 : 0
+    oh = og + (HG ? D : 0)
+    r0 = HV ? dV * @inbounds(R[sp.sm[c, 1]]) : 0.0
+    M = _smat(iJt)
+    Rg = HG ? SVector{D,Float64}(ntuple(J -> @inbounds(R[sp.sm[c, og+J]]), Val(D))) : zero(SVector{D,Float64})
+    if HH
+        Rf = sym_matrix(SVector{NH,Float64}(ntuple(p -> @inbounds(R[sp.sm[c, oh+p]]), Val(NH))), Val(D), 0.5)
+        R̂ = transpose(M) * Rf * M
+        Rg = Rg - curvature_coefs(Φ, R̂)
+        rh = dV * unique_entries(R̂, 2.0)
+    else
+        rh = zero(SVector{NH,Float64})
+    end
+    rt = (HG || HH) ? dV * (transpose(M) * Rg) : zero(SVector{D,Float64})   # rt[K] = Σ_J iJt[J,K] Rg[J]
+    (r0, rt, rh)
+end
+
 "Transformed residual coefficients of one field at point `q` into `C[(q-1)LV + jj, c]` (see `residual_weights`)."
-@inline function residual_coefs!(C, ::FieldTable{D}, sp::SlotSpec{NC,LV,HV,HG}, R, q::Int, iJt, Jt, dV) where {D,NC,LV,HV,HG}
+@inline residual_coefs!(C, t::FieldTable, sp::SlotSpec, R, q::Int, iJt, Jt, dV) = residual_coefs!(C, t, sp, R, q, iJt, Jt, nothing, dV)
+@inline function residual_coefs!(C, t::FieldTable{D}, sp::SlotSpec{NC,LV,HV,HG,HH}, R, q::Int, iJt, Jt, Φ, dV) where {D,NC,LV,HV,HG,HH}
     LV == 0 && return C
+    LR = lvref(t, sp)
+    og = HV ? 1 : 0
+    oh = og + ((HG || HH) ? D : 0)
     @inbounds for c in 1:NC
-        HV && (C[(q-1)*LV+1, c] = dV * R[sp.sm[c, 1]])
-        if HG
-            for K in 1:D
-                s = 0.0
-                for J in 1:D
-                    s += iJt[J, K] * R[sp.sm[c, (HV ? 1 : 0)+J]]
-                end
-                C[(q-1)*LV+(HV ? 1 : 0)+K, c] = dV * s
-            end
+        r0, rt, rh = slot_coefs(sp, R, c, iJt, Φ, dV)
+        HV && (C[(q-1)*LR+1, c] = r0)
+        (HG || HH) && for K in 1:D
+            C[(q-1)*LR+og+K, c] = rt[K]
+        end
+        HH && for p in 1:nhess(D)
+            C[(q-1)*LR+oh+p, c] = rh[p]
         end
     end
     C
 end
 
 """
-    contract_residual!(re, t, loc, sp, R, q, iJt, dV)
+    contract_residual!(re, t, loc, sp, R, q, iJt, Jt, Φ, dV)
 
 Residual contribution of one field at point `q` from the reference tables:
-`re[(n,c)] += dV (R[c,0] N_n + Σ_K R̃[c,K] ∂N_n/∂ξ_K)` with `R̃[c,K] = Σ_J iJt[J,K] R[c,J]`.
+`re[(n,c)] += r0 N_n + Σ_K rt[K] ∂N_n/∂ξ_K + Σ_p rh[p] ∂²N_n/∂ξ_a∂ξ_b` with the pulled-back
+coefficients of `slot_coefs`.
 """
-@inline contract_residual!(re, t::FieldTable, loc::Int, sp::SlotSpec, R, q::Int, iJt, Jt, dV) = contract_residual!(re, t, loc, sp, R, q, iJt, dV)
-@inline function contract_residual!(re, t::FieldTable{D,T,NN,NC}, loc::Int, sp::SlotSpec{NC,LV,HV,HG},
-                                    R, q::Int, iJt, dV) where {D,T,NN,NC,LV,HV,HG}
+@inline contract_residual!(re, t::FieldTable, loc::Int, sp::SlotSpec, R, q::Int, iJt, dV) = contract_residual!(re, t, loc, sp, R, q, iJt, nothing, nothing, dV)
+@inline contract_residual!(re, t::FieldTable, loc::Int, sp::SlotSpec, R, q::Int, iJt, Jt, dV) = contract_residual!(re, t, loc, sp, R, q, iJt, Jt, nothing, dV)
+@inline function contract_residual!(re, t::FieldTable{D,T,NN,NC}, loc::Int, sp::SlotSpec{NC,LV,HV,HG,HH},
+                                    R, q::Int, iJt, Jt, Φ, dV) where {D,T,NN,NC,LV,HV,HG,HH}
     LV == 0 && return nothing
     @inbounds for c in 1:NC
-        r0 = HV ? dV * R[sp.sm[c, 1]] : 0.0
-        rt = ntuple(K -> begin
-                s = 0.0
-                if HG
-                    for J in 1:D
-                        s += iJt[J, K] * R[sp.sm[c, (HV ? 1 : 0)+J]]
-                    end
-                end
-                dV * s
-            end, Val(D))
+        r0, rt, rh = slot_coefs(sp, R, c, iJt, Φ, dV)
         @simd for n in 1:NN
             acc = HV ? r0 * t.Nt[n, q] : 0.0
-            if HG
+            if HG || HH
                 for K in 1:D
                     acc += rt[K] * t.dNt[n, K, q]
+                end
+            end
+            if HH
+                for p in 1:nhess(D)
+                    acc += rh[p] * t.ddNt[n, p, q]
                 end
             end
             re[loc+ldofidx(t, n, c)] += acc
@@ -233,6 +395,7 @@ end
 @inline _smat_t(Jt::TensorValue{D,D,Float64}) where {D} = SMatrix{D,D,Float64,D * D}(Jt.data)
 
 "Physical weights of an H(div) field at point `q`: W[n, c] = v_n[c], W[n, D + J + D(c-1)] = ∇v_n[J,c]."
+@inline point_weights!(W::Matrix{Float64}, t::PiolaTable, q::Int, iJt, Jt, Φ, ::Val{false}) = point_weights!(W, t, q, iJt, Jt)
 @inline function point_weights!(W::Matrix{Float64}, t::PiolaTable{D,NN}, q::Int, iJt, Jt) where {D,NN}
     J = _smat_t(Jt); iJ = _smat_t(iJt)
     s = 1.0 / meas(Jt)
@@ -251,7 +414,8 @@ end
     W
 end
 
-"Value and gradient of an H(div) field at point `q` from its local (signed) dof values and the reference tables."
+"Value and gradient of an H(div) field at point `q` from its local (signed) dof values and the reference tables (no Hessians)."
+@inline field_point_values(t::PiolaTable, xl, off::Int, q::Int, iJt, Jt, Φ, use::FieldUse) = field_point_values(t, xl, off, q, iJt, Jt, use)
 @inline function field_point_values(t::PiolaTable{D,NN}, xl, off::Int, q::Int, iJt, Jt,
                                     ::FieldUse{HV,HG}) where {D,NN,HV,HG}
     v = zero(SVector{D,Float64})
@@ -307,6 +471,7 @@ function residual_weights(t::PiolaTable{D,NN}, sp::SlotSpec{1,LV,HV,HG}, np::Int
     B
 end
 
+@inline residual_coefs!(C, t::PiolaTable, sp::SlotSpec, R, q::Int, iJt, Jt, Φ, dV) = residual_coefs!(C, t, sp, R, q, iJt, Jt, dV)
 @inline function residual_coefs!(C, ::PiolaTable{D}, sp::SlotSpec{1,LV}, R, q::Int, iJt, Jt, dV) where {D,LV}
     LV == 0 && return C
     rt = piola_coefs(sp, R, iJt, Jt, dV, Val(D))
@@ -317,6 +482,7 @@ end
 end
 
 "Residual contribution of an H(div) field at point `q` from the reference tables."
+@inline contract_residual!(re, t::PiolaTable, loc::Int, sp::SlotSpec, R, q::Int, iJt, Jt, Φ, dV) = contract_residual!(re, t, loc, sp, R, q, iJt, Jt, dV)
 @inline function contract_residual!(re, t::PiolaTable{D,NN}, loc::Int, sp::SlotSpec{1,LV,HV,HG},
                                     R, q::Int, iJt, Jt, dV) where {D,NN,LV,HV,HG}
     LV == 0 && return nothing

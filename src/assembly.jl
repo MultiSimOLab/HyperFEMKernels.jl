@@ -57,13 +57,29 @@ struct Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF,UU,RB} <: AbstractGroup
     auxcache::Base.RefValue{Any}   # dense auxiliary values (buffers reused across assemblies; see aux_data)
     cellmap::Vector{Int32}         # integration cell → cell of the FE spaces
     colors::Vector{Vector{Int32}}  # integration cells per colour
+    wkey::UInt                     # identity of the quadrature weights of its terms (`rebind`)
 end
 
 "Derivatives of the unknown of field `f` (on `side`) that the terms evaluate at the points."
 function field_use(terms::Vector{Term}, f::Int; side::Symbol=:cell)
     ls = [l for l in leaves(terms, :unknown) if l.field == f && l.side === side]
-    FieldUse{any(l -> l.deriv == 0, ls),any(l -> l.deriv >= 1, ls)}()
+    FieldUse{any(l -> l.deriv == 0, ls),any(l -> l.deriv == 1, ls),any(l -> l.deriv == 2, ls)}()
 end
+
+"""
+    hess_use(g) -> Val{true/false}
+
+Whether any field of the group uses Hessians (as test, trial or unknown), decided from the group's
+type: `point_curvature` is then evaluated per point (`nothing` otherwise).
+"""
+@generated function hess_use(::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF,UU}) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF,UU}
+    hs(T) = any(t -> t.parameters[5] === true, T.parameters)   # SlotSpec{NC,LV,HV,HG,HH,...}
+    hu(T) = any(t -> t.parameters[3] === true, T.parameters)   # FieldUse{HV,HG,HH}
+    :(Val{$(hs(SV) || hs(SU) || hu(UU))}())
+end
+
+"`Val(true)` if a field's test or trial slots include its Hessian (its physical weights W need the Hessian columns)."
+@inline hess_weights(::SlotSpec{NC1,LV1,HV1,HG1,HH1}, ::SlotSpec{NC2,LV2,HV2,HG2,HH2}) where {NC1,LV1,HV1,HG1,HH1,NC2,LV2,HV2,HG2,HH2} = Val{HH1 || HH2}()
 
 function Group(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int, cellmap, colors, previous=Any[];
                linear_maps::Bool=true, boundary=nothing)
@@ -86,13 +102,70 @@ function Group(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int,
     smv = Tuple(SlotSpec(t, slot_map(pf.test, f, ncomps(field_types(t)[1]), D), D) for (f, t) in enumerate(tables))
     smu = Tuple(SlotSpec(t, slot_map(pf.trial, f, ncomps(field_types(t)[1]), D), D) for (f, t) in enumerate(tables))
     use = Tuple(field_use(terms, f) for f in eachindex(tables))
+    any(((t, u),) -> t isa PiolaTable && has_hess(u), zip(tables, use)) &&
+        error("HyperFEMKernels: second derivatives (∇∇) of H(div) fields are not supported")
     rb = Tuple(residual_weights(t, sp, geo.np) for (t, sp) in zip(tables, smv))
     aux = Tuple(a.array for a in pf.aux)
     AUX = Tuple{(Matrix{eltype(eltype(a))} for a in aux)...}
     NF = length(tables)
     lin = linear_maps ? LinearForm(terms, pf, tables, aux, pf.trial.nslots == 0 ? :res : :jac) : nothing
     Group{pf.test.nslots,pf.trial.nslots,typeof(pf),typeof(tables),AUX,typeof(smv),typeof(smu),D,NF,typeof(lin),typeof(geo.Jf),typeof(use),typeof(rb)}(
-        pf, lin, NTuple{NF,Int}(locs), tables, use, rb, geo, aux, smv, smu, trian, collect(xq), Ref{Any}(nothing), cellmap, colors)
+        pf, lin, NTuple{NF,Int}(locs), tables, use, rb, geo, aux, smv, smu, trian, collect(xq), Ref{Any}(nothing), cellmap, colors,
+        objectid(terms[1].weights))
+end
+
+# ---------------------------------------------------------------------------------------------
+# Cheap `update`: groups rebound to a capture of the same structure
+#
+# A capture with the same signature (`signature`) as the one a group was built from has the same
+# generated code, slot layouts, tables, colouring and linear-map positions: the group is rebound by
+# re-reading from the new tree only what carries values — the operations (same types), coefficients,
+# parameters and the auxiliary arrays — and by re-evaluating the values of the linear maps; the
+# compiled functions, tables (Hessians included), geometry, colours, slot specs and the dense
+# auxiliary buffers (`auxcache`, refilled from the new arrays at every assembly) are shared.
+
+"Terms of `forms` a group was built from: those of its triangulation with its quadrature weights."
+function terms_of(g::AbstractGroup, forms::Vector{Form})
+    k = findfirst(f -> f.trian === g.trian, forms)
+    k === nothing && error("HyperFEMKernels: no form on the triangulation of a group (rebinding a capture of another structure)")
+    Term[t for t in forms[k].terms if objectid(t.weights) == g.wkey]
+end
+
+"The group `g` with its values (operations, coefficients, parameters, auxiliary arrays, linear maps) read from `terms`."
+function rebind(g::Group, terms::Vector{Term})
+    pf = PointForm(terms, g.pf)
+    aux = Tuple(a.array for a in pf.aux)
+    lin = g.lin === nothing ? nothing : LinearForm(terms, pf, g.tables, aux, g.lin)
+    typeof(g)(pf, lin, g.locs, g.tables, g.use, g.rb, g.geo, aux, g.smv, g.smu, g.trian, g.xq, g.auxcache, g.cellmap, g.colors, g.wkey)
+end
+
+rebind_groups(groups::Vector{Any}, forms::Vector{Form}) = Any[rebind(g, terms_of(g, forms)) for g in groups]
+
+"Whether `update` checks its fast path against a full compilation (`HFK_CHECK_REBIND=1`)."
+check_rebind() = get(ENV, "HFK_CHECK_REBIND", "0") == "1"
+
+"""
+Compare rebound groups with freshly compiled ones (debugging an incomplete signature): same types,
+generated code, operation types, parameter values, coefficients, auxiliary types and linear maps.
+"""
+function verify_rebind(rebound::Vector{Any}, fresh::Vector{Any}, what::String)
+    length(rebound) == length(fresh) || error("HyperFEMKernels: rebind check ($what): $(length(rebound)) rebound groups, $(length(fresh)) compiled")
+    for (a, b) in zip(rebound, fresh)
+        typeof(a) == typeof(b) || error("HyperFEMKernels: rebind check ($what): group types differ")
+        a.pf.expr == b.pf.expr || error("HyperFEMKernels: rebind check ($what): generated code differs")
+        a.pf.coefs == b.pf.coefs || error("HyperFEMKernels: rebind check ($what): coefficients differ")
+        all(k -> a.pf.ops[k] == b.pf.ops[k], a.pf.consts) || error("HyperFEMKernels: rebind check ($what): parameters differ")
+        typeof.(a.pf.ops) == typeof.(b.pf.ops) || error("HyperFEMKernels: rebind check ($what): operation types differ")
+        typeof.(a.aux) == typeof.(b.aux) || error("HyperFEMKernels: rebind check ($what): auxiliary data types differ")
+        (a.lin === nothing) == (b.lin === nothing) || error("HyperFEMKernels: rebind check ($what): linear-map shortcut differs")
+        a.lin === nothing && continue
+        a.lin.expr == b.lin.expr || error("HyperFEMKernels: rebind check ($what): state function differs")
+        pos(m) = [(e[1], e[2], e[3]) for e in m]
+        all(((m, n),) -> pos(m) == pos(n), zip(a.lin.maps, b.lin.maps)) || error("HyperFEMKernels: rebind check ($what): linear-map positions differ")
+        va, vb = collect(a.lin.vals), collect(b.lin.vals)
+        norm(va - vb) <= 1e-12 * max(norm(vb), 1.0) || error("HyperFEMKernels: rebind check ($what): linear-map values differ (relative $(norm(va - vb) / max(norm(vb), 1.0)))")
+    end
+    nothing
 end
 
 """
@@ -150,6 +223,8 @@ struct KernelOperator{R,J,US,VS} <: NonlinearOperator
     skel::Vector{SkeletonData}       # skeleton triangulations with groups (facet cells, colours, positions)
     signed::Bool                     # some field has dof signs (H(div)): applied at gather/scatter
     jacobian::Symbol                 # :assembled (allocate_jacobian gives the sparse matrix) or :matrixfree (a MatrixFreeJacobian)
+    rsig::Any                        # structural signatures of the captured residual and Jacobian (`signature`; cheap `update`)
+    jsig::Any
 end
 
 "A skeleton (interior facets with a plus and a minus cell): its glue to the cells is a `SkeletonPair`."
@@ -391,6 +466,7 @@ function KernelOperator(res, jac, U::FESpace, V::FESpace; nthreads::Int=Threads.
     end
     rforms, rfb = capture(res, probes(U, :unknown), probes(V, :test))
     jforms, jfb = capture(jac, probes(U, :unknown), probes(U, :trial), probes(V, :test))
+    rsig, jsig = signature(rforms, rfb), signature(jforms, jfb)   # before compiling: the compile-time fallbacks follow from the structure
     locs = Tuple(fl.loc for fl in fields)
     colors = color_cells(fields, ncells, toff)
     skel = SkeletonData[]
@@ -399,24 +475,52 @@ function KernelOperator(res, jac, U::FESpace, V::FESpace; nthreads::Int=Threads.
     warn_fallback("residual", rfb); warn_fallback("Jacobian", jfb)
     fb = Fallback(Any[t for (t, _) in rfb], Any[t for (t, _) in jfb], SparseMatrixAssembler(U, V))
     op = KernelOperator(res, jac, U, V, fields, loc, rgroups, jgroups, Sparsity(), colors, nthreads, cache_aux, linear_maps, fb, skel,
-                        any(has_signs, fields), jacobian)
+                        any(has_signs, fields), jacobian, rsig, jsig)
     jacobian === :assembled && build_pattern!(op)
     op
 end
 
+"Whether `update` prints its path and timings (`HFK_DEBUG_UPDATE=1`)."
+debug_update() = get(ENV, "HFK_DEBUG_UPDATE", "0") == "1"
+
 """
     update(op, res, jac)
 
-New operator with other `res`/`jac` (same spaces and structure), reusing the sparsity pattern,
-positions and colouring of `op`.
+New operator with other `res`/`jac` on the same spaces. When the new forms have the structure of
+the ones `op` was built from (same measures, same operations and constants up to their values, same
+FE functions: see `signature`) — a load step, a new time step, another material parameter — every
+group is rebound (`rebind`): compiled code, tables, colouring, sparsity pattern, positions and the
+dense auxiliary buffers are reused and only the values change. Otherwise the groups are compiled
+again, reusing tables, geometry, colouring and, when the fallback and skeleton sets do not change, the
+sparsity pattern and positions. `HFK_CHECK_REBIND=1` compiles the fast path again from scratch and
+compares (debugging).
 """
 function update(op::KernelOperator, res, jac)
     D = num_point_dims(get_triangulation(field_spaces(op.U)[1]))
     locs = Tuple(fl.loc for fl in op.fields)
     prev = vcat(op.rgroups, op.jgroups)
     lm = op.linear_maps
+    t0 = time()
     rforms, rfb = capture(res, probes(op.U, :unknown), probes(op.V, :test))
     jforms, jfb = capture(jac, probes(op.U, :unknown), probes(op.U, :trial), probes(op.V, :test))
+    rsig, jsig = signature(rforms, rfb), signature(jforms, jfb)
+    t1 = time()
+    if rsig == op.rsig && jsig == op.jsig
+        rgroups = rebind_groups(op.rgroups, rforms)
+        jgroups = rebind_groups(op.jgroups, jforms)
+        warn_fallback("residual", rfb); warn_fallback("Jacobian", jfb)   # the same fallbacks as before (once per process)
+        debug_update() && println("HyperFEMKernels: update (fast path): capture $(round(1e3 * (t1 - t0), digits=1)) ms, rebind $(round(1e3 * (time() - t1), digits=1)) ms")
+        if check_rebind()
+            nrows = sum(num_free_dofs, field_spaces(op.V))
+            skel = SkeletonData[]
+            verify_rebind(rgroups, compile_groups(rforms, op.U, locs, D, op.colors, prev; linear_maps=lm, fallback=copy(rfb), skel,
+                                                  previous_skel=op.skel, fields=op.fields, nrows, ndl=op.ndl), "residual")
+            verify_rebind(jgroups, compile_groups(jforms, op.U, locs, D, op.colors, prev; linear_maps=lm, fallback=copy(jfb), skel,
+                                                  previous_skel=op.skel, fields=op.fields, nrows, ndl=op.ndl), "Jacobian")
+        end
+        return KernelOperator(res, jac, op.U, op.V, op.fields, op.ndl, rgroups, jgroups, op.pattern, op.colors, op.nthreads, op.cache_aux,
+                              op.linear_maps, op.fallback, op.skel, op.signed, op.jacobian, rsig, jsig)
+    end
     nrows = sum(num_free_dofs, field_spaces(op.V))
     skel = SkeletonData[]
     rgroups = compile_groups(rforms, op.U, locs, D, op.colors, prev; linear_maps=lm, fallback=rfb, skel, previous_skel=op.skel,
@@ -430,8 +534,12 @@ function update(op::KernelOperator, res, jac)
            length(jskel) == length(jskel0) && all(s -> any(t -> t.trian === s.trian, jskel0), jskel)
     pattern = same ? op.pattern : Sparsity()
     newop = KernelOperator(res, jac, op.U, op.V, op.fields, op.ndl, rgroups, jgroups, pattern, op.colors, op.nthreads, op.cache_aux,
-                           op.linear_maps, fb, skel, op.signed, op.jacobian)
+                           op.linear_maps, fb, skel, op.signed, op.jacobian, rsig, jsig)
     op.jacobian === :assembled && build_pattern!(newop)
+    if debug_update()
+        why = rsig != op.rsig ? "residual: $(signature_diff(rsig, op.rsig))" : "Jacobian: $(signature_diff(jsig, op.jsig))"
+        println("HyperFEMKernels: update (full path; $why): capture $(round(1e3 * (t1 - t0), digits=1)) ms, compile $(round(1e3 * (time() - t1), digits=1)) ms")
+    end
     newop
 end
 
@@ -732,16 +840,18 @@ function element_residual!(re, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}, xl,
     fill!(re, 0.0)
     tables, locs, pf = g.tables, g.locs, g.pf
     zsv = zero(SVector{NSV,Float64})
+    hu = hess_use(g)
     for q in 1:g.geo.np
         dV, iJt, Jt = point_geometry(g.geo, q, cell)
-        FV = field_values(tables, locs, g.use, xl, q, iJt, Jt)
+        Φ = point_curvature(g.geo, q, cell, hu)
+        FV = field_values(tables, locs, g.use, xl, q, iJt, Jt, Φ)
         Aq = map(a -> @inbounds(a[q, cell]), auxd)
         R = if LF === Nothing
             ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, EMPTY_SLOTS), zsv)
         else
             apply_maps(g.lin, g.lin.state(g.lin.ops, FV, Aq), Val(NSV))
         end
-        map((t, l, sm) -> contract_residual!(re, t, l, sm, R, q, iJt, Jt, dV), tables, locs, g.smv)
+        map((t, l, sm) -> contract_residual!(re, t, l, sm, R, q, iJt, Jt, Φ, dV), tables, locs, g.smv)
     end
     re
 end
@@ -758,16 +868,18 @@ function element_residual_mm!(re, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}, 
     tables, locs, pf = g.tables, g.locs, g.pf
     np = g.geo.np
     zsv = zero(SVector{NSV,Float64})
+    hu = hess_use(g)
     for q in 1:np
         dV, iJt, Jt = point_geometry(g.geo, q, cell)
-        FV = field_values(tables, locs, g.use, xl, q, iJt, Jt)
+        Φ = point_curvature(g.geo, q, cell, hu)
+        FV = field_values(tables, locs, g.use, xl, q, iJt, Jt, Φ)
         Aq = map(a -> @inbounds(a[q, cell]), auxd)
         R = if LF === Nothing
             ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, EMPTY_SLOTS), zsv)
         else
             apply_maps(g.lin, g.lin.state(g.lin.ops, FV, Aq), Val(NSV))
         end
-        map((t, sm, C) -> residual_coefs!(C, t, sm, R, q, iJt, Jt, dV), tables, g.smv, Cb)
+        map((t, sm, C) -> residual_coefs!(C, t, sm, R, q, iJt, Jt, Φ, dV), tables, g.smv, Cb)
     end
     residual_products_all!(re, tables, locs, g.smv, g.rb, Cb, Mb, np)
     re
@@ -782,8 +894,9 @@ tiled `gemm_add!` of the Jacobian.
 @inline function residual_products!(re, t::AbstractFieldTable{D,T,NN,NC,true}, loc::Int, sp::SlotSpec{NC,LV}, B, C, M,
                                     np::Int) where {D,T,NN,NC,LV}
     LV == 0 && return re
+    LR = lvref(t, sp)
     fill!(M, 0.0)
-    @inbounds for r in 1:np*LV
+    @inbounds for r in 1:np*LR
         cr = ntuple(c -> C[r, c], Val(NC))
         @simd for n in 1:NN
             b = B[n, r]
@@ -810,10 +923,9 @@ end
     end
 end
 
-"Buffers of the matrix-product residual: coefficients (np·LV × nc) and work matrix (nn × nc) per field."
+"Buffers of the matrix-product residual: coefficients (np·LR × nc, `lvref`) and work matrix (nn × nc) per field."
 function rm_buffers(g::Group)
-    lv(sp::SlotSpec{NC,LV}) where {NC,LV} = LV
-    Cb = map((t, sm) -> zeros(g.geo.np * lv(sm), t.nc), g.tables, g.smv)
+    Cb = map((t, sm) -> zeros(g.geo.np * lvref(t, sm), t.nc), g.tables, g.smv)
     Mb = map(t -> zeros(t.nn, t.nc), g.tables)
     Cb, Mb
 end
@@ -825,10 +937,12 @@ function element_jacobian!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}, xl
     tables, locs, pf = g.tables, g.locs, g.pf
     zsv = zero(SVector{NSV,Float64})
     zsu = zero(SVector{NSU,Float64})
+    hu = hess_use(g)
     for q in 1:g.geo.np
         dV, iJt, Jt = point_geometry(g.geo, q, cell)
-        map((t, W) -> point_weights!(W, t, q, iJt, Jt), tables, dNb)
-        FV = field_values(tables, locs, g.use, xl, q, iJt, Jt)
+        Φ = point_curvature(g.geo, q, cell, hu)
+        map((t, W, sv, su) -> point_weights!(W, t, q, iJt, Jt, Φ, hess_weights(sv, su)), tables, dNb, g.smv, g.smu)
+        FV = field_values(tables, locs, g.use, xl, q, iJt, Jt, Φ)
         Aq = map(a -> @inbounds(a[q, cell]), auxd)
         T = if LF === Nothing
             ForwardDiff.jacobian(r -> ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsv), zsu)   # T[test slot, trial slot]
@@ -856,13 +970,15 @@ function element_jacobian_mm!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF},
     qb = point_block(np)
     zsv = zero(SVector{NSV,Float64})
     zsu = zero(SVector{NSU,Float64})
+    hu = hess_use(g)
     for q0 in 1:qb:np
         nq = min(qb, np - q0 + 1)
         for ql in 1:nq
             q = q0 + ql - 1
             dV, iJt, Jt = point_geometry(g.geo, q, cell)
-            map((t, W) -> point_weights!(W, t, q, iJt, Jt), tables, Wb)
-            FV = field_values(tables, locs, g.use, xl, q, iJt, Jt)
+            Φ = point_curvature(g.geo, q, cell, hu)
+            map((t, W, sv, su) -> point_weights!(W, t, q, iJt, Jt, Φ, hess_weights(sv, su)), tables, Wb, g.smv, g.smu)
+            FV = field_values(tables, locs, g.use, xl, q, iJt, Jt, Φ)
             Aq = map(a -> @inbounds(a[q, cell]), auxd)
             T = if LF === Nothing
                 ForwardDiff.jacobian(r -> ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsv), zsu)   # T[test slot, trial slot]

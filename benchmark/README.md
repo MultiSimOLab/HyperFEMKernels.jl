@@ -88,3 +88,12 @@ julia -t auto --project=benchmark benchmark/phase0/hmre2d.jl sqrt 4
 
 `em 1` reproduces `test_static_EM.msh` (266 hexahedra, 1 528 free DOFs, same Newton iterations);
 `hmre 1` reproduces `Short_magnet.msh` to within ~3 % in element counts per region.
+
+## Operator updates per load step (NeoMag)
+
+`benchmark/neomag/update_bench.jl <label> [profile]` runs the NeoMag example (repo `../NeoMag`, mesh
+`data/models/NeoMag2D_id2.msh`, compiled backend) with a 2-step warm-up and then 20 and 100 staggered
+steps, and reports the time outside the Newton solves, the accumulated time of `build_operator`
+(`update`/`KernelOperator` per step), the assembly and line-search times and the peak memory; the
+environment is NeoMag's `Project.toml` with the `[sources]` paths of the HyperFEMKernels version to
+measure (see `docs/PR_hessian.md` for the three configurations compared).

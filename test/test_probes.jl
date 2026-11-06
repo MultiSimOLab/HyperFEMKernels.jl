@@ -24,7 +24,16 @@ end
     @test HK.probe_valtype(g) === VectorValue{2,Float64}
     pe = HK.probes(e.U, :unknown)
     @test HK.probe_valtype(∇(pe)) === TensorValue{3,3,Float64,9}
-    @test_throws ErrorException ∇(∇(pu))          # second derivatives not supported
+    # second derivatives: ∇∇(u), ∇(∇(u)) and Δ(u) = tr(∇∇(u)) are probes of deriv 2 (Gridap's layout)
+    h = ∇∇(pu)
+    @test h isa HK.ProbeField && h.deriv == 2 && ∇(∇(pu)) == h
+    @test HK.probe_valtype(h) === TensorValue{2,2,Float64,4}
+    @test HK.probe_valtype(∇∇(pe)) === ThirdOrderTensorValue{3,3,3,Float64,27}
+    @test Δ(pu) isa Gridap.CellData.OperationCellField
+    # the real object behind the probe (used when Gridap asks for its cell data, see get_data)
+    @test pu.data === p.U && HK.probe_object(pu) isa Gridap.FESpaces.SingleFieldFEFunction
+    @test HK.probe_object(HK.probes(p.V, :test)) isa Gridap.FESpaces.FEBasis
+    @test HK.contains_probe(get_data(pu))        # wrapped data: the reader still sees the probe
 end
 
 @testset "evaluation at quadrature points gives a ProbeArray with the right shape" begin

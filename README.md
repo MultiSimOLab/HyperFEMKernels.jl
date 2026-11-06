@@ -27,21 +27,29 @@ backend for its drivers (`backend = :compiled`).
   operations that Gridap applies pointwise; agreement is checked to machine precision (`check`).
 - **Integrals:** volume integrals, boundary integrals (Neumann, Robin, follower loads with the
   normal) and skeleton integrals on interior facets (`plus`/`minus`, `jump`, `mean`).
+- **Second derivatives.** `∇∇(u)`, `∇(∇(u))` and `Δ(u)` of the unknown, test and trial functions
+  (Hessian regularisations `β ∫ ∇∇u ⊙ ∇∇v`, biharmonic and C⁰-interior-penalty terms) with Gridap's
+  layout (`TensorValue{D,D}`, `ThirdOrderTensorValue{D,D,N}` with `H[a,b,k] = ∂²u_k/∂x_a∂x_b`),
+  on simplices and Cartesian cells as Gridap's `∇∇` and, unlike it, also on non-affine
+  quadrilaterals and hexahedra (the curvature of the cell map is included).
 - **Spaces:** Lagrangian spaces of any order and H(div)-conforming Raviart–Thomas spaces (contravariant
   Piola map, per-cell dof signs) on hexahedra, quadrilaterals, tetrahedra and triangles; single- and
   multi-field (e.g. Biot u–W, mixed Darcy); Dirichlet masks; subdomains. Lagrangian spaces also on
   manifold triangulations (curves in 2D/3D, surfaces in 3D, e.g. an interface
   `BoundaryTriangulation(Ωsolid, tags = "Interface")`), with tangential gradients as in Gridap.
 - **Data in the form.** `FEFunction`s that are not the unknown (a previous state, a field interpolated
-  from another physics or from boundary data) and their gradients are evaluated by the engine from
+  from another physics or from boundary data), their gradients and their Hessians are evaluated by the engine from
   their nodal values at every assembly, with the operations above them compiled into the integrand;
   other `CellField`s are evaluated by Gridap once per assembly into dense buffers that are reused.
 - **Threads, no allocations.** Cells are coloured so that the assembly loop is threaded without
   locks; element kernels allocate nothing (`allocations` reports it), which is also the
   requirement for GPU execution.
 - **Cheap updates.** Numbers in the weak form (load factors, time steps, material parameters) are
-  run-time parameters: `update` with new values reuses tables, sparsity pattern, colouring and the
-  compiled code.
+  run-time parameters: `update(op, res, jac)` with forms of the same structure (same measures,
+  operations and constants up to their values, same FE functions) rebinds the compiled groups —
+  code, tables, sparsity pattern, colouring, linear maps and the dense auxiliary buffers are reused and
+  only the values change; nothing is compiled or allocated per cell. A form of another structure is
+  compiled again, still reusing tables, geometry and colouring. The same for `KernelFunctional`.
 - **Matrix-free Jacobian.** `MatrixFreeJacobian` applies `J(x)·dx` without assembling, with sum
   factorisation on quadrilaterals and hexahedra; `KernelOperator(…; jacobian = :matrixfree)` hands
   it to a Newton solver and `MatrixFreeSolver` (Krylov.jl) solves the tangent systems on it, with
@@ -51,8 +59,9 @@ backend for its drivers (`backend = :compiled`).
 - **Internal variables.** Gridap's `update_state!` (visco-elasticity, plasticity, …) executed by
   threaded kernels with the same updater and arguments; `KernelState` stores the states as a dense
   `np × ncells` matrix.
-- **Never blocks a simulation.** Terms the engine cannot translate are assembled by Gridap and added
-  to the result, with a warning naming the term.
+- **Never blocks a simulation.** Integrals the engine cannot translate are assembled by Gridap and added
+  to the result, with a warning naming the triangulation and the reason; the integrals on the other
+  measures of the same weak form stay in the kernels.
 
 ## Performance
 
@@ -276,6 +285,9 @@ run with both backends as part of the test suite.
 - On manifold triangulations (cells of lower dimension than the space): Lagrangian spaces in cell
   integrals. Boundary and skeleton integrals of those spaces and Raviart–Thomas fields on them go to
   the Gridap fallback; internal variables on them are not supported yet.
+- Second derivatives of Lagrangian fields in cell and boundary integrals and in the matrix-free
+  Jacobian (dense weights; sum factorisation is used for the fields without Hessian terms). `∇∇` on
+  skeleton integrals and of Raviart–Thomas fields goes to the Gridap fallback; third derivatives too.
 - Shared-memory parallelism (threads). Distributed runs with GridapDistributed and GPU execution
   are design targets: kernels are allocation-free and states use a GPU-friendly layout.
 - Gridap is pinned to 0.19.9, because the engine reads Gridap's internal expression tree.
