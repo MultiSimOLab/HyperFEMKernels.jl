@@ -1,8 +1,9 @@
 # FE functions in the weak form (not the unknown): `uh⁻`, interpolated fields, their gradients.
 #
 # Gridap evaluates an FE function at the points as the linear combination of its cell dof values
-# with the basis at the points (`LinearCombinationMap`), and a physical gradient as
-# `inv(Jt) ⋅ (reference gradient)`. Both are recognised in the lazy tree and evaluated by the
+# with the basis at the points (`LinearCombinationMap`), a physical gradient as
+# `inv(Jt) ⋅ (reference gradient)` and a physical Hessian (`∇∇`, affine cell maps only in Gridap) as
+# `push_∇∇(reference Hessian, inv(Jt))`. The three are recognised in the lazy tree and evaluated by the
 # engine from the current nodal values: in the state updates (`states.jl`, read at the point by
 # the compiled function) and in the assembly (`FEArray`, materialised into the dense auxiliary
 # buffers of the group by `materialize_fe!`, see `assembly.jl`). Reading the vectors at every
@@ -14,7 +15,7 @@
 Dof values and basis of an FE function at the points, read from Gridap's lazy tree: the cell dof
 ids (a `Table`, with an optional map from the cells of the points to the cells of the space),
 the free and Dirichlet values, and the uniform `np × nd` matrix of basis values (or reference
-gradients) at the points.
+gradients, or reference Hessians) at the points.
 """
 struct FEData{T,DV,VF,VD,N,C,P,I}
     vals::Any                 # Gridap's cell dof values (identity key within one capture)
@@ -23,7 +24,7 @@ struct FEData{T,DV,VF,VD,N,C,P,I}
     ptrs::P                   # Table of cell dof ids
     data::I
     cellmap::C                # nothing, or point cell → space cell
-    N::Matrix{N}              # np × nd basis at the points (values, DV = 0, or reference gradients, DV = 1)
+    N::Matrix{N}              # np × nd basis at the points (values, DV = 0; reference gradients, DV = 1; reference Hessians, DV = 2)
     nd::Int
 end
 Base.eltype(::FEData{T}) where {T} = T
@@ -51,7 +52,8 @@ end
 `a` recognised as an FE function evaluated at `np` points per cell: the linear combination of its
 cell dof values (`PosNegReindex` of the free and Dirichlet values over a `Table` of ids, directly
 or through a `Reindex` from the cells of the points to the cells of the space) with a uniform
-`np × nd` basis matrix (values with `deriv = 0`, reference gradients with `deriv = 1`).
+`np × nd` basis matrix (values with `deriv = 0`, reference gradients with `deriv = 1`, reference
+Hessians with `deriv = 2`).
 """
 function fe_data(a::LazyArray, deriv::Int, np::Int)
     first(a.maps) isa Fields.LinearCombinationMap || return nothing
@@ -81,8 +83,8 @@ end
 """
     fe_array(a) -> FEArray or nothing
 
-An FE function at the points (value, or physical gradient `inv(Jt) ⋅` reference gradient), read
-from Gridap's lazy tree, for the assembly: see `FEArray`.
+An FE function at the points (value, physical gradient `inv(Jt) ⋅` reference gradient, or physical
+Hessian `push_∇∇(reference Hessian, inv(Jt))`), read from Gridap's lazy tree, for the assembly: see `FEArray`.
 """
 function fe_array(a)
     a isa LazyArray || return nothing
@@ -92,18 +94,19 @@ function fe_array(a)
         N === nothing && return nothing
         fe = fe_data(a, 0, size(N, 1))
         fe === nothing || return FEArray(a, fe)
-    elseif k isa BroadcastingFieldOpMap && k.op === dot && length(a.args) == 2
-        b = a.args[2]
+    elseif k isa BroadcastingFieldOpMap && (k.op === dot || k.op === Fields.push_∇∇) && length(a.args) == 2
+        deriv = k.op === dot ? 1 : 2
+        b, jt = deriv == 1 ? (a.args[2], a.args[1]) : (a.args[1], a.args[2])
         if b isa LazyArray && first(b.maps) isa Fields.LinearCombinationMap && first(b.maps).column isa Colon
             D = _tensor_dim(eltype(eltype(a)))        # a is cell-wise: Vector of point values
             D === nothing && return nothing
-            is_inverse_jacobian(a.args[1], D) || return nothing
+            is_inverse_jacobian(jt, D) || return nothing
             N = uniform_matrix(b.args[2])
             N === nothing && return nothing
-            # reference gradients of the dimension of the space: on a manifold triangulation (cells of
+            # reference derivatives of the dimension of the space: on a manifold triangulation (cells of
             # lower dimension) the gradient (pinvJt ⋅ ∇̂) stays a Gridap array
             _tensor_dim(eltype(N)) == D || return nothing
-            fe = fe_data(b, 1, size(N, 1))
+            fe = fe_data(b, deriv, size(N, 1))
             fe === nothing || return FEArray(a, fe)
         end
     end
@@ -111,6 +114,7 @@ function fe_array(a)
 end
 _tensor_dim(::Type{<:TensorValue{D}}) where {D} = D
 _tensor_dim(::Type{<:VectorValue{D}}) where {D} = D
+_tensor_dim(::Type{<:ThirdOrderTensorValue{D}}) where {D} = D
 _tensor_dim(::Type) = nothing
 
 """
@@ -179,12 +183,20 @@ end
     xl
 end
 
-"Value (or physical gradient, `inv(Jt) ⋅` reference gradient) of the FE function at point `q`."
+"""
+Value, physical gradient (`inv(Jt) ⋅` reference gradient) or physical Hessian of the FE function at
+point `q`. The Hessian is Gridap's `push_∇∇` of the reference Hessian with `inv(Jt)` (the affine push,
+the only one Gridap builds: a form with `∇∇` of an FE function on non-affine cells does not reach the
+engine), so that both agree to round-off.
+"""
 @inline function fe_point_value(fe::FEData{T,0}, xl, q::Int, iJt) where {T}
     linear_combination_at(fe, xl, q)
 end
 @inline function fe_point_value(fe::FEData{T,1}, xl, q::Int, iJt) where {T}
     iJt ⋅ linear_combination_at(fe, xl, q)
+end
+@inline function fe_point_value(fe::FEData{T,2}, xl, q::Int, iJt) where {T}
+    Fields.push_∇∇(linear_combination_at(fe, xl, q), iJt)
 end
 @inline function linear_combination_at(fe::FEData{T,DV,VF,VD,N}, xl, q::Int) where {T,DV,VF,VD,N}
     s = zero(N) * zero(eltype(xl))

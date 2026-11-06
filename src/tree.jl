@@ -8,8 +8,9 @@
 abstract type Node end
 
 """
-Unknown/test/trial function of `field`, value (`deriv = 0`) or gradient (`deriv = 1`). On a
-skeleton `side` is `:plus` or `:minus` (the cell the trace is taken from); `:cell` elsewhere.
+Unknown/test/trial function of `field`: value (`deriv = 0`), gradient (`deriv = 1`) or Hessian
+(`deriv = 2`). On a skeleton `side` is `:plus` or `:minus` (the cell the trace is taken from);
+`:cell` elsewhere.
 """
 struct Leaf <: Node
     role::Symbol
@@ -72,9 +73,9 @@ function capture(f, args...)
     dc = try
         f(args...)
     catch err
-        # the weak form itself failed on the probes (e.g. ∇(u*u), jump/mean on a skeleton):
-        # every contribution to Gridap (which raises the same error if the form is wrong); a call
-        # of `f` itself with the wrong arguments is the caller's error, not a fallback
+        # the weak form itself failed on the probes: every contribution to Gridap (which raises the
+        # same error if the form is wrong); a call of `f` itself with the wrong arguments is the
+        # caller's error, not a fallback
         err isa InterruptException && rethrow()
         err isa MethodError && err.f === f && rethrow()
         push!(fallback, (:all, sprint(showerror, err)))
@@ -124,6 +125,10 @@ function to_node(a::AbstractArray)
     if a isa Fill && a.value isa AbstractVector && !isempty(a.value) && is_constant_value(a.value[1]) &&
        all(v -> v == a.value[1], a.value)
         return Const(a.value[1])                   # the same value at every point of every cell
+    end
+    if a isa CompressedArray && length(a.values) == 1 && a.values[1] isa AbstractVector && !isempty(a.values[1]) &&
+       is_constant_value(a.values[1][1]) && all(v -> v == a.values[1][1], a.values[1])
+        return Const(a.values[1][1])               # the same, compressed (e.g. on a simplexified mesh)
     end
     if !contains_probe(a)
         # data that does not depend on the unknown/test/trial functions. An FE function (or its
@@ -201,7 +206,7 @@ _walk_aux!(found, n::Const) = nothing
 function show_tree(io::IO, n::Node, depth=0)
     pad = "  "^depth
     if n isa Leaf
-        println(io, pad, n.role, "[", n.field, "]", n.deriv == 1 ? " ∇" : "", n.side === :cell ? "" : " $(n.side)", " :: ", n.T)
+        println(io, pad, n.role, "[", n.field, "]", n.deriv == 1 ? " ∇" : n.deriv == 2 ? " ∇∇" : "", n.side === :cell ? "" : " $(n.side)", " :: ", n.T)
     elseif n isa Aux
         println(io, pad, n.array isa FEArray ? "fe function" : "aux", " :: ", eltype(eltype(n.array)))
     elseif n isa Const

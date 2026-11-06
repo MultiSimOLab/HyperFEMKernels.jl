@@ -62,8 +62,23 @@ end
 "Derivatives of the unknown of field `f` (on `side`) that the terms evaluate at the points."
 function field_use(terms::Vector{Term}, f::Int; side::Symbol=:cell)
     ls = [l for l in leaves(terms, :unknown) if l.field == f && l.side === side]
-    FieldUse{any(l -> l.deriv == 0, ls),any(l -> l.deriv >= 1, ls)}()
+    FieldUse{any(l -> l.deriv == 0, ls),any(l -> l.deriv == 1, ls),any(l -> l.deriv == 2, ls)}()
 end
+
+"""
+    hess_use(g) -> Val{true/false}
+
+Whether any field of the group uses Hessians (as test, trial or unknown), decided from the group's
+type: `point_curvature` is then evaluated per point (`nothing` otherwise).
+"""
+@generated function hess_use(::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF,UU}) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF,UU}
+    hs(T) = any(t -> t.parameters[5] === true, T.parameters)   # SlotSpec{NC,LV,HV,HG,HH,...}
+    hu(T) = any(t -> t.parameters[3] === true, T.parameters)   # FieldUse{HV,HG,HH}
+    :(Val{$(hs(SV) || hs(SU) || hu(UU))}())
+end
+
+"`Val(true)` if a field's test or trial slots include its Hessian (its physical weights W need the Hessian columns)."
+@inline hess_weights(::SlotSpec{NC1,LV1,HV1,HG1,HH1}, ::SlotSpec{NC2,LV2,HV2,HG2,HH2}) where {NC1,LV1,HV1,HG1,HH1,NC2,LV2,HV2,HG2,HH2} = Val{HH1 || HH2}()
 
 function Group(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int, cellmap, colors, previous=Any[];
                linear_maps::Bool=true, boundary=nothing)
@@ -86,6 +101,8 @@ function Group(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int,
     smv = Tuple(SlotSpec(t, slot_map(pf.test, f, ncomps(field_types(t)[1]), D), D) for (f, t) in enumerate(tables))
     smu = Tuple(SlotSpec(t, slot_map(pf.trial, f, ncomps(field_types(t)[1]), D), D) for (f, t) in enumerate(tables))
     use = Tuple(field_use(terms, f) for f in eachindex(tables))
+    any(((t, u),) -> t isa PiolaTable && has_hess(u), zip(tables, use)) &&
+        error("HyperFEMKernels: second derivatives (∇∇) of H(div) fields are not supported")
     rb = Tuple(residual_weights(t, sp, geo.np) for (t, sp) in zip(tables, smv))
     aux = Tuple(a.array for a in pf.aux)
     AUX = Tuple{(Matrix{eltype(eltype(a))} for a in aux)...}
@@ -732,16 +749,18 @@ function element_residual!(re, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}, xl,
     fill!(re, 0.0)
     tables, locs, pf = g.tables, g.locs, g.pf
     zsv = zero(SVector{NSV,Float64})
+    hu = hess_use(g)
     for q in 1:g.geo.np
         dV, iJt, Jt = point_geometry(g.geo, q, cell)
-        FV = field_values(tables, locs, g.use, xl, q, iJt, Jt)
+        Φ = point_curvature(g.geo, q, cell, hu)
+        FV = field_values(tables, locs, g.use, xl, q, iJt, Jt, Φ)
         Aq = map(a -> @inbounds(a[q, cell]), auxd)
         R = if LF === Nothing
             ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, EMPTY_SLOTS), zsv)
         else
             apply_maps(g.lin, g.lin.state(g.lin.ops, FV, Aq), Val(NSV))
         end
-        map((t, l, sm) -> contract_residual!(re, t, l, sm, R, q, iJt, Jt, dV), tables, locs, g.smv)
+        map((t, l, sm) -> contract_residual!(re, t, l, sm, R, q, iJt, Jt, Φ, dV), tables, locs, g.smv)
     end
     re
 end
@@ -758,16 +777,18 @@ function element_residual_mm!(re, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}, 
     tables, locs, pf = g.tables, g.locs, g.pf
     np = g.geo.np
     zsv = zero(SVector{NSV,Float64})
+    hu = hess_use(g)
     for q in 1:np
         dV, iJt, Jt = point_geometry(g.geo, q, cell)
-        FV = field_values(tables, locs, g.use, xl, q, iJt, Jt)
+        Φ = point_curvature(g.geo, q, cell, hu)
+        FV = field_values(tables, locs, g.use, xl, q, iJt, Jt, Φ)
         Aq = map(a -> @inbounds(a[q, cell]), auxd)
         R = if LF === Nothing
             ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, EMPTY_SLOTS), zsv)
         else
             apply_maps(g.lin, g.lin.state(g.lin.ops, FV, Aq), Val(NSV))
         end
-        map((t, sm, C) -> residual_coefs!(C, t, sm, R, q, iJt, Jt, dV), tables, g.smv, Cb)
+        map((t, sm, C) -> residual_coefs!(C, t, sm, R, q, iJt, Jt, Φ, dV), tables, g.smv, Cb)
     end
     residual_products_all!(re, tables, locs, g.smv, g.rb, Cb, Mb, np)
     re
@@ -782,8 +803,9 @@ tiled `gemm_add!` of the Jacobian.
 @inline function residual_products!(re, t::AbstractFieldTable{D,T,NN,NC,true}, loc::Int, sp::SlotSpec{NC,LV}, B, C, M,
                                     np::Int) where {D,T,NN,NC,LV}
     LV == 0 && return re
+    LR = lvref(t, sp)
     fill!(M, 0.0)
-    @inbounds for r in 1:np*LV
+    @inbounds for r in 1:np*LR
         cr = ntuple(c -> C[r, c], Val(NC))
         @simd for n in 1:NN
             b = B[n, r]
@@ -810,10 +832,9 @@ end
     end
 end
 
-"Buffers of the matrix-product residual: coefficients (np·LV × nc) and work matrix (nn × nc) per field."
+"Buffers of the matrix-product residual: coefficients (np·LR × nc, `lvref`) and work matrix (nn × nc) per field."
 function rm_buffers(g::Group)
-    lv(sp::SlotSpec{NC,LV}) where {NC,LV} = LV
-    Cb = map((t, sm) -> zeros(g.geo.np * lv(sm), t.nc), g.tables, g.smv)
+    Cb = map((t, sm) -> zeros(g.geo.np * lvref(t, sm), t.nc), g.tables, g.smv)
     Mb = map(t -> zeros(t.nn, t.nc), g.tables)
     Cb, Mb
 end
@@ -825,10 +846,12 @@ function element_jacobian!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}, xl
     tables, locs, pf = g.tables, g.locs, g.pf
     zsv = zero(SVector{NSV,Float64})
     zsu = zero(SVector{NSU,Float64})
+    hu = hess_use(g)
     for q in 1:g.geo.np
         dV, iJt, Jt = point_geometry(g.geo, q, cell)
-        map((t, W) -> point_weights!(W, t, q, iJt, Jt), tables, dNb)
-        FV = field_values(tables, locs, g.use, xl, q, iJt, Jt)
+        Φ = point_curvature(g.geo, q, cell, hu)
+        map((t, W, sv, su) -> point_weights!(W, t, q, iJt, Jt, Φ, hess_weights(sv, su)), tables, dNb, g.smv, g.smu)
+        FV = field_values(tables, locs, g.use, xl, q, iJt, Jt, Φ)
         Aq = map(a -> @inbounds(a[q, cell]), auxd)
         T = if LF === Nothing
             ForwardDiff.jacobian(r -> ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsv), zsu)   # T[test slot, trial slot]
@@ -856,13 +879,15 @@ function element_jacobian_mm!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF},
     qb = point_block(np)
     zsv = zero(SVector{NSV,Float64})
     zsu = zero(SVector{NSU,Float64})
+    hu = hess_use(g)
     for q0 in 1:qb:np
         nq = min(qb, np - q0 + 1)
         for ql in 1:nq
             q = q0 + ql - 1
             dV, iJt, Jt = point_geometry(g.geo, q, cell)
-            map((t, W) -> point_weights!(W, t, q, iJt, Jt), tables, Wb)
-            FV = field_values(tables, locs, g.use, xl, q, iJt, Jt)
+            Φ = point_curvature(g.geo, q, cell, hu)
+            map((t, W, sv, su) -> point_weights!(W, t, q, iJt, Jt, Φ, hess_weights(sv, su)), tables, Wb, g.smv, g.smu)
+            FV = field_values(tables, locs, g.use, xl, q, iJt, Jt, Φ)
             Aq = map(a -> @inbounds(a[q, cell]), auxd)
             T = if LF === Nothing
                 ForwardDiff.jacobian(r -> ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsv), zsu)   # T[test slot, trial slot]

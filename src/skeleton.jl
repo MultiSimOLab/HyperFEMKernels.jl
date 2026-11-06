@@ -121,6 +121,7 @@ function SkeletonGroup(terms::Vector{Term}, trian::Triangulation, Uspaces, locs,
     ls = vcat(pf.test.leaves, pf.trial.leaves, leaves(terms, :unknown))
     isempty(ls) && error("HyperFEMKernels: integral without unknown, test or trial functions")
     any(l -> l.side === :cell, ls) && error("HyperFEMKernels: a function is used on the skeleton without a side (use plus/minus, jump or mean)")
+    any(l -> l.deriv == 2, ls) && error("HyperFEMKernels: second derivatives (∇∇) on skeleton integrals are not supported yet")
     w = uniform_value(terms[1].weights, "the quadrature weights")
     k = findfirst(g -> g isa SkeletonGroup && g.trian === trian && g.key == cls.key && g.geo.w == w && g.facets == cls.facets, previous)
     if k === nothing

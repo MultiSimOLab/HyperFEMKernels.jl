@@ -47,6 +47,9 @@ struct GeoTable{D,JF}
     coords::Matrix{VectorValue{D,Float64}}   # ng × ncells (of the integration triangulation)
     Jf::JF
     dc::Int                                  # dimension of the cells (dc < D: manifold)
+    ddM::Array{Float64,3}                    # D² × np × ng, reference Hessians of the geometric shape functions (column-major
+                                             # entries of each D × D Hessian, zero-padded on manifold cells); concrete eltype
+    affine::Bool                             # the reference Hessians vanish (simplices): the cell maps are affine
 end
 
 """
@@ -80,12 +83,26 @@ function GeoTable(trian::Triangulation, xq::AbstractVector, w::AbstractVector; c
     for i in eachindex(dM)
         dMp[i] = pad_vector(dM[i], Val(D))
     end
-    GeoTable{D,typeof(Jf)}(length(xq), ng, dMp, collect(Float64, w), coords, Jf, dc)
+    # reference Hessians of the geometry (the curvature of non-affine cell maps, see `point_curvature`)
+    ddM = evaluate(Broadcasting(∇∇)(M), xq)
+    ddMp = Array{Float64,3}(undef, D * D, size(ddM)...)
+    for q in axes(ddM, 1), n in axes(ddM, 2)
+        h = pad_tensor(ddM[q, n], Val(D))
+        for i in 1:D*D
+            ddMp[i, q, n] = h.data[i]
+        end
+    end
+    affine = all(iszero, ddMp)
+    GeoTable{D,typeof(Jf)}(length(xq), ng, dMp, collect(Float64, w), coords, Jf, dc, ddMp, affine)
 end
 
 "A reference gradient (`VectorValue{dc}`) zero-padded to `D` components (manifold cells, `dc < D`)."
 @inline pad_vector(v::VectorValue{D}, ::Val{D}) where {D} = VectorValue{D,Float64}(v.data)
 @inline pad_vector(v::VectorValue{d}, ::Val{D}) where {d,D} = VectorValue{D,Float64}(ntuple(i -> i <= d ? Float64(v[i]) : 0.0, Val(D)))
+"A reference Hessian (`TensorValue{dc,dc}`) zero-padded to `D × D` (manifold cells, `dc < D`)."
+@inline pad_tensor(h::TensorValue{D,D}, ::Val{D}) where {D} = TensorValue{D,D,Float64,D * D}(h.data)
+@inline pad_tensor(h::TensorValue{d,d}, ::Val{D}) where {d,D} =
+    TensorValue{D,D,Float64,D * D}(ntuple(i -> ((a, b) = ((i - 1) % D + 1, (i - 1) ÷ D + 1); a <= d && b <= d ? Float64(h[a, b]) : 0.0), Val(D * D)))
 
 "Scalar nodal shape functions of one field at the quadrature points and the local dof layout.
 `T` is the value type of the field (`Float64` or `VectorValue{nc,Float64}`)."
@@ -97,6 +114,7 @@ struct FieldTable{D,T,NN,NC,CONTIG} <: AbstractFieldTable{D,T,NN,NC,CONTIG}
     ldof::Matrix{Int}                         # nn × nc → local dof
     Nt::Matrix{Float64}                       # nn × np (contiguous over nodes)
     dNt::Array{Float64,3}                     # nn × D × np, reference gradients (contiguous over nodes)
+    ddNt::Array{Float64,3}                    # nn × nhess(D) × np, reference Hessians, unique entries (`hess_pairs`)
 end
 # CONTIG: the dofs of each component are consecutive (ldof[n, c] = ldof[1, c] + n - 1), which
 # makes the node loops contiguous in memory (vectorisable on CPU, coalesced on GPU).
@@ -113,6 +131,7 @@ function FieldTable(space::SingleFieldFESpace, xq::AbstractVector, D::Int)
     pts = vcat(collect(xq), probe_pts)
     vals = evaluate(fields, pts)
     grads = evaluate(Broadcasting(∇)(fields), pts)
+    hess = evaluate(Broadcasting(∇∇)(fields), pts)
     nd = size(vals, 2)
     T = eltype(vals)
     nc = ncomps(T)
@@ -127,6 +146,7 @@ function FieldTable(space::SingleFieldFESpace, xq::AbstractVector, D::Int)
     end
     scalar(q, j) = nc == 1 ? vals[q, j] : vals[q, j][comp[j]]
     sgrad(q, j) = VectorValue{D,Float64}(ntuple(J -> J > dc ? 0.0 : nc == 1 ? grads[q, j][J] : grads[q, j][J, comp[j]], D))
+    shess(q, j, a, b) = (a > dc || b > dc) ? 0.0 : nc == 1 ? Float64(hess[q, j][a, b]) : Float64(hess[q, j][a, b, comp[j]])
     keyof(j) = [scalar(q, j) for q in axes(vals, 1)]
     reps = Vector{Float64}[]          # one representative key per node (approximate matching:
     node = zeros(Int, nd)             # Gridap evaluates each component with its own round-off)
@@ -148,14 +168,16 @@ function FieldTable(space::SingleFieldFESpace, xq::AbstractVector, D::Int)
     dN = VectorValue{D,Float64}[sgrad(q, first_dof[n]) for q in 1:np, n in 1:nn]
     Nt = permutedims(N)
     dNt = [dN[q, n][K] for n in 1:nn, K in 1:D, q in 1:np]
+    pairs = hess_pairs(D)
+    ddNt = [shess(q, first_dof[n], pairs[p]...) for n in 1:nn, p in 1:nhess(D), q in 1:np]
     contig = all(c -> ldof[:, c] == ldof[1, c] .+ (0:nn-1), 1:nc)
-    FieldTable{D,T,nn,nc,contig}(nn, nc, N, dN, ldof, Nt, dNt)
+    FieldTable{D,T,nn,nc,contig}(nn, nc, N, dN, ldof, Nt, dNt, ddNt)
 end
 
 ndofs(t::AbstractFieldTable) = t.nn * t.nc
 
-"Columns of the physical weight matrix W of a table (`point_weights!`)."
-wcols(::FieldTable{D}) where {D} = D + 1
+"Columns of the physical weight matrix W of a table (`point_weights!`): value, gradient, unique Hessian entries."
+wcols(::FieldTable{D}) where {D} = 1 + D + nhess(D)
 
 # ---------------------------------------------------------------------------------------------
 # H(div) (Raviart–Thomas) spaces

@@ -144,9 +144,11 @@ function functional_cells(R::Val, fun::KernelFunctional, g::Group{NSV,NSU,PF,TT,
         sc = g.cellmap[cell]
         gather_cell!(xl, fun.fields, x, dvals, sc)
         signed && apply_signs!(xl, cell_signs!(sg, fun.fields, sc), ndl)
+        hu = hess_use(g)
         for q in 1:g.geo.np
             dV, iJt, Jt = point_geometry(g.geo, q, cell)
-            FV = field_values(tables, locs, g.use, xl, q, iJt, Jt)
+            Φ = point_curvature(g.geo, q, cell, hu)
+            FV = field_values(tables, locs, g.use, xl, q, iJt, Jt, Φ)
             Aq = map(a -> @inbounds(a[q, cell]), auxd)
             v = pf.core(pf.ops, pf.coefs, FV, Aq, EMPTY_SLOTS, EMPTY_SLOTS)::Float64
             acc = _combine(R, acc, R isa Val{:sum} ? v * dV : v)

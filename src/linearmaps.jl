@@ -41,8 +41,8 @@ end
 
 "Sparse linear map: target slot index (linear in R or T), global input index, component, value."
 const SparseMap = Vector{Tuple{Int32,Int32,Int32,Float64}}
-const DEBUG_LINEAR = get(ENV, "HFK_DEBUG_LINEAR", "0") == "1"
-_nolin(why) = (DEBUG_LINEAR && println("HyperFEMKernels: linear-map shortcut not used: ", why); nothing)
+debug_linear() = get(ENV, "HFK_DEBUG_LINEAR", "0") == "1"    # read at run time (when an operator is built)
+_nolin(why) = (debug_linear() && println("HyperFEMKernels: linear-map shortcut not used: ", why); nothing)
 
 struct LinearForm{F,O,C,ST,AP,VT}
     state::F            # (ops, FV, A) -> tuple of all state inputs of the group
@@ -63,8 +63,9 @@ unit_value(::Type{T}, k) where {T<:MultiValue} = T(ntuple(i -> i == k ? 1.0 : 0.
 rand_value(::Type{<:Real}) = rand()
 rand_value(::Type{T}) where {T<:MultiValue} = T(ntuple(_ -> rand(), length(T)))
 
-field_types(::FieldTable{D,Float64}) where {D} = (Float64, VectorValue{D,Float64})
-field_types(::FieldTable{D,VectorValue{NC,Float64}}) where {D,NC} = (VectorValue{NC,Float64}, TensorValue{D,NC,Float64,D * NC})
+"Types of `FV[f]` (value, gradient and, for nodal fields, Hessian) of a field."
+field_types(::FieldTable{D,Float64}) where {D} = (Float64, VectorValue{D,Float64}, TensorValue{D,D,Float64,D * D})
+field_types(::FieldTable{D,VectorValue{NC,Float64}}) where {D,NC} = (VectorValue{NC,Float64}, TensorValue{D,NC,Float64,D * NC}, ThirdOrderTensorValue{D,D,NC,Float64,D * D * NC})
 field_types(::PiolaTable{D}) where {D} = (VectorValue{D,Float64}, TensorValue{D,D,Float64,D * D})
 
 # Split a slot-dependent expression into additive parts: [(expr, sign), ...].

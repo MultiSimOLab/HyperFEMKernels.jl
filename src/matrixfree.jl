@@ -15,8 +15,11 @@ struct GroupData{D}
     iJt::Array{Float64,3}        # D*D × np × ncells
     Jt::Array{Float64,3}         # D*D × np × ncells (Piola map of H(div) fields)
     dV::Matrix{Float64}          # np × ncells
+    Phi::Array{Float64,3}        # D*D*D × np × ncells: curvature of the cell map (`point_curvature`), only for
+                                 # groups with Hessians on non-affine cells; 0 × np × ncells otherwise
 end
-GroupData{D}(T, iJt, dV) where {D} = GroupData{D}(T, iJt, similar(iJt), dV)
+GroupData{D}(T, iJt, dV) where {D} = GroupData{D}(T, iJt, similar(iJt), dV, zeros(0, size(dV)...))
+GroupData{D}(T, iJt, Jt, dV) where {D} = GroupData{D}(T, iJt, Jt, dV, zeros(0, size(dV)...))
 
 """
     MatrixFreeJacobian(op::KernelOperator)
@@ -39,7 +42,10 @@ end
 
 function MatrixFreeJacobian(op::KernelOperator)
     tps = map(op.jgroups) do g
-        g isa SkeletonGroup ? map(_ -> nothing, g.tables) : map(t -> TPTable(t, g.xq), g.tables)
+        # sum factorisation for nodal fields on n-cubes without Hessian slots (the Hessian columns of W
+        # take the dense path); nothing on skeletons
+        g isa SkeletonGroup ? map(_ -> nothing, g.tables) :
+            map((t, sv, su) -> hess_weights(sv, su) isa Val{true} ? nothing : TPTable(t, g.xq), g.tables, g.smv, g.smu)
     end
     data = map(op.jgroups) do g
         np = g.geo.np
@@ -52,7 +58,9 @@ function MatrixFreeJacobian(op::KernelOperator)
             (GroupData{D}(T, zeros(D * D, np, n), dV), GroupData{D}(T, zeros(D * D, np, n), dV))
         else
             nc = length(g.cellmap)
-            GroupData{D}(zeros(nsv * nsu, np, nc), zeros(D * D, np, nc), zeros(np, nc))
+            curved = hess_use(g) isa Val{true} && !g.geo.affine
+            GroupData{D}(zeros(nsv * nsu, np, nc), zeros(D * D, np, nc), zeros(D * D, np, nc), zeros(np, nc),
+                         zeros(curved ? D * D * D : 0, np, nc))
         end
     end
     Afb = isempty(op.fallback.jtrians) ? nothing : fallback_pattern(op.fallback, op.U, op.V, op.jac)
@@ -189,13 +197,16 @@ function prepare_cells!(gd::GroupData{D}, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,
     xl = zeros(op.ndl)
     sg = zeros(op.ndl)
     zsv = zero(SVector{NSV,Float64}); zsu = zero(SVector{NSU,Float64})
+    hu = hess_use(g)
+    curved = size(gd.Phi, 1) > 0
     for cell in cells
         sc = g.cellmap[cell]
         gather_cell!(xl, op.fields, x, dvals, sc)
         op.signed && apply_signs!(xl, cell_signs!(sg, op.fields, sc), op.ndl)   # state of H(div) fields with the dof signs
         for q in 1:g.geo.np
             dV, iJt, Jt = point_geometry(g.geo, q, cell)
-            FV = field_values(tables, locs, g.use, xl, q, iJt, Jt)
+            Φ = point_curvature(g.geo, q, cell, hu)
+            FV = field_values(tables, locs, g.use, xl, q, iJt, Jt, Φ)
             Aq = map(a -> @inbounds(a[q, cell]), auxd)
             T = if LF === Nothing
                 ForwardDiff.jacobian(r -> ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsv), zsu)
@@ -209,10 +220,27 @@ function prepare_cells!(gd::GroupData{D}, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,
                 gd.iJt[i, q, cell] = iJt[i]
                 gd.Jt[i, q, cell] = Jt[i]
             end
+            curved && store_curvature!(gd, Φ, q, cell)
             gd.dV[q, cell] = dV
         end
     end
     nothing
+end
+
+"Store the curvature `Φ` (D matrices D × D) of a point in `gd.Phi[:, q, cell]` (c outer, then column-major entries)."
+@inline function store_curvature!(gd::GroupData{D}, Φ::Curvature{D}, q::Int, cell::Integer) where {D}
+    @inbounds for c in 1:D, i in 1:D*D
+        gd.Phi[i+(c-1)*D*D, q, cell] = Φ[c][i]
+    end
+    nothing
+end
+@inline store_curvature!(gd::GroupData, ::Nothing, q::Int, cell::Integer) = nothing
+
+"Curvature of the cell map at a point of `gd` for a field whose weights need Hessians (`nothing` otherwise)."
+@inline curvature_at(gd::GroupData{D}, q::Int, cell::Integer, ::Val{false}) where {D} = nothing
+@inline function curvature_at(gd::GroupData{D}, q::Int, cell::Integer, ::Val{true}) where {D}
+    size(gd.Phi, 1) == 0 && return ntuple(_ -> zero(SMatrix{D,D,Float64,D * D}), Val(D))    # affine cells
+    ntuple(c -> SMatrix{D,D,Float64,D * D}(ntuple(i -> @inbounds(gd.Phi[i+(c-1)*D*D, q, cell]), Val(D * D))), Val(D))
 end
 
 function LinearAlgebra.mul!(y::AbstractVector, mf::MatrixFreeJacobian, dx::AbstractVector)
@@ -395,12 +423,13 @@ function interpolate_slots!(su, t::FieldTable{D,T,NN,NC}, loc, sp::SlotSpec{NC,L
     nothing
 end
 
-function interpolate_slots!(su, t::FieldTable{D,T,NN,NC}, loc, sp::SlotSpec{NC,LV,HV,HG}, ::Nothing, xl, uc, pts, W, tmp,
-                            gd::GroupData{D}, cell, np) where {D,T,NN,NC,LV,HV,HG}
+function interpolate_slots!(su, t::FieldTable{D,T,NN,NC}, loc, sp::SlotSpec{NC,LV,HV,HG,HH}, ::Nothing, xl, uc, pts, W, tmp,
+                            gd::GroupData{D}, cell, np) where {D,T,NN,NC,LV,HV,HG,HH}
     LV == 0 && return nothing
+    oh = (HV ? 1 : 0) + (HG ? D : 0)
     @inbounds for q in 1:np
         iJt = TensorValue{D,D,Float64,D * D}(ntuple(i -> gd.iJt[i, q, cell], Val(D * D)))
-        point_weights!(W, t, q, iJt)
+        point_weights!(W, t, q, iJt, nothing, curvature_at(gd, q, cell, Val(HH)), Val(HH))
         for c in 1:NC
             if HV
                 v = 0.0
@@ -418,6 +447,15 @@ function interpolate_slots!(su, t::FieldTable{D,T,NN,NC}, loc, sp::SlotSpec{NC,L
                     su[sp.sm[c, HV ? 1 + J : J], q] = gJ
                 end
             end
+            if HH
+                for p in 1:nhess(D)
+                    hp = 0.0
+                    @simd for n in 1:NN
+                        hp += xl[loc+ldofidx(t, n, c)] * W[n, 1+D+p]
+                    end
+                    su[sp.sm[c, oh+p], q] = hp
+                end
+            end
         end
     end
     nothing
@@ -430,7 +468,7 @@ function interpolate_slots!(su, t::PiolaTable{D,NN}, loc, sp::SlotSpec{1,LV,HV,H
     @inbounds for q in 1:np
         iJt = TensorValue{D,D,Float64,D * D}(ntuple(i -> gd.iJt[i, q, cell], Val(D * D)))
         Jt = TensorValue{D,D,Float64,D * D}(ntuple(i -> gd.Jt[i, q, cell], Val(D * D)))
-        u, g = field_point_values(t, xl, loc, q, iJt, Jt, FieldUse{HV,HG}())
+        u, g = field_point_values(t, xl, loc, q, iJt, Jt, FieldUse{HV,HG,false}())
         HV && for c in 1:D
             su[sp.sm[1, c], q] = u[c]
         end
@@ -481,12 +519,13 @@ function contract_slots!(re, t::FieldTable{D,T,NN,NC}, loc, sp::SlotSpec{NC,LV,H
     nothing
 end
 
-function contract_slots!(re, t::FieldTable{D,T,NN,NC}, loc, sp::SlotSpec{NC,LV,HV,HG}, ::Nothing, sv, rc, coef, W, tmp,
-                         gd::GroupData{D}, cell, np) where {D,T,NN,NC,LV,HV,HG}
+function contract_slots!(re, t::FieldTable{D,T,NN,NC}, loc, sp::SlotSpec{NC,LV,HV,HG,HH}, ::Nothing, sv, rc, coef, W, tmp,
+                         gd::GroupData{D}, cell, np) where {D,T,NN,NC,LV,HV,HG,HH}
     LV == 0 && return nothing
+    oh = (HV ? 1 : 0) + (HG ? D : 0)
     @inbounds for q in 1:np
         iJt = TensorValue{D,D,Float64,D * D}(ntuple(i -> gd.iJt[i, q, cell], Val(D * D)))
-        point_weights!(W, t, q, iJt)
+        point_weights!(W, t, q, iJt, nothing, curvature_at(gd, q, cell, Val(HH)), Val(HH))
         for c in 1:NC
             if HV
                 r0 = sv[sp.sm[c, 1], q]
@@ -499,6 +538,14 @@ function contract_slots!(re, t::FieldTable{D,T,NN,NC}, loc, sp::SlotSpec{NC,LV,H
                     rJ = sv[sp.sm[c, HV ? 1 + J : J], q]
                     @simd for n in 1:NN
                         re[loc+ldofidx(t, n, c)] += rJ * W[n, 1+J]
+                    end
+                end
+            end
+            if HH
+                for p in 1:nhess(D)
+                    rp = sv[sp.sm[c, oh+p], q]
+                    @simd for n in 1:NN
+                        re[loc+ldofidx(t, n, c)] += rp * W[n, 1+D+p]
                     end
                 end
             end

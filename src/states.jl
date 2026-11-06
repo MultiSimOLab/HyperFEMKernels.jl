@@ -111,7 +111,7 @@ emit!(st::CodegenState, n::StateLeaf) = :(S[$(n.k)])
 _walk_leaves!(found, role, n::StateLeaf) = nothing
 _walk_aux!(found, n::StateLeaf) = nothing
 
-"An FE function (value, `deriv = 0`, or gradient, `deriv = 1`) read at the point: `FV[k]`."
+"An FE function (value, `deriv = 0`; gradient, `deriv = 1`; Hessian, `deriv = 2`) read at the point: `FV[k]`."
 struct FELeaf <: Node
     k::Int
     deriv::Int
@@ -139,9 +139,13 @@ function state_node(a::AbstractArray, ctx::StateContext)
             n = fe_leaf(a, 0, ctx)
             n === nothing || return n
         elseif k isa BroadcastingFieldOpMap
-            # physical gradient of an FE function: inv(Jt) ⋅ (reference gradient of the linear combination)
+            # physical gradient of an FE function: inv(Jt) ⋅ (reference gradient of the linear combination);
+            # physical Hessian: push_∇∇(reference Hessian of the linear combination, inv(Jt))
             if k.op === dot && length(a.args) == 2 && is_inverse_jacobian(a.args[1], ctx.D)
                 n = fe_leaf(a.args[2], 1, ctx)
+                n === nothing || return n
+            elseif k.op === Fields.push_∇∇ && length(a.args) == 2 && is_inverse_jacobian(a.args[2], ctx.D)
+                n = fe_leaf(a.args[1], 2, ctx)
                 n === nothing || return n
             end
             return Op(k.op, Node[state_node(b, ctx) for b in a.args])
@@ -214,7 +218,7 @@ function StateUpdate(updater, args::Tuple, x::CellPoint, written::Vector{Int}, n
         return ops[1]($(argex...))
     end)
     core = RuntimeGeneratedFunction(@__MODULE__, @__MODULE__, ex)
-    needs_geo = any(f -> fe_deriv(f) == 1, ctx.fes)
+    needs_geo = any(f -> fe_deriv(f) >= 1, ctx.fes)
     geo = needs_geo ? geo_table(trian, uniform_value(xdata, "the quadrature points")) : nothing
     fes = Tuple(ctx.fes)
     storages = Tuple(storage(s) for s in sts)
