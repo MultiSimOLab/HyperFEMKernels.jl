@@ -56,8 +56,9 @@ backend for its drivers (`backend = :compiled`).
 - **Internal variables.** Gridap's `update_state!` (visco-elasticity, plasticity, …) executed by
   threaded kernels with the same updater and arguments; `KernelState` stores the states as a dense
   `np × ncells` matrix.
-- **Never blocks a simulation.** Terms the engine cannot translate are assembled by Gridap and added
-  to the result, with a warning naming the term.
+- **Never blocks a simulation.** Integrals the engine cannot translate are assembled by Gridap and added
+  to the result, with a warning naming the triangulation and the reason; the integrals on the other
+  measures of the same weak form stay in the kernels.
 
 ## Performance
 

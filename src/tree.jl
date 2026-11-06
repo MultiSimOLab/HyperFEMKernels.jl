@@ -65,7 +65,10 @@ const Fill = Arrays.Fill
 
 Call `f(args...)` with probe arguments and read the resulting tree. Triangulations whose
 contributions cannot be read are returned in `fallback` with the reason (they are assembled by
-Gridap, see `assembly.jl`); `(:all, reason)` when the weak form could not be evaluated at all.
+Gridap, see `assembly.jl`): also those where Gridap built its own arrays over the data of a probe
+(a differential operator on an expression with probes, see `ProbeCellData`), so an untranslatable
+integral on one measure does not send the integrals on the other measures to Gridap.
+`(:all, reason)` when the weak form could not be evaluated at all.
 """
 function capture(f, args...)
     forms = Form[]

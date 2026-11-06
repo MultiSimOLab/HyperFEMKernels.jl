@@ -15,7 +15,9 @@ Placeholder for the unknown (`role = :unknown`), a test function (`:test`) or a 
 (`:trial`) of field `field`, differentiated `deriv` times (0, 1 or 2). `T` is the value type of the
 field (e.g. `Float64`, `VectorValue{3,Float64}`) and `D` the spatial dimension. On a skeleton
 `side` is the cell the trace is taken from (`:plus` or `:minus`, from `u.plus` / `u.minus`);
-`:cell` elsewhere. `data` is reserved for the FE space of the field (`nothing`).
+`:cell` elsewhere. `data` is the FE space of the field (`nothing` if unknown): the real FE function or
+basis it stands for is built from it only when Gridap asks for the cell-wise data of the probe (see
+`get_data`).
 """
 struct ProbeField <: CellField
     role::Symbol
@@ -52,22 +54,62 @@ end
 # Derivatives: ∇(u) and ∇∇(u) (also ∇(∇(u)), Δ(u) = tr(∇∇(u))) are probes of a higher `deriv`.
 # Gridap's `∇∇(::CellField)` reads the cell data, so it is overridden for the probes.
 function Fields.gradient(p::ProbeField)
-    p.deriv < 2 || error("HyperFEMKernels: third derivatives of the unknown/test/trial functions are not supported")
-    reprobe(p; deriv=p.deriv + 1)
+    p.deriv < 2 && return reprobe(p; deriv=p.deriv + 1)
+    # third derivatives: not supported by the kernels; Gridap builds the expression on the real
+    # data (the integrals with it go to the hybrid fallback, see `get_data`)
+    gradient(GenericCellField(get_data(p), p.trian, ReferenceDomain()))
 end
 Fields.∇∇(p::ProbeField) = gradient(gradient(p))
 Fields.symmetric_gradient(p::ProbeField) = Operation(symmetric_part)(gradient(p))
 Fields.divergence(p::ProbeField) = Operation(tr)(gradient(p))
 
-# A differential operator applied to an expression with probes (∇(u*w)), or a probe used on a
-# skeleton without choosing a side, makes Gridap ask for the cell-wise data of the probe. There is
-# none: the whole weak form then goes to the hybrid fallback (see `capture`). Returning mock cell
-# data instead was tried and rejected: Gridap then builds a tree the reader misparses silently.
-CellData.get_data(p::ProbeField) = error("""
-    HyperFEMKernels: a differential operator was applied to an expression that contains the
-    unknown, test or trial function (e.g. ∇(u*w)), or the function is used on a skeleton without
-    a side (use plus/minus, jump or mean). Write it in terms of ∇(u), or let the hybrid fallback
-    assemble it with Gridap.""")
+"""
+    ProbeCellData
+
+Cell-wise data of a probe (the data of the real FE function, or the first function of the real
+basis, wrapped so that the reader still sees the probe). Gridap asks for it when a differential
+operator is applied to an expression with probes (∇(u*w)), when a probe is used on a skeleton
+without choosing a side, or for a third derivative: it then builds its ordinary lazy arrays over
+this data, which the reader does not translate (`to_ops`), so only the integrals on that
+triangulation go to the hybrid fallback (see `capture`) instead of the whole weak form. A basis is
+reduced to one function so that its arrays have the shapes of the probes' mocks (`ProbeArray`:
+points × 1, points × 1 × 1) and combine with them. Returning plain mock data was tried and
+rejected: Gridap then builds a tree the reader misparses silently; the wrapper makes every such
+array detectable (`contains_probe`).
+"""
+struct ProbeCellData{A,T} <: AbstractVector{T}
+    data::A
+    probe::ProbeField
+end
+ProbeCellData(data::AbstractArray, p::ProbeField) = ProbeCellData{typeof(data),eltype(data)}(data, p)
+Base.size(a::ProbeCellData) = size(a.data)
+Base.IndexStyle(::Type{<:ProbeCellData}) = IndexLinear()
+Base.getindex(a::ProbeCellData, i::Int) = a.data[i]
+Arrays.array_cache(a::ProbeCellData) = array_cache(a.data)
+Arrays.getindex!(c, a::ProbeCellData, i::Int) = getindex!(c, a.data, i)
+Arrays.testitem(a::ProbeCellData) = testitem(a.data)
+
+function CellData.get_data(p::ProbeField)
+    p.data === nothing && error("""
+        HyperFEMKernels: a differential operator was applied to an expression that contains the
+        unknown, test or trial function (e.g. ∇(u*w)), or the function is used on a skeleton without
+        a side (use plus/minus, jump or mean). Write it in terms of ∇(u), or let the hybrid fallback
+        assemble it with Gridap.""")
+    real = probe_object(p)
+    data = p.role === :unknown ? get_data(real) : lazy_map(single_function, get_data(real))
+    f = GenericCellField(ProbeCellData(data, p), get_triangulation(real), ReferenceDomain())
+    for _ in 1:p.deriv
+        f = gradient(f)
+    end
+    get_data(change_domain(f, p.trian, ReferenceDomain()))
+end
+
+"The real object a probe stands for: the zero FE function of its space (unknown) or its test/trial basis."
+probe_object(p::ProbeField) = p.role === :unknown ? zero(p.data) : p.role === :test ? get_fe_basis(p.data) : get_trial_fe_basis(p.data)
+
+"The first function of a cell basis, keeping its layout (test: a vector of fields; trial: a 1 × n matrix)."
+single_function(b::AbstractVector{<:Field}) = b[1:1]
+single_function(b::AbstractMatrix{<:Field}) = b[:, 1:1]
 
 "Number of unique entries of a symmetric `D × D` Hessian (the pairs `(a, b)` with `a ≤ b`)."
 nhess(D::Int) = D * (D + 1) ÷ 2
@@ -112,9 +154,20 @@ function Arrays.evaluate!(cache, p::ProbeField, x::CellPoint)
     ProbeArray{probe_valtype(p),N}(p, x, length(get_data(x)), np)
 end
 
+# Whether an array holds a probe: a `ProbeArray`, a `ProbeCellData`, or a lazy array built over one:
+# in its arguments, in its array of maps (`lazy_map(evaluate, fields, points)` takes the field array
+# as the maps), or in a reindexing map that holds the data (`Reindex`, `PosNegReindex`).
 contains_probe(a::ProbeArray) = true
-contains_probe(a::LazyArray) = any(contains_probe, a.args)
+contains_probe(a::ProbeCellData) = true
+contains_probe(a::LazyArray) = any(contains_probe, a.args) || contains_probe(a.maps)
+contains_probe(a::Arrays.AppendedArray) = contains_probe(a.a) || contains_probe(a.b)
+contains_probe(a::Fields.MemoArray) = contains_probe(a.parent)
+contains_probe(a::Arrays.Fill) = contains_probe_map(a.value)
 contains_probe(a) = false
+contains_probe_map(k::Arrays.Reindex) = contains_probe(k.values)
+contains_probe_map(k::Arrays.PosNegReindex) = contains_probe(k.values_pos) || contains_probe(k.values_neg)
+contains_probe_map(k::Broadcasting) = contains_probe_map(k.f)
+contains_probe_map(k) = false
 
 """
     probes(space, role)
@@ -125,7 +178,7 @@ function probes(space::FESpace, role::Symbol)
     fs = field_spaces(space)
     ps = map(enumerate(fs)) do (i, s)
         trian = get_triangulation(s)
-        ProbeField(role, i, 0, field_valtype(s), num_point_dims(trian), trian, :cell, nothing)   # gradients live in the physical space (also on a manifold triangulation)
+        ProbeField(role, i, 0, field_valtype(s), num_point_dims(trian), trian, :cell, s)   # gradients live in the physical space (also on a manifold triangulation)
     end
     length(ps) == 1 ? ps[1] : Tuple(ps)
 end
