@@ -26,10 +26,11 @@ state `x`, then use `mul!`/`*` (e.g. inside an iterative solver). Sum factorisat
 fields on quadrilaterals/hexahedra with tensor-product quadrature; other fields use the dense
 shape-function weights.
 """
-mutable struct MatrixFreeJacobian{TP,GD}
+mutable struct MatrixFreeJacobian{TP,GD,BF}
     op::KernelOperator       # rebound by `jacobian!` when the operator is `update`d (same structure)
     tps::TP                  # per Jacobian group: tuple of TPTable or nothing per field
     data::GD                 # per Jacobian group: GroupData
+    bufs::BF                 # per Jacobian group: one set of apply buffers per task (no allocation in `mul!`)
     nthreads::Int
     Afb::Union{Nothing,SparseMatrixCSC{Float64,Int}}   # Gridap-assembled part (hybrid fallback)
     x::AbstractVector        # state of the last `prepare!` (read by the preconditioner slots)
@@ -54,7 +55,8 @@ function MatrixFreeJacobian(op::KernelOperator)
         end
     end
     Afb = isempty(op.fallback.jtrians) ? nothing : fallback_pattern(op.fallback, op.U, op.V, op.jac)
-    MatrixFreeJacobian(op, Tuple(tps), Tuple(data), op.nthreads, Afb, Float64[])
+    bufs = map((g, tp) -> [apply_buffers(g, tp, op.ndl) for _ in 1:op.nthreads], Tuple(op.jgroups), Tuple(tps))
+    MatrixFreeJacobian(op, Tuple(tps), Tuple(data), bufs, op.nthreads, Afb, Float64[])
 end
 
 nslots(::Group{NSV,NSU}) where {NSV,NSU} = (NSV, NSU)
@@ -97,7 +99,7 @@ function rebind!(mf::MatrixFreeJacobian, op::KernelOperator)
         mf.op = op
     else
         new = MatrixFreeJacobian(op)
-        mf.op, mf.tps, mf.data, mf.Afb = new.op, new.tps, new.data, new.Afb
+        mf.op, mf.tps, mf.data, mf.bufs, mf.Afb = new.op, new.tps, new.data, new.bufs, new.Afb
     end
     mf
 end
@@ -204,10 +206,11 @@ function LinearAlgebra.mul!(y::AbstractVector, mf::MatrixFreeJacobian, dx::Abstr
     fill!(y, 0.0)
     op = mf.op
     for (gi, g) in enumerate(op.jgroups)
+        bufs = mf.bufs[gi]
         for color in g.colors
             nchunks = clamp(length(color) ÷ 16, 1, mf.nthreads)
-            @sync for ch in Iterators.partition(color, cld(length(color), nchunks))
-                Threads.@spawn apply_cells!(y, mf.data[gi], mf.tps[gi], g, op, dx, ch)
+            @sync for (i, ch) in enumerate(Iterators.partition(color, cld(length(color), nchunks)))
+                Threads.@spawn apply_cells!(y, mf.data[gi], mf.tps[gi], g, op, dx, ch, bufs[i])
             end
         end
     end
@@ -260,8 +263,7 @@ end
 end
 
 function apply_cells!(y, gds::Tuple{GroupData{D},GroupData{D}}, tps, g::SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D,NF2}, op, dx,
-                      lfacets) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF2}
-    b = apply_buffers(g, tps, op.ndl)
+                      lfacets, b) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF2}
     tables, locs = g.tables, g.locs
     np = g.geo.np
     ndl = op.ndl
@@ -295,8 +297,7 @@ function apply_cells!(y, gds::Tuple{GroupData{D},GroupData{D}}, tps, g::Skeleton
     nothing
 end
 
-function apply_cells!(y, gd::GroupData{D}, tps, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D}, op, dx, cells) where {NSV,NSU,PF,TT,AUX,SV,SU,D}
-    b = apply_buffers(g, tps, op.ndl)
+function apply_cells!(y, gd::GroupData{D}, tps, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D}, op, dx, cells, b) where {NSV,NSU,PF,TT,AUX,SV,SU,D}
     tables, locs = g.tables, g.locs
     np = g.geo.np
     fields = op.fields

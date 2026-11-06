@@ -73,6 +73,18 @@ end
     @test_throws ErrorException jacobian!(A, op4, randx(e4.U))
 end
 
+@testset "the apply does not allocate (buffers per task kept in the operator)" begin
+    for prob in (elasticity_3d(; order=2), poisson_2d(; simplex=true))
+        op = KernelOperator(prob.res, prob.jac, prob.U, prob.V; jacobian=:matrixfree)
+        x = randx(prob.U); mf = jacobian(op, x)
+        dx = randn(num_free_dofs(prob.U)); y = zeros(length(dx))
+        g = op.jgroups[1]; cells = g.colors[1]
+        HK.apply_cells!(y, mf.data[1], mf.tps[1], g, op, dx, cells, mf.bufs[1][1])
+        @test (@allocated HK.apply_cells!(y, mf.data[1], mf.tps[1], g, op, dx, cells, mf.bufs[1][1])) == 0
+        @test length(mf.bufs[1]) == op.nthreads
+    end
+end
+
 @testset "errors: invalid option, direct solver on the operator" begin
     p = poisson_2d()
     @test_throws ArgumentError KernelOperator(p.res, p.jac, p.U, p.V; jacobian=:dense)
