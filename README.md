@@ -45,8 +45,11 @@ backend for its drivers (`backend = :compiled`).
   locks; element kernels allocate nothing (`allocations` reports it), which is also the
   requirement for GPU execution.
 - **Cheap updates.** Numbers in the weak form (load factors, time steps, material parameters) are
-  run-time parameters: `update` with new values reuses tables, sparsity pattern, colouring and the
-  compiled code.
+  run-time parameters: `update(op, res, jac)` with forms of the same structure (same measures,
+  operations and constants up to their values, same FE functions) rebinds the compiled groups —
+  code, tables, sparsity pattern, colouring, linear maps and the dense auxiliary buffers are reused and
+  only the values change; nothing is compiled or allocated per cell. A form of another structure is
+  compiled again, still reusing tables, geometry and colouring. The same for `KernelFunctional`.
 - **Matrix-free Jacobian.** `MatrixFreeJacobian` applies `J(x)·dx` without assembling, with sum
   factorisation on quadrilaterals and hexahedra; `KernelOperator(…; jacobian = :matrixfree)` hands
   it to a Newton solver and `MatrixFreeSolver` (Krylov.jl) solves the tangent systems on it, with
