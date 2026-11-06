@@ -22,11 +22,13 @@ Krylov.jl (`:gmres`, `:fgmres`, `:cg`) applied to the `MatrixFreeJacobian` retur
 `‖b − J x‖ ≤ atol + rtol ‖b‖`; `restart` is the GMRES memory; `maxiter` counts all iterations.
 `:cg` applies the preconditioner on the left (symmetric form; the monitored norm is then the
 preconditioned one, as in Krylov.jl). `vector` is the vector type of the Krylov workspace.
-`blas_threads`: BLAS threads during the solve (restored afterwards; `nothing` leaves the global
-setting). The Krylov method is a sequence of BLAS-1 calls on the whole vector (dots and axpys of
-the Gram–Schmidt orthogonalisation), each of which pays the OpenBLAS thread fork: with the default
-thread count GMRES costs ×3 more per iteration than with one thread (measured, 45k dofs), while
-the operator and the preconditioner use Julia's threads.
+`blas_threads`: BLAS threads during the solve — the Krylov method and the preconditioner
+applications inside it — restored afterwards (`nothing` leaves the global setting). The Krylov
+method is a sequence of BLAS-1 calls on the whole vector (dots and axpys of the Gram–Schmidt
+orthogonalisation), each of which pays the OpenBLAS thread fork: with the default thread count
+GMRES cost ×3 more per iteration than with one thread (measured on a Mac M-series, Julia 1.13,
+17 BLAS threads, 45k dofs: 3.5 vs 0.6 ms per iteration without preconditioner), while the operator
+and the slots use Julia's threads. The setting is process-global while the solve runs.
 """
 struct MatrixFreeSolver{P,S} <: Algebra.LinearSolver
     krylov::Symbol
@@ -87,6 +89,7 @@ function Algebra.numerical_setup(ss::MatrixFreeSolverSS, mf::MatrixFreeJacobian)
     s = ss.solver
     n = size(mf, 1)
     n == size(mf, 2) || error("HyperFEMKernels: MatrixFreeSolver needs a square operator (got $(size(mf)))")
+    length(mf.x) == n || error("HyperFEMKernels: the MatrixFreeJacobian has not been prepared (call jacobian!(mf, op, x) before numerical_setup)")
     prec = s.preconditioner === nothing ? nothing : preconditioner_setup(s.preconditioner, mf)
     ws = _workspace(s, n)
     MatrixFreeSolverNS(s, mf, ws, prec, similar(ws.x), s.rtol, 0, true, NaN, 1)

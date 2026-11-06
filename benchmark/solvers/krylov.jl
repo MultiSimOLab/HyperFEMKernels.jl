@@ -15,7 +15,13 @@
 # The suffix _ew (R4a) adds the Eisenstat–Walker forcing term to the Newton (`forcing = EisenstatWalker()`): the Krylov
 # tolerance of every iteration is chosen by the Newton, rtol is then the tolerance the solver was set up with; ewmax=
 # sets its ηmax (the library default, 1e-2, if absent).
-# rtol is the Krylov tolerance (relative to the right-hand side); nsteps overrides the case's load steps.
+# S3 matrix-free configurations: mf_<krylov>_<prec>[_lagN][_ew], krylov ∈ gmres fgmres, prec ∈ gamg (PETSc GAMG with
+# the rigid modes, one V-cycle), fs (PETSc fieldsplit additive, one V-cycle per block; multi-field cases), mumps,
+# blockjacobi (the nodal block diagonal, no matrix): the Newton receives the MatrixFreeJacobian of the compiled backend
+# (`CompiledBackend(jacobian = :matrixfree)`) and HyperFEMKernels' MatrixFreeSolver applies it; with gamg/fs/mumps the
+# tangent is assembled inside `LaggedAssembled` every N Newton iterations (lagN; 1 if absent) for the preconditioner.
+# rtol is the Krylov tolerance (relative to the right-hand side); nsteps overrides the case's load steps; restart= the GMRES
+# restart of the mf_* solver (50; PETSc uses 30); probe=1 times the matrix-free product against the SpMV after the solve.
 include(joinpath(@__DIR__, "cases.jl"))
 using HyperFEMKernels, GridapPETSc
 using Gridap.Algebra
@@ -35,14 +41,49 @@ function parse_args(args)
     bs = parse(Int, get(kw, "bs", "1"))
     opts = replace(get(kw, "opts", ""), "," => " ")
     ewmax = haskey(kw, "ewmax") ? parse(Float64, kw["ewmax"]) : nothing   # ηmax of the forcing term (_ew); library default if absent
-    words, backend, config, rtol, nsteps, bs, opts, ewmax
+    probe = get(kw, "probe", "0") == "1"          # mf_*: time the matrix-free product vs the SpMV and the preconditioner application
+    restart = parse(Int, get(kw, "restart", "50"))   # mf_*: GMRES restart (PETSc's default is 30)
+    words, backend, config, rtol, nsteps, bs, opts, ewmax, probe, restart
+end
+
+"Matrix-free product vs SpMV of the assembled tangent, and one preconditioner application, at the final state (10 repetitions each)."
+function probe_operator(m)
+    nc = m.caches.nls_cache
+    mf, ns = nc.A, nc.ns
+    mf isa MatrixFreeJacobian || return
+    op = mf.op
+    A = copy(HyperFEMKernels.sparsity_pattern(op)); jacobian!(A, op, mf.x)
+    v = randn(size(mf, 2)); y = similar(v); y2 = similar(v)
+    mul!(y, mf, v); mul!(y2, A, v)
+    tmf = minimum(@elapsed(mul!(y, mf, v)) for _ in 1:10)
+    tsp = minimum(@elapsed(mul!(y2, A, v)) for _ in 1:10)
+    @printf("  probe: matrix-free product %.4f s, SpMV %.4f s (nnz %d, %.0f nnz/row), |mf v - A v| / |A v| = %.1e", tmf, tsp, nnz(A), nnz(A) / size(A, 1), norm(y - y2) / norm(y2))
+    if ns !== nothing && ns.prec !== nothing
+        ldiv!(y, ns.prec, v)
+        tp = minimum(@elapsed(ldiv!(y, ns.prec, v)) for _ in 1:10)
+        @printf(", preconditioner application %.4f s", tp)
+    end
+    println()
 end
 
 "Linear solver of a configuration word (needs the near-null space N and the trial space U)."
-function make_solver(config::String, N, rtol, U, bs, opts)
+function make_solver(config::String, N, rtol, U, bs, opts, restart=50)
     config == "lu" && return LUSolver()
     config == "mumps" && return PETScSolver(:preonly, :mumps)
     parts = split(config, "_")
+    if parts[1] == "mf"                        # S3: mf_<krylov>_<prec>[_lagN]
+        krylov = Symbol(parts[2])
+        lag = findfirst(startswith("lag"), parts)
+        every = lag === nothing ? 1 : parse(Int, parts[lag][4:end])
+        pw = String(parts[findfirst(i -> i ≥ 3 && !startswith(parts[i], "lag"), eachindex(parts))])
+        prec = pw == "blockjacobi" ? BlockJacobi() :
+               pw == "mumps" ? LaggedAssembled(PETScSolver(:preonly, :mumps); every) :
+               pw == "gamg" ? LaggedAssembled(PETScSolver(:preonly, :gamg; nullspace=N, blocksize=bs, options=opts); every) :
+               pw == "fs" ? LaggedAssembled(PETScSolver(U; ksp=:preonly, split=:additive, options=opts); every) :
+               error("unknown matrix-free preconditioner $pw (gamg, fs, mumps, blockjacobi)")
+        pw == "fs" && !(U isa MultiFieldFESpace) && error("mf_*_fs needs a multi-field case")
+        return MatrixFreeSolver(; krylov, rtol, maxiter=300, restart, preconditioner=prec)
+    end
     if parts[1] == "fs"                        # S2: fs_<split>[_<fact>_<prec>][_<ksp>][_lagN][_lublocks]
         U isa MultiFieldFESpace || error("fs_* needs a multi-field case")
         split_ = Symbol(parts[2])
@@ -70,18 +111,19 @@ function make_solver(config::String, N, rtol, U, bs, opts)
 end
 
 function main(args)
-    words, backend, config, rtol, nsteps_arg, bs, opts, ewmax = parse_args(args)
+    words, backend, config, rtol, nsteps_arg, bs, opts, ewmax, probe, restart = parse_args(args)
     t0 = time()
     t_case = @elapsed ((case, tag) = build_case(words))
     nsteps = nsteps_arg > 0 ? nsteps_arg : case.nsteps
     t_null = @elapsed (N = near_nullspace(case.U))
     ew = endswith(config, "_ew")
-    ls = make_solver(ew ? config[1:end-3] : config, N, rtol, case.U, bs, opts)
+    ls = make_solver(ew ? config[1:end-3] : config, N, rtol, case.U, bs, opts, restart)
+    startswith(config, "mf_") && (backend = CompiledBackend(jacobian=:matrixfree))   # the Newton receives the operator
     nls = NewtonRaphson(ls; case.nls_kw..., verbose=1, forcing=!ew ? nothing : ewmax === nothing ? EisenstatWalker() : EisenstatWalker(ηmax=ewmax, η0=min(1e-2, ewmax)))
     t_build = @elapsed (m = StaticNonlinearModel(case.res, case.jac, case.U, case.V, case.D; nls, backend, case.extra...))
     n = length(m.caches.x)
     @printf("%s  backend=%s  config=%s  rtol=%.0e  bs=%d  opts=\"%s\"  threads=%d  DOFs=%d  nullspace %d modes (%.2f s)  build %.1f s  rss %.2f GB\n",
-            tag, backend, config, rtol, bs, opts, Threads.nthreads(), n, size(N, 2), t_null, t_build, rss())
+            tag, backend isa Symbol ? backend : "compiled/$(backend.jacobian)", config, rtol, bs, opts, Threads.nthreads(), n, size(N, 2), t_null, t_build, rss())
     flush(stdout)
     st = @timed solve!(m; stepping=(nsteps=nsteps, maxbisec=2))
     x, flag = st.value
@@ -95,13 +137,14 @@ function main(args)
             log.t_assembly / nit, log.t_setup / nit, log.t_linear / nit, log.t_linesearch / nit, kmean, string(klast))
     nc = m.caches.nls_cache
     builds = nc.ns === nothing ? 0 : preconditioner_builds(nc.ns)
+    probe && probe_operator(m)
     resdir = normpath(joinpath(@__DIR__, "..", "results")); mkpath(resdir)
     file = joinpath(resdir, "solvers_krylov.csv")
     isfile(file) || open(file, "w") do f
         println(f, "date,case,backend,threads,dofs,config,rtol,bs,opts,nsteps,flag,nsolves,nit,klin,kmean,kmax_last,t_solve,t_assembly,t_setup,t_linear,t_linesearch,builds,alloc_gb,rss_gb,t_null,t_build,t_total")
     end
     open(file, "a") do f
-        println(f, join((Dates.today(), tag, backend, Threads.nthreads(), n, config, rtol, bs, replace(opts, " " => ";"), nsteps, flag, nsolves, nit, klin, kmean,
+        println(f, join((Dates.today(), tag, backend isa Symbol ? backend : "compiled_mf", Threads.nthreads(), n, config, rtol, bs, replace(opts, " " => ";"), nsteps, flag, nsolves, nit, klin, kmean,
                          isempty(klast) ? 0 : maximum(klast), st.time, log.t_assembly, log.t_setup, log.t_linear, log.t_linesearch,
                          builds, st.bytes / 2^30, rss(), t_null, t_build, time() - t0), ","))
     end

@@ -63,7 +63,8 @@ end
 
 function _check_functional(groups, fb, reduce)
     for g in groups
-        (g isa Group && nslots(g) == (0, 0)) || error("HyperFEMKernels: a KernelFunctional has no test or trial functions (got a form with them)")
+        g isa Group || error("HyperFEMKernels: KernelFunctional does not support skeleton integrals yet")
+        nslots(g) == (0, 0) || error("HyperFEMKernels: a KernelFunctional has no test or trial functions (got a form with them)")
     end
     if !isempty(fb)
         reduce === :sum || error("HyperFEMKernels: KernelFunctional with reduce = :$reduce needs every contribution in the kernels: " *
@@ -82,7 +83,7 @@ function update(fun::KernelFunctional, f)
     U = fun.U
     D = num_point_dims(get_triangulation(field_spaces(U)[1]))
     forms, fb = capture(f, probes(U, :unknown))
-    colors = isempty(fun.groups) ? [Int32.(1:num_cells(get_triangulation(field_spaces(U)[1])))] : fun.groups[1].colors
+    colors = [Int32.(1:num_cells(get_triangulation(field_spaces(U)[1])))]
     groups = compile_groups(forms, U, Tuple(fl.loc for fl in fun.fields), D, colors, fun.groups; linear_maps=false, fallback=fb,
                             fields=fun.fields, ndl=fun.ndl)
     _check_functional(groups, fb, fun.reduce)
@@ -106,18 +107,20 @@ function _evaluate(R::Val, fun::KernelFunctional, x::AbstractVector)
     acc = _init(R)
     for g in fun.groups
         auxd = aux_data(fun, g)
-        cells = g.colors[1]
-        work = length(cells) * g.geo.np * fun.ndl
-        nchunks = clamp(work ÷ WORK_PER_TASK, 1, min(fun.nthreads, length(cells)))
-        if nchunks == 1
-            acc = _combine(R, acc, functional_cells(R, fun, g, x, dvals, auxd, cells))
-        else
-            parts = Vector{Float64}(undef, nchunks)
-            @sync for (i, ch) in enumerate(Iterators.partition(cells, cld(length(cells), nchunks)))
-                Threads.@spawn parts[i] = functional_cells(R, fun, g, x, dvals, auxd, ch)
-            end
-            for p in parts
-                acc = _combine(R, acc, p)
+        for cells in g.colors                 # a reduction has no races: the colours are only a partition
+            isempty(cells) && continue
+            work = length(cells) * g.geo.np * fun.ndl
+            nchunks = clamp(work ÷ WORK_PER_TASK, 1, min(fun.nthreads, length(cells)))
+            if nchunks == 1
+                acc = _combine(R, acc, functional_cells(R, fun, g, x, dvals, auxd, cells))
+            else
+                parts = Vector{Float64}(undef, nchunks)
+                @sync for (i, ch) in enumerate(Iterators.partition(cells, cld(length(cells), nchunks)))
+                    Threads.@spawn parts[i] = functional_cells(R, fun, g, x, dvals, auxd, ch)
+                end
+                for p in parts
+                    acc = _combine(R, acc, p)
+                end
             end
         end
     end

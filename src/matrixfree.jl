@@ -76,26 +76,37 @@ Base.:*(mf::MatrixFreeJacobian, dx::AbstractVector) = LinearAlgebra.mul!(zeros(s
     jacobian!(mf::MatrixFreeJacobian, op, x)
 
 Gridap's `jacobian!` for an operator with `jacobian = :matrixfree`: prepares `mf` at the state `x`
-(no matrix is formed). If `op` is an `update` of the operator `mf` was built for, `mf` is rebound to
-it (its buffers are reused when the groups have the same shape, reallocated otherwise).
+(no matrix is formed). If `op` is an `update` of the operator `mf` was built for (or the operator
+of a Dirichlet projection on the increment space, with the same free dofs), `mf` is rebound to it:
+its buffers and tensor-product tables are reused when every Jacobian group keeps the tables,
+quadrature points, slots and cells of the one it replaces and the hybrid-fallback triangulations
+are the same objects (what `update` guarantees for a form of the same structure), and rebuilt
+otherwise.
 """
 function Algebra.jacobian!(mf::MatrixFreeJacobian, op::KernelOperator, x::AbstractVector)
     rebind!(mf, op)
     prepare!(mf, x)
 end
 
-"Buffer shape of a Jacobian group: skeleton or cell group, slots, points, number of cells/facets."
-group_shape(g::Group) = (false, nslots(g), g.geo.np, length(g.cellmap), map(t -> t.nn, g.tables))
-group_shape(g::SkeletonGroup) = (true, nslots(g), g.geo.np, length(g.facets), map(t -> t.nn, g.tables))
+"Whether a Jacobian group `g` can use the buffers, tensor-product tables and data built for `g0`."
+function same_group(g::Group, g0::Group)
+    g.tables === g0.tables && g.xq == g0.xq && nslots(g) == nslots(g0) && g.geo.np == g0.geo.np &&
+        length(g.cellmap) == length(g0.cellmap)
+end
+function same_group(g::SkeletonGroup, g0::SkeletonGroup)
+    g.tables === g0.tables && nslots(g) == nslots(g0) && g.geo.np == g0.geo.np && length(g.facets) == length(g0.facets)
+end
+same_group(::AbstractGroup, ::AbstractGroup) = false
 
 function rebind!(mf::MatrixFreeJacobian, op::KernelOperator)
     mf.op === op && return mf
     # spaces with the same free dofs (U, or the increment space of a Dirichlet projection): same size and element layout
     (sum(num_free_dofs, field_spaces(op.V)), sum(num_free_dofs, field_spaces(op.U))) == size(mf) && op.ndl == mf.op.ndl ||
         error("HyperFEMKernels: the MatrixFreeJacobian was built for an operator on other FE spaces")
+    fb, fb0 = op.fallback.jtrians, mf.op.fallback.jtrians
     same = length(op.jgroups) == length(mf.op.jgroups) &&
-           all(((g, g0),) -> group_shape(g) == group_shape(g0), zip(op.jgroups, mf.op.jgroups)) &&
-           (mf.Afb === nothing) == isempty(op.fallback.jtrians)
+           all(((g, g0),) -> same_group(g, g0), zip(op.jgroups, mf.op.jgroups)) &&
+           length(fb) == length(fb0) && all(t -> any(s -> s === t, fb0), fb)
     if same
         mf.op = op
     else

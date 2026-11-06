@@ -30,10 +30,13 @@ function preconditioner_update! end
 
 Preconditioner slot: the tangent is assembled (through the sparsity pattern of the operator) and
 `solver` — any Gridap `LinearSolver`: `LUSolver()`, HyperFEM's `PETScSolver`/`AMGSolver` — is set
-up on it at the first setup and then every `every` updates (Newton iterations); in between, the
-Krylov method applies the matrix-free product with the preconditioner of a previous iterate. With
-`every = 1` the preconditioner is exact at every iteration and the matrix-free product only saves
-the matrix–vector product's memory traffic. The inner solver should not lag on its own (`reuse = 1`).
+up on it at the first setup and then every `every` setups of the operator solver (one per Newton
+iteration, plus one per Dirichlet projection in HyperFEM's drivers); in between, the Krylov method
+applies the matrix-free product with the preconditioner of a previous iterate. With `every = 1` the
+preconditioner is exact at every iteration and the matrix-free product only saves the matrix–vector
+product's memory traffic. The inner solver should not lag on its own (`reuse = 1`). If the operator
+is rebound to one with another sparsity pattern (a hybrid-fallback or skeleton term appeared), the
+matrix and the inner setup are rebuilt.
 """
 struct LaggedAssembled{LS<:Algebra.LinearSolver} <: OperatorPreconditioner
     solver::LS
@@ -46,24 +49,44 @@ end
 
 mutable struct LaggedAssembledState{P<:LaggedAssembled,NS}
     prec::P
+    patterns::Vector{Sparsity}   # pattern objects known to match `A` (the operator's and, in HyperFEM's drivers, the Dirichlet projection's)
     A::SparseMatrixCSC{Float64,Int}
     ns::NS
     nupdate::Int
     nbuild::Int
 end
 
+_prepared(mf::MatrixFreeJacobian) = length(mf.x) == size(mf, 2) ||
+    error("HyperFEMKernels: the MatrixFreeJacobian has not been prepared (call jacobian!(mf, op, x) before the setup)")
+
 function preconditioner_setup(p::LaggedAssembled, mf::MatrixFreeJacobian)
+    _prepared(mf)
     op = mf.op
     A = copy(sparsity_pattern(op))
     jacobian!(A, op, mf.x)
     ns = numerical_setup_state(symbolic_setup(p.solver, A), A, mf.x)
-    LaggedAssembledState(p, A, ns, 1, 1)
+    LaggedAssembledState(p, [op.pattern], A, ns, 1, 1)
 end
 
 function preconditioner_update!(st::LaggedAssembledState, mf::MatrixFreeJacobian)
+    _prepared(mf)
     st.nupdate += 1
+    op = mf.op
+    if !any(p -> p === op.pattern, st.patterns)        # rebound to an operator with another pattern object
+        A0 = sparsity_pattern(op)
+        if size(A0) == size(st.A) && A0.colptr == st.A.colptr && A0.rowval == st.A.rowval
+            push!(st.patterns, op.pattern)             # same structure (e.g. the projection's operator): the matrix serves
+        else                                           # another structure: new matrix and setup
+            st.patterns = [op.pattern]
+            st.A = copy(A0)
+            jacobian!(st.A, op, mf.x)
+            st.ns = numerical_setup_state(symbolic_setup(st.prec.solver, st.A), st.A, mf.x)
+            st.nbuild += 1
+            return st
+        end
+    end
     if (st.nupdate - 1) % st.prec.every == 0
-        jacobian!(st.A, mf.op, mf.x)
+        jacobian!(st.A, op, mf.x)
         numerical_setup_state!(st.ns, st.A, mf.x)
         st.nbuild += 1
     end
@@ -83,9 +106,11 @@ Preconditioner slot: the inverse of the nodal block diagonal of the tangent, per
 `nc × nc` block of the components of each node of a vector field, the diagonal entry of a scalar
 one; couplings between fields are dropped). The blocks are gathered from the element tangents by a
 kernel that scatters only the diagonal blocks (no sparsity pattern, `nc² × nodes` storage) at
-every update and inverted with StaticArrays. Weak on its own; it is the Jacobi part of the
-Chebyshev–Jacobi smoother of the p-multigrid (S4). Not available with H(div) fields or skeleton
-integrals in the Jacobian.
+every update and inverted with StaticArrays (a singular block is an error). Weak on its own; it is
+the Jacobi part of the Chebyshev–Jacobi smoother of the p-multigrid (S4). Cost of an update: one
+element-tangent pass (an assembly without the scatter); computing the blocks from the tangents
+`prepare!` stores is the cheaper route left for S4. Needs the same numbering of test and trial
+dofs; not available with H(div) fields or skeleton integrals in the Jacobian.
 """
 struct BlockJacobi <: OperatorPreconditioner end
 
@@ -106,8 +131,11 @@ mutable struct BlockJacobiState
 end
 
 function preconditioner_setup(::BlockJacobi, mf::MatrixFreeJacobian)
+    _prepared(mf)
     op = mf.op
     op.signed && error("HyperFEMKernels: BlockJacobi is not available with H(div) fields yet")
+    all(fl -> fl.test_off == fl.trial_off && fl.test_ids == fl.trial_ids, op.fields) ||
+        error("HyperFEMKernels: BlockJacobi needs the same numbering of test and trial dofs")
     any(g -> g isa SkeletonGroup, op.jgroups) && error("HyperFEMKernels: BlockJacobi is not available with skeleton integrals in the Jacobian yet")
     isempty(op.fallback.jtrians) || error("HyperFEMKernels: BlockJacobi needs the whole Jacobian in the kernels (hybrid fallback present)")
     tables = op.jgroups[1].tables
@@ -125,6 +153,7 @@ function field_blocks(fl::FieldLayout, t::FieldTable)
     dofs = Int32[]
     for cell in 1:ncells, n in 1:nn
         key = ntuple(c -> fl.test_ids[t.ldof[n, c], cell], nc)
+        all(id -> id ≤ 0, key) && continue             # every component fixed: no block (block_of = 0)
         blk = get!(keys, key) do
             for c in 1:nc
                 id = key[c]
@@ -167,6 +196,7 @@ function _scatter_blocks!(fb::FieldBlocks{NC}, KeT, sc::Integer) where {NC}
     B, ldof, loc = fb.B, fb.ldof, fb.loc
     @inbounds for n in axes(ldof, 1)
         blk = fb.block_of[n, sc]
+        blk == 0 && continue
         for cj in 1:NC, ci in 1:NC
             B[ci, cj, blk] += KeT[loc+ldof[n, cj], loc+ldof[n, ci]]
         end
@@ -191,6 +221,7 @@ function _invert_blocks!(fb::FieldBlocks{NC}, blocks) where {NC}
                 dofs[i, blk] == 0 || dofs[j, blk] == 0 ? (i == j ? 1.0 : 0.0) : B[i, j, blk]
             end, NC * NC))
         Mi = inv(M)
+        all(isfinite, Mi) || error("HyperFEMKernels: BlockJacobi: singular nodal block (block $blk of a field with $NC components)")
         for j in 1:NC, i in 1:NC
             Binv[i, j, blk] = Mi[i, j]
         end
@@ -253,20 +284,29 @@ function LinearAlgebra.mul!(y::AbstractVector, A::PreconditionedOperator, v::Abs
 end
 
 """
-    eigenvalue_bounds(mf, prec; k = 10) -> (λmin, λmax)
+    eigenvalue_bounds(mf, prec; k = 10, b = randn(n)) -> (λmin, λmax)
 
-Estimate of the extreme eigenvalues (real parts of the Ritz values) of the right-preconditioned
-operator `J P⁻¹` by `k` Arnoldi iterations from a random vector (Krylov.jl's `arnoldi`); `prec` is a
-preconditioner state (`ldiv!`) or `nothing`. The Chebyshev–Jacobi smoother of the p-multigrid
-(S4) uses `λmax` and a fraction of it as its interval.
+Ritz estimates of the extreme eigenvalues (extreme real parts of the Ritz values) of the
+right-preconditioned operator `J P⁻¹` after `k` Arnoldi iterations from the vector `b` (Krylov.jl's
+`arnoldi`); `prec` is a preconditioner state (`ldiv!`) or `nothing`. Ritz values lie inside the
+spectrum's convex hull, so `λmax` is an estimate from below: the Chebyshev–Jacobi smoother of the
+p-multigrid (S4) inflates it (×1.1, as PETSc/hypre) and takes a fraction of it as the lower end.
+An exact preconditioner (`J P⁻¹ = I`) breaks the Arnoldi process down at the first step; then
+`(1.0, 1.0)` is returned.
 """
-function eigenvalue_bounds(mf::MatrixFreeJacobian, prec; k::Int=10)
+function eigenvalue_bounds(mf::MatrixFreeJacobian, prec; k::Int=10, b::AbstractVector=randn(size(mf, 1)))
     n = size(mf, 1)
     k = min(k, n)
     A = prec === nothing ? mf : PreconditionedOperator(mf, prec, zeros(n))
-    b = randn(n)
-    V, β, H = Krylov.arnoldi(A, b, k)
-    λ = eigvals(Matrix(H[1:k, 1:k]))
-    re = real.(λ)
+    V, β, H = Krylov.arnoldi(A, b, k; allow_breakdown=true)
+    # a (near) breakdown at step j — the Krylov space is invariant — truncates the Hessenberg matrix to j × j
+    j = k
+    for i in 1:k-1
+        if abs(H[i+1, i]) ≤ 1e-8 * max(1.0, maximum(abs, view(H, 1:i, 1:i)))
+            j = i
+            break
+        end
+    end
+    re = real.(eigvals(Matrix(H[1:j, 1:j])))
     (minimum(re), maximum(re))
 end

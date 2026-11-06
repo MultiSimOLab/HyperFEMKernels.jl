@@ -45,7 +45,7 @@ import Gridap.Helpers: first_and_tail
 
 RuntimeGeneratedFunctions.init(@__MODULE__)
 
-export KernelOperator, update, check, allocations, MatrixFreeJacobian, prepare!
+export KernelOperator, update, check, allocations, MatrixFreeJacobian, prepare!, sparsity_pattern, nonzero_positions
 export MatrixFreeSolver, LaggedAssembled, BlockJacobi, eigenvalue_bounds
 export KernelFunctional
 export KernelState, KernelUpdater, update_states!

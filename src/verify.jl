@@ -11,7 +11,7 @@ function check(res, jac, U, V, x::AbstractVector; op=KernelOperator(res, jac, U,
     bg = Algebra.residual(gop, x)
     Ag = Algebra.jacobian(gop, x)
     bk = Algebra.residual(op, x)
-    Ak = Algebra.jacobian(op, x)
+    Ak = op.jacobian === :matrixfree ? jacobian!(copy(sparsity_pattern(op)), op, x) : Algebra.jacobian(op, x)
     rel(a, b) = norm(b) == 0 ? norm(a - b) : norm(a - b) / norm(b)
     (res=rel(bk, bg), jac=rel(Ak, Ag))
 end

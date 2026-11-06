@@ -542,7 +542,9 @@ function Algebra.residual!(b::AbstractVector, op::KernelOperator, x::AbstractVec
 end
 
 function Algebra.jacobian!(A::SparseMatrixCSC, op::KernelOperator, x::AbstractVector)
-    build_pattern!(op)      # positions (cells and facets) exist even if `A` was not allocated by `op`
+    A0 = sparsity_pattern(op)      # positions (cells and facets) exist even if `A` was not allocated by `op`
+    size(A) == size(A0) && nnz(A) == nnz(A0) ||
+        error("HyperFEMKernels: the matrix ($(size(A)), $(nnz(A)) nonzeros) does not have the sparsity pattern of the operator ($(size(A0)), $(nnz(A0)))")
     fill!(nonzeros(A), 0.0)
     dvals = [get_dirichlet_dof_values(s) for s in field_spaces(op.U)]
     for g in op.jgroups

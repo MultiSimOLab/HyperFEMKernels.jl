@@ -43,7 +43,11 @@ backend for its drivers (`backend = :compiled`).
   run-time parameters: `update` with new values reuses tables, sparsity pattern, colouring and the
   compiled code.
 - **Matrix-free Jacobian.** `MatrixFreeJacobian` applies `J(x)·dx` without assembling, with sum
-  factorisation on quadrilaterals and hexahedra.
+  factorisation on quadrilaterals and hexahedra; `KernelOperator(…; jacobian = :matrixfree)` hands
+  it to a Newton solver and `MatrixFreeSolver` (Krylov.jl) solves the tangent systems on it, with
+  preconditioners that assemble every k iterations (`LaggedAssembled`) or never (`BlockJacobi`).
+- **Scalar functionals.** `KernelFunctional` evaluates energies and pointwise extrema (the injectivity
+  step of a line search) with the same kernels, without assembling.
 - **Internal variables.** Gridap's `update_state!` (visco-elasticity, plasticity, …) executed by
   threaded kernels with the same updater and arguments; `KernelState` stores the states as a dense
   `np × ncells` matrix.
@@ -199,7 +203,44 @@ y  = mf * dx                              # J(x)·dx, or mul!(y, mf, dx), e.g. i
 ```
 
 On quadrilaterals and hexahedra of order 2 and higher the matrix-free product is as fast as or
-faster than a sparse matrix–vector product, with about a third of the memory.
+faster than a sparse matrix–vector product, with about a third of the memory (our measurement, Mac
+M-series, Julia 1.13, 6 threads, Q2 electro-mechanics: 0.8 ms vs 4.1 ms at 57k dofs, 15 ms vs 77 ms
+at 974k; on P1 tetrahedra and P2 triangles the dense path is slower than the sparse product).
+
+### Matrix-free Newton
+
+With `jacobian = :matrixfree` the operator gives a Newton solver the `MatrixFreeJacobian` in place
+of the matrix (`allocate_jacobian`/`jacobian!` prepare it, the sparsity pattern is never built unless
+a preconditioner assembles), and `MatrixFreeSolver` — a Gridap `LinearSolver` — solves the tangent
+systems with Krylov.jl's GMRES, FGMRES or CG on the operator:
+
+```julia
+op  = KernelOperator(res, jac, U, V; jacobian = :matrixfree)
+ls  = MatrixFreeSolver(; krylov = :gmres, rtol = 1e-8,
+                        preconditioner = LaggedAssembled(LUSolver(); every = 3))
+# in a Newton loop: A = allocate_jacobian(op, x); jacobian!(A, op, x); ns = numerical_setup(symbolic_setup(ls, A), A); solve!(dx, ns, b)
+```
+
+Preconditioner slots: `LaggedAssembled(solver; every = k)` assembles the tangent every `k` Newton
+iterations and sets up any Gridap solver on it (LU, HyperFEM's `PETScSolver`/`AMGSolver`, MUMPS);
+in between, the exact tangent is applied matrix-free, so the Newton trajectory is the exact one
+while the factorisations or AMG hierarchies are paid `1/k` of the time (our measurement, same
+machine: Q2 electro-mechanics, 218k dofs, MUMPS as the slot's solver, ×5 on the whole `solve!` with
+`k = 3` and the same 20 Newton iterations as MUMPS at every iteration).
+`BlockJacobi()` is the nodal block diagonal gathered without a matrix (the smoother of the coming
+p-multigrid). With HyperFEM, `StaticNonlinearModel(…; backend = CompiledBackend(jacobian = :matrixfree),
+nls = NewtonRaphson(MatrixFreeSolver(…)))` runs this inside the drivers (line searches included).
+
+### Scalar functionals
+
+```julia
+E   = KernelFunctional(u -> ∫(Ψ ∘ (F ∘ ∇(u)'))dΩ, U)                 # energy: E(x) = Σ ∫ Ψ
+α   = KernelFunctional(u -> ∫(g ∘ (∇(u)', ∇(duh)'))dΩ, U; reduce = :min)   # pointwise minimum
+```
+
+`reduce = :sum` integrates; `:min`/`:max` return the extremum of the integrand over the quadrature
+points (no weights). `duh` is an FE function whose nodal values are read at every evaluation, so a
+line search updates the increment in place without recompiling.
 
 ### Internal variables
 

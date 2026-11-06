@@ -40,6 +40,9 @@ end
             if prec isa LaggedAssembled
                 @test its ≤ 2                              # exact (right) preconditioner at the setup state
                 @test HK.preconditioner_builds(ns) == 1
+                # Krylov.jl may stop on the Arnoldi breakdown of an exact preconditioner without its residual test:
+                # the decision is then taken on the true residual (rnorm computed exactly in that case)
+                @test isfinite(ns.rnorm) == !ns.workspace.stats.solved
             elseif prec isa BlockJacobi
                 @test HK.preconditioner_builds(ns) == 1
             else
@@ -57,6 +60,12 @@ end
     @test_throws ArgumentError MatrixFreeSolver(; maxiter=0)
     @test_throws ArgumentError LaggedAssembled(LUSolver(); every=0)
     @test_throws ErrorException symbolic_setup(MatrixFreeSolver(), t.A)
+    # the operator must be prepared before the setup (the slots assemble/gather at the state)
+    op0 = KernelOperator(p.res, p.jac, p.U, p.V; jacobian=:matrixfree)
+    mf0 = allocate_jacobian(op0, randx(p.U))
+    @test_throws ErrorException numerical_setup(symbolic_setup(MatrixFreeSolver(), mf0), mf0)
+    @test_throws ErrorException HK.preconditioner_setup(LaggedAssembled(LUSolver()), mf0)
+    @test_throws ErrorException HK.preconditioner_setup(BlockJacobi(), mf0)
     # too few iterations: reported, not thrown
     s = MatrixFreeSolver(; rtol=1e-10, maxiter=3, restart=3)
     dx, ns = mf_solve(s, t.mf, t.b)
@@ -103,8 +112,20 @@ end
     @test its[1] ≤ 2 && its[4] ≤ 2 && all(>(0), its)                     # exact where rebuilt
 end
 
+"Elasticity with one component fixed on some faces (partially constrained nodes)."
+function elasticity_masked(; n=(3, 2, 2))
+    model = CartesianDiscreteModel((0, 1, 0, 1, 0, 1), n)
+    Ω = Triangulation(model); dΩ = Measure(Ω, 4)
+    V = TestFESpace(model, ReferenceFE(lagrangian, VectorValue{3,Float64}, 2), dirichlet_tags=[21, 22, 25],
+                    dirichlet_masks=[(true, true, true), (true, false, false), (false, false, true)])
+    U = TrialFESpace(V, [x -> VectorValue(0.0, 0.0, 0.0), x -> VectorValue(0.02, 0.0, 0.0), x -> VectorValue(0.0, 0.0, 0.01)])
+    res(u, v) = ∫(∇(v)' ⊙ (P_svk ∘ (Fk ∘ (∇(u)'))))dΩ
+    jac(u, du, v) = ∫(∇(v)' ⊙ (dP_svk ∘ (Fk ∘ (∇(u)'), ∇(du)')))dΩ
+    (; model, Ω, dΩ, U, V, res, jac)
+end
+
 @testset "BlockJacobi: blocks equal the inverse of the assembled nodal blocks (free components)" begin
-    for prob in (elasticity_3d(; order=2), coupled_3d(), poisson_2d(; order=2))
+    for prob in (elasticity_3d(; order=2), coupled_3d(), poisson_2d(; order=2), elasticity_masked())
         t = mf_setup(prob)
         st = HK.preconditioner_setup(BlockJacobi(), t.mf)
         ncheck = 0
@@ -120,6 +141,15 @@ end
             end
         end
         @test ncheck > 0
+        # nodes with every component fixed have no block; partially fixed ones keep their free components
+        for fb in st.fields
+            @test all(blk -> any(!=(0), fb.dofs[:, blk]), 1:size(fb.dofs, 2))
+        end
+        # the extraction is deterministic: one thread or many give the same blocks (no shared nodes within a colour)
+        op1 = KernelOperator(prob.res, prob.jac, prob.U, prob.V; jacobian=:matrixfree, nthreads=1)
+        mf1 = jacobian(op1, t.x)
+        st1 = HK.preconditioner_setup(BlockJacobi(), mf1)
+        @test all(((a, b),) -> a.B == b.B && a.dofs == b.dofs, zip(st1.fields, st.fields))
         # ldiv! applies the inverse blocks: on a block-diagonal rhs it is exact
         r = randn(t.n); y = zeros(t.n)
         ldiv!(y, st, r)
@@ -156,6 +186,14 @@ end
     λmin0, λmax0 = eigenvalue_bounds(t.mf, nothing; k=min(30, t.n))
     λA = maximum(real, eigvals(Matrix(t.A)))
     @test 0.9λA ≤ λmax0 ≤ 1.1λA
+    # deterministic with a given start vector; an exact preconditioner (J P⁻¹ = I) breaks down → (1, 1)
+    b0 = randn(t.n)
+    @test eigenvalue_bounds(t.mf, st; k=10, b=b0) == eigenvalue_bounds(t.mf, st; k=10, b=b0)
+    stlu = HK.preconditioner_setup(LaggedAssembled(LUSolver()), t.mf)
+    λe = eigenvalue_bounds(t.mf, stlu; k=10)
+    @test all(isfinite, λe)
+    @test λe[1] ≈ 1.0 atol = 1e-6
+    @test λe[2] ≈ 1.0 atol = 1e-6
 end
 
 @testset "a Newton loop with the matrix-free solver follows the LU trajectory (nonlinear elasticity)" begin

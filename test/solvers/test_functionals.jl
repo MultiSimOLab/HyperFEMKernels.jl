@@ -47,7 +47,14 @@ end
     fun2 = update(fun, en(1.0))
     @test fun2(x) ≈ lazy_sum(en(1.0), e.U, x) rtol = 1e-12
     @test fun2.groups[1].tables === fun.groups[1].tables && fun2.groups[1].geo === fun.groups[1].geo
+    @test fun2.groups[1].pf.expr == fun.groups[1].pf.expr            # the load factor is a parameter: same generated code
     @test length(fun.groups) == 2 && length(fun.fallback) == 0
+    # a functional whose first term is the boundary one, updated with a volume term: every cell integrated
+    enb(Λ) = u -> ∫(-Λ * (u ⋅ t))dΓ + ∫(Ψ_svk ∘ (Fk ∘ (∇(u)')))dΩe
+    fb0 = KernelFunctional(u -> ∫(-0.5 * (u ⋅ t))dΓ, e.U)
+    fb1 = update(fb0, enb(0.5))
+    @test fb1(x) ≈ lazy_sum(enb(0.5), e.U, x) rtol = 1e-12
+    @test fb1(x) ≈ fun(x) rtol = 1e-12
 end
 
 @testset "pointwise extrema (reduce = :min / :max) with an increment stored in an FE function" begin
@@ -82,11 +89,10 @@ end
 @testset "errors and allocations" begin
     p = poisson_2d(; order=2); dΩp = p.dΩ
     @test_throws ArgumentError KernelFunctional(u -> ∫(u * u)dΩp, p.U; reduce=:mean)
-    # a form the kernels cannot read (here: wrong arity) goes to Gridap with :sum, and is refused with :min
+    # a functional called with the wrong arguments is the caller's error, not a fallback to Gridap
     bad(u, v) = ∫(u * v)dΩp
-    @test_throws ErrorException KernelFunctional(bad, p.U; reduce=:min)
-    fb = @test_logs (:warn, r"hybrid fallback") KernelFunctional(bad, p.U)
-    @test fb.fallback == [:all] && isempty(fb.groups)
+    @test_throws MethodError KernelFunctional(bad, p.U; reduce=:min)
+    @test_throws MethodError KernelFunctional(bad, p.U)
     x = randx(p.U)
     fun = KernelFunctional(u -> ∫(0.5 * (∇(u) ⋅ ∇(u)))dΩp, p.U)
     fun(x)

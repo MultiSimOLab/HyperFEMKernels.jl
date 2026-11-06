@@ -73,8 +73,10 @@ function capture(f, args...)
         f(args...)
     catch err
         # the weak form itself failed on the probes (e.g. ∇(u*u), jump/mean on a skeleton):
-        # every contribution to Gridap (which raises the same error if the form is wrong)
+        # every contribution to Gridap (which raises the same error if the form is wrong); a call
+        # of `f` itself with the wrong arguments is the caller's error, not a fallback
         err isa InterruptException && rethrow()
+        err isa MethodError && err.f === f && rethrow()
         push!(fallback, (:all, sprint(showerror, err)))
         return forms, fallback
     end
