@@ -18,6 +18,7 @@ Newton method on the matrix-free Jacobian with Krylov.jl and the preconditioner 
 module HyperFEMKernels
 
 using LinearAlgebra
+using LinearAlgebra: BLAS
 using SparseArrays
 using StaticArrays
 using ForwardDiff

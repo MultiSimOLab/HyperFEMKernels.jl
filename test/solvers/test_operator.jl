@@ -18,6 +18,7 @@ const TOL_OP = 1e-11   # summation order of the matrix-free product differs from
         Aref = jacobian(ref, x)
         @test reldiff(A * dx, Aref * dx) < TOL_OP
         @test op.pattern.A0 === nothing                                     # still none after jacobian!
+        @test A.x == x && A.x !== x                                          # the state is kept as a copy
         # new state: jacobian! re-prepares, no stale tangents
         x2 = randx(prob.U)
         jacobian!(A, op, x2)

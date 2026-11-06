@@ -13,7 +13,7 @@
 
 """
     MatrixFreeSolver(; krylov = :gmres, rtol = 1e-8, atol = 0.0, maxiter = 500, restart = 50,
-                     preconditioner = nothing, vector = Vector{Float64}, verbose = 0)
+                     preconditioner = nothing, vector = Vector{Float64}, blas_threads = 1, verbose = 0)
 
 Gridap `LinearSolver` for a `KernelOperator` with `jacobian = :matrixfree`: a Krylov method of
 Krylov.jl (`:gmres`, `:fgmres`, `:cg`) applied to the `MatrixFreeJacobian` returned by
@@ -22,6 +22,11 @@ Krylov.jl (`:gmres`, `:fgmres`, `:cg`) applied to the `MatrixFreeJacobian` retur
 `‖b − J x‖ ≤ atol + rtol ‖b‖`; `restart` is the GMRES memory; `maxiter` counts all iterations.
 `:cg` applies the preconditioner on the left (symmetric form; the monitored norm is then the
 preconditioned one, as in Krylov.jl). `vector` is the vector type of the Krylov workspace.
+`blas_threads`: BLAS threads during the solve (restored afterwards; `nothing` leaves the global
+setting). The Krylov method is a sequence of BLAS-1 calls on the whole vector (dots and axpys of
+the Gram–Schmidt orthogonalisation), each of which pays the OpenBLAS thread fork: with the default
+thread count GMRES costs ×3 more per iteration than with one thread (measured, 45k dofs), while
+the operator and the preconditioner use Julia's threads.
 """
 struct MatrixFreeSolver{P,S} <: Algebra.LinearSolver
     krylov::Symbol
@@ -30,16 +35,19 @@ struct MatrixFreeSolver{P,S} <: Algebra.LinearSolver
     maxiter::Int
     restart::Int
     preconditioner::P
+    blas_threads::Int        # 0 = leave the global setting
     verbose::Int
 end
 
 function MatrixFreeSolver(; krylov::Symbol=:gmres, rtol::Real=1e-8, atol::Real=0.0, maxiter::Int=500, restart::Int=50,
-                          preconditioner=nothing, vector::Type=Vector{Float64}, verbose::Int=0)
+                          preconditioner=nothing, vector::Type=Vector{Float64}, blas_threads::Union{Nothing,Int}=1, verbose::Int=0)
     krylov in (:gmres, :fgmres, :cg) || throw(ArgumentError("HyperFEMKernels: MatrixFreeSolver: krylov must be :gmres, :fgmres or :cg (got :$krylov)"))
     _check_rtol(rtol)
     atol ≥ 0 || throw(ArgumentError("HyperFEMKernels: MatrixFreeSolver: atol must be ≥ 0"))
     maxiter > 0 && restart > 0 || throw(ArgumentError("HyperFEMKernels: MatrixFreeSolver: maxiter and restart must be positive"))
-    MatrixFreeSolver{typeof(preconditioner),vector}(krylov, Float64(rtol), Float64(atol), maxiter, restart, preconditioner, verbose)
+    blas_threads === nothing || blas_threads ≥ 1 || throw(ArgumentError("HyperFEMKernels: MatrixFreeSolver: blas_threads must be ≥ 1 or nothing"))
+    MatrixFreeSolver{typeof(preconditioner),vector}(krylov, Float64(rtol), Float64(atol), maxiter, restart, preconditioner,
+                                                    blas_threads === nothing ? 0 : blas_threads, verbose)
 end
 
 _check_rtol(r) = (0 ≤ r < 1 || throw(ArgumentError("HyperFEMKernels: the relative tolerance must be in [0, 1) (got $r)")); Float64(r))
@@ -96,12 +104,18 @@ function Algebra.solve!(x::AbstractVector, ns::MatrixFreeSolverNS, b::AbstractVe
     ldiv = P !== nothing
     N = ldiv ? P : LinearAlgebra.I
     kw = (; atol=s.atol, rtol=ns.rtol, itmax=s.maxiter, verbose=s.verbose)
-    if s.krylov === :gmres
-        Krylov.gmres!(ws, ns.mf, b; N, ldiv, restart=true, kw...)
-    elseif s.krylov === :fgmres
-        Krylov.fgmres!(ws, ns.mf, b; N, ldiv, restart=true, kw...)
-    else
-        Krylov.cg!(ws, ns.mf, b; M=N, ldiv, kw...)
+    nblas = BLAS.get_num_threads()
+    s.blas_threads > 0 && BLAS.set_num_threads(s.blas_threads)
+    try
+        if s.krylov === :gmres
+            Krylov.gmres!(ws, ns.mf, b; N, ldiv, restart=true, kw...)
+        elseif s.krylov === :fgmres
+            Krylov.fgmres!(ws, ns.mf, b; N, ldiv, restart=true, kw...)
+        else
+            Krylov.cg!(ws, ns.mf, b; M=N, ldiv, kw...)
+        end
+    finally
+        s.blas_threads > 0 && BLAS.set_num_threads(nblas)
     end
     copyto!(x, ws.x)
     ns.iters = ws.stats.niter

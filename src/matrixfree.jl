@@ -33,7 +33,8 @@ mutable struct MatrixFreeJacobian{TP,GD,BF}
     bufs::BF                 # per Jacobian group: one set of apply buffers per task (no allocation in `mul!`)
     nthreads::Int
     Afb::Union{Nothing,SparseMatrixCSC{Float64,Int}}   # Gridap-assembled part (hybrid fallback)
-    x::AbstractVector        # state of the last `prepare!` (read by the preconditioner slots)
+    x::Vector{Float64}       # copy of the state of the last `prepare!` (read by the preconditioner slots; a copy, so that
+                             # the Newton updating its state in place does not make it disagree with the tangents)
 end
 
 function MatrixFreeJacobian(op::KernelOperator)
@@ -116,7 +117,8 @@ Algebra.symbolic_setup(ls::Algebra.LinearSolver, ::MatrixFreeJacobian) =
 "Evaluate tangents and geometry at the state `x` (once per Newton iteration)."
 function prepare!(mf::MatrixFreeJacobian, x::AbstractVector)
     op = mf.op
-    mf.x = x
+    length(mf.x) == length(x) || (mf.x = zeros(length(x)))
+    copyto!(mf.x, x)
     dvals = [get_dirichlet_dof_values(s) for s in field_spaces(op.U)]
     for (gi, g) in enumerate(op.jgroups)
         auxd = aux_data(op, g)
