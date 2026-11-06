@@ -135,7 +135,7 @@ end
     res2((u, W), (v, w)) = p.res((u, W), (v, w)) + ∫(0.3 * (w ⋅ W))p.dΩ
     jac2((u, W), (du, dW), (v, w)) = p.jac((u, W), (du, dW), (v, w)) + ∫(0.3 * (w ⋅ dW))p.dΩ
     op2 = HK.update(op, res2, jac2)
-    @test op2.A0 === op.A0 && op2.nzpos === op.nzpos
+    @test op2.pattern === op.pattern
     @test op2.jgroups[1].tables === op.jgroups[1].tables
     c = check(res2, jac2, p.U, p.V, randx(p.U); op=op2)
     @test c.res < TOL && c.jac < TOL

@@ -41,15 +41,15 @@ end
     x = randx(p.U)
     Ak = Algebra.jacobian(op, x)
     Ag = Algebra.jacobian(gridap_op((; s.res, s.jac, p.U, p.V)), x)
-    @test nnz(op.A0) > nnz(op0.A0) && reldiff(Ak, Ag) < TOL
+    @test nnz(HK.sparsity_pattern(op)) > nnz(HK.sparsity_pattern(op0)) && reldiff(Ak, Ag) < TOL
     @test HK.fallback_pattern(op.fallback, p.U, p.V, s.jac) === nothing       # nothing assembled by Gridap
     sd = op.skel[1]
     ndl = op.ndl
     @test size(sd.cells) == (2, num_cells(s.Λ)) && size(sd.nzpos) == ((2ndl)^2, num_cells(s.Λ))
     # every stored position points to the (row, column) of the facet entry
-    rv = rowvals(op.A0); cp = SparseArrays.getcolptr(op.A0)
-    colof = zeros(Int, nnz(op.A0))
-    for c in 1:size(op.A0, 2), q in cp[c]:cp[c+1]-1
+    rv = rowvals(HK.sparsity_pattern(op)); cp = SparseArrays.getcolptr(HK.sparsity_pattern(op))
+    colof = zeros(Int, nnz(HK.sparsity_pattern(op)))
+    for c in 1:size(HK.sparsity_pattern(op), 2), q in cp[c]:cp[c+1]-1
         colof[q] = c
     end
     fl = op.fields[1]
@@ -221,7 +221,7 @@ end
     r1, j1 = mk(1.0, pu.dΩ, dΛu); r2, j2 = mk(2.5, pu.dΩ, dΛu)
     op1 = KernelOperator(r1, j1, pu.U, pu.V)
     op2 = HK.update(op1, r2, j2)
-    @test op2.A0 === op1.A0 && op2.nzpos === op1.nzpos
+    @test op2.pattern === op1.pattern
     @test length(op2.skel) == 1 && op2.skel[1].nzpos === op1.skel[1].nzpos      # positions reused
     @test same_code_sk(op1, op2)
     # the tables of the facet classes are reused, not rebuilt (the Jacobian groups share those of the residual)
@@ -240,7 +240,7 @@ end
     @test c.res < TOL && c.jac < TOL
     # from an operator without skeleton: pattern recomputed (cross blocks), still equal to Gridap
     op3 = HK.update(KernelOperator(pu.res, pu.jac, pu.U, pu.V), r2, j2)
-    @test op3.A0 !== op1.A0 && nnz(op3.A0) == nnz(op1.A0)
+    @test op3.pattern !== op1.pattern && nnz(HK.sparsity_pattern(op3)) == nnz(HK.sparsity_pattern(op1))
     c3 = check(r2, j2, pu.U, pu.V, randx(pu.U); op=op3)
     @test c3.res < TOL && c3.jac < TOL
     # the old operator keeps its own positions
@@ -256,7 +256,7 @@ end
     @test nofallback_sk(op)
     @test any(g -> g isa HK.SkeletonGroup, op.rgroups) && nskgroups(op) == 0
     @test length(op.skel) == 1 && isempty(op.skel[1].nzpos)              # no Jacobian group: the facets are not in the pattern
-    @test nnz(op.A0) == nnz(KernelOperator(e.res, e.jac, e.U, e.V).A0)
+    @test nnz(HK.sparsity_pattern(op)) == nnz(HK.sparsity_pattern(KernelOperator(e.res, e.jac, e.U, e.V)))
     x = randx(e.U)
     c = check(res, jac, e.U, e.V, x; op)
     @test c.res < TOL && c.jac < TOL

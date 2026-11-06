@@ -26,12 +26,15 @@ state `x`, then use `mul!`/`*` (e.g. inside an iterative solver). Sum factorisat
 fields on quadrilaterals/hexahedra with tensor-product quadrature; other fields use the dense
 shape-function weights.
 """
-mutable struct MatrixFreeJacobian{OP,TP,GD}
-    op::OP
+mutable struct MatrixFreeJacobian{TP,GD,BF}
+    op::KernelOperator       # rebound by `jacobian!` when the operator is `update`d (same structure)
     tps::TP                  # per Jacobian group: tuple of TPTable or nothing per field
     data::GD                 # per Jacobian group: GroupData
+    bufs::BF                 # per Jacobian group: one set of apply buffers per task (no allocation in `mul!`)
     nthreads::Int
     Afb::Union{Nothing,SparseMatrixCSC{Float64,Int}}   # Gridap-assembled part (hybrid fallback)
+    x::Vector{Float64}       # copy of the state of the last `prepare!` (read by the preconditioner slots; a copy, so that
+                             # the Newton updating its state in place does not make it disagree with the tangents)
 end
 
 function MatrixFreeJacobian(op::KernelOperator)
@@ -53,7 +56,8 @@ function MatrixFreeJacobian(op::KernelOperator)
         end
     end
     Afb = isempty(op.fallback.jtrians) ? nothing : fallback_pattern(op.fallback, op.U, op.V, op.jac)
-    MatrixFreeJacobian(op, Tuple(tps), Tuple(data), op.nthreads, Afb)
+    bufs = map((g, tp) -> [apply_buffers(g, tp, op.ndl) for _ in 1:op.nthreads], Tuple(op.jgroups), Tuple(tps))
+    MatrixFreeJacobian(op, Tuple(tps), Tuple(data), bufs, op.nthreads, Afb, Float64[])
 end
 
 nslots(::Group{NSV,NSU}) where {NSV,NSU} = (NSV, NSU)
@@ -61,14 +65,71 @@ nslots(::SkeletonGroup{NSV,NSU}) where {NSV,NSU} = (NSV, NSU)
 group_dim(::Group{NSV,NSU,PF,TT,AUX,SV,SU,D}) where {NSV,NSU,PF,TT,AUX,SV,SU,D} = D
 group_dim(::SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D}) where {NSV,NSU,PF,TT,AUX,SV,SU,D} = D
 
-Base.size(mf::MatrixFreeJacobian) = size(mf.op.A0)
-Base.size(mf::MatrixFreeJacobian, i::Int) = size(mf.op.A0, i)
+Base.size(mf::MatrixFreeJacobian) = (sum(num_free_dofs, field_spaces(mf.op.V)), sum(num_free_dofs, field_spaces(mf.op.U)))
+Base.size(mf::MatrixFreeJacobian, i::Int) = size(mf)[i]
 Base.eltype(::MatrixFreeJacobian) = Float64
+Algebra.allocate_in_domain(mf::MatrixFreeJacobian) = zeros(Float64, size(mf, 2))
+Algebra.allocate_in_range(mf::MatrixFreeJacobian) = zeros(Float64, size(mf, 1))
 Base.:*(mf::MatrixFreeJacobian, dx::AbstractVector) = LinearAlgebra.mul!(zeros(size(mf, 1)), mf, dx)
+
+"""
+    jacobian!(mf::MatrixFreeJacobian, op, x)
+
+Gridap's `jacobian!` for an operator with `jacobian = :matrixfree`: prepares `mf` at the state `x`
+(no matrix is formed). If `op` is an `update` of the operator `mf` was built for (or the operator
+of a Dirichlet projection on the increment space, with the same free dofs), `mf` is rebound to it:
+its buffers and tensor-product tables are reused when every Jacobian group keeps the tables,
+quadrature points, slots and cells of the one it replaces and the hybrid-fallback triangulations
+are the same objects (what `update` guarantees for a form of the same structure), and rebuilt
+otherwise.
+"""
+function Algebra.jacobian!(mf::MatrixFreeJacobian, op::KernelOperator, x::AbstractVector)
+    rebind!(mf, op)
+    prepare!(mf, x)
+end
+
+"Whether a Jacobian group `g` can use the buffers, tensor-product tables and data built for `g0`."
+function same_group(g::Group, g0::Group)
+    g.tables === g0.tables && g.xq == g0.xq && nslots(g) == nslots(g0) && g.geo.np == g0.geo.np &&
+        length(g.cellmap) == length(g0.cellmap)
+end
+function same_group(g::SkeletonGroup, g0::SkeletonGroup)
+    g.tables === g0.tables && nslots(g) == nslots(g0) && g.geo.np == g0.geo.np && length(g.facets) == length(g0.facets)
+end
+same_group(::AbstractGroup, ::AbstractGroup) = false
+
+function rebind!(mf::MatrixFreeJacobian, op::KernelOperator)
+    mf.op === op && return mf
+    # spaces with the same free dofs (U, or the increment space of a Dirichlet projection): same size and element layout
+    (sum(num_free_dofs, field_spaces(op.V)), sum(num_free_dofs, field_spaces(op.U))) == size(mf) && op.ndl == mf.op.ndl ||
+        error("HyperFEMKernels: the MatrixFreeJacobian was built for an operator on other FE spaces")
+    fb, fb0 = op.fallback.jtrians, mf.op.fallback.jtrians
+    same = length(op.jgroups) == length(mf.op.jgroups) &&
+           all(((g, g0),) -> same_group(g, g0), zip(op.jgroups, mf.op.jgroups)) &&
+           length(fb) == length(fb0) && all(t -> any(s -> s === t, fb0), fb)
+    if same
+        mf.op = op
+    else
+        new = MatrixFreeJacobian(op)
+        mf.op, mf.tps, mf.data, mf.bufs, mf.Afb = new.op, new.tps, new.data, new.bufs, new.Afb
+    end
+    mf
+end
+
+function Algebra.residual_and_jacobian!(b::AbstractVector, mf::MatrixFreeJacobian, op::KernelOperator, x::AbstractVector)
+    residual!(b, op, x)
+    jacobian!(mf, op, x)
+    (b, mf)
+end
+
+Algebra.symbolic_setup(ls::Algebra.LinearSolver, ::MatrixFreeJacobian) =
+    error("HyperFEMKernels: $(nameof(typeof(ls))) needs an assembled matrix; with jacobian = :matrixfree use a solver that applies the operator (MatrixFreeSolver), or jacobian = :assembled")
 
 "Evaluate tangents and geometry at the state `x` (once per Newton iteration)."
 function prepare!(mf::MatrixFreeJacobian, x::AbstractVector)
     op = mf.op
+    length(mf.x) == length(x) || (mf.x = zeros(length(x)))
+    copyto!(mf.x, x)
     dvals = [get_dirichlet_dof_values(s) for s in field_spaces(op.U)]
     for (gi, g) in enumerate(op.jgroups)
         auxd = aux_data(op, g)
@@ -158,10 +219,11 @@ function LinearAlgebra.mul!(y::AbstractVector, mf::MatrixFreeJacobian, dx::Abstr
     fill!(y, 0.0)
     op = mf.op
     for (gi, g) in enumerate(op.jgroups)
+        bufs = mf.bufs[gi]
         for color in g.colors
             nchunks = clamp(length(color) ÷ 16, 1, mf.nthreads)
-            @sync for ch in Iterators.partition(color, cld(length(color), nchunks))
-                Threads.@spawn apply_cells!(y, mf.data[gi], mf.tps[gi], g, op, dx, ch)
+            @sync for (i, ch) in enumerate(Iterators.partition(color, cld(length(color), nchunks)))
+                Threads.@spawn apply_cells!(y, mf.data[gi], mf.tps[gi], g, op, dx, ch, bufs[i])
             end
         end
     end
@@ -214,8 +276,7 @@ end
 end
 
 function apply_cells!(y, gds::Tuple{GroupData{D},GroupData{D}}, tps, g::SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D,NF2}, op, dx,
-                      lfacets) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF2}
-    b = apply_buffers(g, tps, op.ndl)
+                      lfacets, b) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF2}
     tables, locs = g.tables, g.locs
     np = g.geo.np
     ndl = op.ndl
@@ -249,8 +310,7 @@ function apply_cells!(y, gds::Tuple{GroupData{D},GroupData{D}}, tps, g::Skeleton
     nothing
 end
 
-function apply_cells!(y, gd::GroupData{D}, tps, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D}, op, dx, cells) where {NSV,NSU,PF,TT,AUX,SV,SU,D}
-    b = apply_buffers(g, tps, op.ndl)
+function apply_cells!(y, gd::GroupData{D}, tps, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D}, op, dx, cells, b) where {NSV,NSU,PF,TT,AUX,SV,SU,D}
     tables, locs = g.tables, g.locs
     np = g.geo.np
     fields = op.fields
