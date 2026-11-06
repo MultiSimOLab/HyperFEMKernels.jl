@@ -71,7 +71,7 @@ end
     ap = HK.generate_apply(maps, ST, 3)
     vals = HK.map_values(maps, (1.0, 0.5))
     @test vals == (2.0, -1.0, 0.5, 2.0)
-    lf = HK.LinearForm{Nothing,Tuple{},Tuple{Float64,Float64},ST,typeof(ap),typeof(vals)}(nothing, (), (1.0, 0.5), maps, ap, vals, :())
+    lf = HK.LinearForm{Nothing,Tuple{},Tuple{Float64,Float64},ST,typeof(ap),typeof(vals)}(nothing, (), (1.0, 0.5), maps, ap, vals, :(), HK.LinearTerm[], :res)
     out = HK.apply_maps(lf, (VectorValue(3.0, 4.0), 7.0), Val(3))
     @test out ≈ SVector(6.0, 3.5 + 2.0, -4.0)
 end

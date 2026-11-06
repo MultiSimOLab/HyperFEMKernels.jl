@@ -112,6 +112,7 @@ struct SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D,NF2,LF,JF,UU} <: AbstractGroup
     facets::Vector{Int32}          # facets of the class (indices in the skeleton)
     skel::SkeletonData
     colors::Vector{Vector{Int32}}  # facets of the class per colour (local indices, 1:length(facets))
+    wkey::UInt                     # identity of the quadrature weights of its terms (`rebind`)
 end
 
 function SkeletonGroup(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int, ndl::Int, skel::SkeletonData, cls,
@@ -151,7 +152,16 @@ function SkeletonGroup(terms::Vector{Term}, trian::Triangulation, Uspaces, locs,
     colors = [Int32[pos[f] for f in col if pos[f] > 0] for col in skel.colors]
     filter!(!isempty, colors)
     SkeletonGroup{pf.test.nslots,pf.trial.nslots,typeof(pf),typeof(tables),AUX,typeof(smv),typeof(smu),D,NF2,typeof(lin),typeof(geo.Jf),typeof(use)}(
-        pf, lin, NTuple{NF2,Int}(locs2), tables, use, geo, geom, aux, smv, smu, trian, cls.key, Ref{Any}(nothing), cls.facets, skel, colors)
+        pf, lin, NTuple{NF2,Int}(locs2), tables, use, geo, geom, aux, smv, smu, trian, cls.key, Ref{Any}(nothing), cls.facets, skel, colors,
+        objectid(terms[1].weights))
+end
+
+"The skeleton class `g` with its values read from `terms` (see `rebind(::Group, terms)`)."
+function rebind(g::SkeletonGroup, terms::Vector{Term})
+    pf = PointForm(terms, g.pf)
+    aux = Tuple(a.array for a in pf.aux)
+    lin = g.lin === nothing ? nothing : LinearForm(terms, pf, g.tables, aux, g.lin)
+    typeof(g)(pf, lin, g.locs, g.tables, g.use, g.geo, g.geom, aux, g.smv, g.smu, g.trian, g.key, g.auxcache, g.facets, g.skel, g.colors, g.wkey)
 end
 
 # ---------------------------------------------------------------------------------------------

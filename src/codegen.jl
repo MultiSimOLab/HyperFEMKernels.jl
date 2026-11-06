@@ -173,7 +173,8 @@ struct PointForm{F,O,C}
     nf::Int               # number of fields (layout of FV, see `fv_index`)
 end
 
-function PointForm(terms::Vector{Term}; nf::Int=0)
+"Everything of a `PointForm` but the compiled function: the generated expression, its data and layouts."
+function pointform_parts(terms::Vector{Term}, nf::Int)
     test = SlotLayout(leaves(terms, :test))
     trial = SlotLayout(leaves(terms, :trial))
     aux = aux_nodes(terms)
@@ -184,9 +185,29 @@ function PointForm(terms::Vector{Term}; nf::Int=0)
         $(st.body...)
         return $total
     end)
-    core = RuntimeGeneratedFunction(@__MODULE__, @__MODULE__, ex)
     coefs = Tuple(t.coef for t in terms)
-    PointForm(core, Tuple(st.ops), coefs, test, trial, aux, st.consts, ex, nf)
+    (ex, Tuple(st.ops), coefs, test, trial, aux, st.consts)
+end
+
+function PointForm(terms::Vector{Term}; nf::Int=0)
+    ex, ops, coefs, test, trial, aux, consts = pointform_parts(terms, nf)
+    core = RuntimeGeneratedFunction(@__MODULE__, @__MODULE__, ex)
+    PointForm(core, ops, coefs, test, trial, aux, consts, ex, nf)
+end
+
+"""
+    PointForm(terms, old::PointForm) -> PointForm
+
+The point form of `terms` reusing the compiled function of `old`, for terms of the same structure
+(same signature, see `signature`): the generated expression is the same, only the operations (same
+types), coefficients, parameters and auxiliary arrays change. Checked: a different expression or
+other operation types are an error (the caller decides on the signature).
+"""
+function PointForm(terms::Vector{Term}, old::PointForm)
+    ex, ops, coefs, test, trial, aux, consts = pointform_parts(terms, old.nf)
+    ex == old.expr && typeof(ops) == typeof(old.ops) && consts == old.consts && length(coefs) == length(old.coefs) ||
+        error("HyperFEMKernels: the weak form changed its structure (rebinding a compiled form of another structure)")
+    PointForm(old.core, ops, coefs, test, trial, aux, consts, ex, old.nf)
 end
 
 "Show the generated pointwise integrand (debugging)."

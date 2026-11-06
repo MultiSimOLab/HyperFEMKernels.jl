@@ -138,7 +138,11 @@ Arrays.getindex!(c, f::FEArray, i::Int) = getindex!(c, f.lazy, i)
 Arrays.testitem(f::FEArray) = testitem(f.lazy)
 fe_deriv(::FEArray{T,FE}) where {T,FE} = fe_deriv(FE)
 fe_deriv(::Type{<:FEData{T,DV}}) where {T,DV} = DV
-same_aux(a::FEArray, b::FEArray) = a === b || (a.fe.vals === b.fe.vals && fe_deriv(a) == fe_deriv(b) &&
+# The FE function behind an `FEArray`: its free and Dirichlet vectors and its cell dof ids (the lazy cell
+# values `fe.vals` are rebuilt by Gridap at every use on a sub-triangulation, so they do not identify it)
+fe_identity(fe::FEData) = (objectid(fe.free), objectid(fe.diri), objectid(fe.ptrs), objectid(fe.data))
+aux_identity(a::FEArray) = (fe_identity(a.fe), fe_deriv(a))
+same_aux(a::FEArray, b::FEArray) = a === b || (fe_identity(a.fe) == fe_identity(b.fe) && fe_deriv(a) == fe_deriv(b) &&
                                               _same_data(a.fe.cellmap, b.fe.cellmap) && _same_data(a.fe.N, b.fe.N))
 _same_data(a, b) = a === b || (typeof(a) == typeof(b) && size(a) == size(b) && a == b)
 _same_data(::Nothing, ::Nothing) = true

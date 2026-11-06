@@ -33,6 +33,7 @@ struct KernelFunctional{F,US}
     cache_aux::Bool
     fallback::Vector{Any}     # triangulations whose contributions Gridap sums (`:sum`)
     signed::Bool
+    sig::Any                  # structural signature of the capture (`signature`; cheap `update`)
 end
 
 function KernelFunctional(f, U::FESpace; reduce::Symbol=:sum, nthreads::Int=Threads.nthreads())
@@ -55,10 +56,11 @@ function KernelFunctional(f, U::FESpace; reduce::Symbol=:sum, nthreads::Int=Thre
         loc += nd
     end
     forms, fb = capture(f, probes(U, :unknown))
+    sig = signature(forms, fb)
     colors = [Int32.(1:ncells)]                     # a reduction has no races: one colour
     groups = compile_groups(forms, U, Tuple(fl.loc for fl in fields), D, colors; linear_maps=false, fallback=fb, fields, ndl=loc)
     _check_functional(groups, fb, reduce)
-    KernelFunctional(f, U, fields, loc, groups, reduce, nthreads, false, Any[t for (t, _) in fb], any(has_signs, fields))
+    KernelFunctional(f, U, fields, loc, groups, reduce, nthreads, false, Any[t for (t, _) in fb], any(has_signs, fields), sig)
 end
 
 function _check_functional(groups, fb, reduce)
@@ -76,18 +78,27 @@ end
 """
     update(fun::KernelFunctional, f) -> KernelFunctional
 
-Functional with another `f` on the same space (e.g. a new load factor), reusing the tables and
-geometry of `fun`.
+Functional with another `f` on the same space (e.g. a new load factor). With the structure of the
+form `fun` was built from (see `signature`) the groups are rebound (compiled code, tables, auxiliary
+buffers reused: `rebind`); otherwise they are compiled again reusing the tables and geometry.
 """
 function update(fun::KernelFunctional, f)
     U = fun.U
     D = num_point_dims(get_triangulation(field_spaces(U)[1]))
     forms, fb = capture(f, probes(U, :unknown))
+    sig = signature(forms, fb)
     colors = [Int32.(1:num_cells(get_triangulation(field_spaces(U)[1])))]
-    groups = compile_groups(forms, U, Tuple(fl.loc for fl in fun.fields), D, colors, fun.groups; linear_maps=false, fallback=fb,
-                            fields=fun.fields, ndl=fun.ndl)
+    locs = Tuple(fl.loc for fl in fun.fields)
+    debug_update() && println("HyperFEMKernels: update of a KernelFunctional (", sig == fun.sig ? "fast path" : "full path; $(signature_diff(sig, fun.sig))", ")")
+    if sig == fun.sig
+        groups = rebind_groups(fun.groups, forms)
+        check_rebind() && verify_rebind(groups, compile_groups(forms, U, locs, D, colors, fun.groups; linear_maps=false, fallback=copy(fb),
+                                                               fields=fun.fields, ndl=fun.ndl), "functional")
+        return KernelFunctional(f, U, fun.fields, fun.ndl, groups, fun.reduce, fun.nthreads, fun.cache_aux, fun.fallback, fun.signed, sig)
+    end
+    groups = compile_groups(forms, U, locs, D, colors, fun.groups; linear_maps=false, fallback=fb, fields=fun.fields, ndl=fun.ndl)
     _check_functional(groups, fb, fun.reduce)
-    KernelFunctional(f, U, fun.fields, fun.ndl, groups, fun.reduce, fun.nthreads, fun.cache_aux, Any[t for (t, _) in fb], fun.signed)
+    KernelFunctional(f, U, fun.fields, fun.ndl, groups, fun.reduce, fun.nthreads, fun.cache_aux, Any[t for (t, _) in fb], fun.signed, sig)
 end
 
 _init(::Val{:sum}) = 0.0

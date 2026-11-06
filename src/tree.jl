@@ -229,3 +229,68 @@ function Base.show(io::IO, ::MIME"text/plain", f::Form)
         show_tree(io, t.expr, 2)
     end
 end
+
+# ---------------------------------------------------------------------------------------------
+# Structural signature of captured forms (cheap `update`, see `assembly.jl`)
+#
+# Two captures with the same signature produce the same compiled code, slot layouts, tables and
+# linear-map positions: the signature holds the triangulation and quadrature of each term (by
+# identity), the shape of its tree (node kinds; role/field/deriv/value type/side of the leaves; the
+# types of the operations and constants; the types and, where it matters, the identity of the
+# auxiliary data) — and none of the values: coefficients, numbers of the integrand, what the
+# closures of the operations captured, nodal values of FE functions.
+
+node_sig(n::Leaf) = (:leaf, n.role, n.field, n.deriv, n.T, n.side)
+node_sig(n::Const) = (:const, typeof(n.value))
+node_sig(n::Aux) = (:aux, typeof(n.array), aux_identity(n.array))
+node_sig(n::Op) = (:op, typeof(n.f), map(node_sig, n.args)...)
+node_sig(n::Node) = (:other, typeof(n))
+
+"""
+Identity of an auxiliary array across captures: Gridap builds a new lazy array per capture, so only
+the data behind it can be compared — the cell dof values of an FE function (`FEArray`) and the matrix
+of a `KernelState` (`StateColumns`); other arrays are compared by type only (their values are read
+through the new array at every assembly).
+"""
+aux_identity(a) = nothing          # methods for FEArray (fefunctions.jl) and StateColumns (states.jl)
+
+"Signature of one term: quadrature (weights and points, by identity) and tree shape; not the coefficient."
+function term_sig(t::Term)
+    l = _first_leaf(t.expr)
+    pts = l === nothing ? UInt(0) : objectid(get_data(l.points))
+    (objectid(t.weights), pts, node_sig(t.expr))
+end
+
+"""
+    signature(forms, fallback) -> (form signatures, fallback triangulation ids)
+
+Structural signature of a capture: per form its triangulation (by identity) and the signatures of its
+terms in order, plus the triangulations whose contributions could not be read.
+"""
+signature(forms::Vector{Form}, fallback) =
+    (Any[(objectid(f.trian), Any[term_sig(t) for t in f.terms]) for f in forms], UInt[objectid(t) for (t, _) in fallback])
+
+"First difference between two signatures, as a string (debugging `update`); `nothing` if equal."
+function signature_diff(a, b)
+    a == b && return nothing
+    fa, fb = a[1], b[1]
+    length(fa) == length(fb) || return "number of forms: $(length(fa)) vs $(length(fb))"
+    for (i, (x, y)) in enumerate(zip(fa, fb))
+        x[1] == y[1] || return "form $i: other triangulation"
+        length(x[2]) == length(y[2]) || return "form $i: $(length(x[2])) vs $(length(y[2])) terms"
+        for (j, (tx, ty)) in enumerate(zip(x[2], y[2]))
+            tx[1] == ty[1] || return "form $i, term $j: other quadrature weights"
+            tx[2] == ty[2] || return "form $i, term $j: other quadrature points"
+            tx[3] == ty[3] || return "form $i, term $j: other tree: $(_tree_diff(tx[3], ty[3]))"
+        end
+    end
+    a[2] == b[2] ? "no difference found" : "fallback triangulations"
+end
+function _tree_diff(x, y)
+    x == y && return ""
+    (x isa Tuple && y isa Tuple && length(x) == length(y) && x[1] == y[1]) || return "$(x) vs $(y)"
+    for (cx, cy) in zip(x, y)
+        cx == cy || return _tree_diff(cx, cy)
+    end
+    ""
+end

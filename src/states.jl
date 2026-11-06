@@ -62,6 +62,7 @@ struct StateColumns{T} <: AbstractVector{SubArray{T,1,Matrix{T},Tuple{Base.Slice
     M::Matrix{T}
 end
 Base.size(a::StateColumns) = (size(a.M, 2),)
+aux_identity(a::StateColumns) = objectid(a.M)
 Base.IndexStyle(::Type{<:StateColumns}) = IndexLinear()
 Base.getindex(a::StateColumns, i::Int) = view(a.M, :, i)
 

@@ -44,6 +44,15 @@ const SparseMap = Vector{Tuple{Int32,Int32,Int32,Float64}}
 debug_linear() = get(ENV, "HFK_DEBUG_LINEAR", "0") == "1"    # read at run time (when an operator is built)
 _nolin(why) = (debug_linear() && println("HyperFEMKernels: linear-map shortcut not used: ", why); nothing)
 
+"One additive term of a linear form: its generated slot function with the data to re-evaluate its map."
+struct LinearTerm
+    lin::Any                   # (ops, S, sv, su) -> slot-dependent value of the term
+    lops::Tuple                # its operations (parameters at `consts`)
+    consts::Vector{Int}
+    types::Vector{DataType}    # types of its state inputs
+    gidx::Vector{Int}          # global index of each state input
+end
+
 struct LinearForm{F,O,C,ST,AP,VT}
     state::F            # (ops, FV, A) -> tuple of all state inputs of the group
     ops::O
@@ -52,6 +61,8 @@ struct LinearForm{F,O,C,ST,AP,VT}
     apply::AP           # (V, S) -> SVector of slot coefficients (generated from the positions of `maps`)
     vals::VT            # term coefficient × value of each entry of `maps`, in order (NTuple{N,Float64})
     expr::Expr
+    terms::Vector{LinearTerm}   # per term, for `LinearForm(terms, pf, tables, aux, old)` (values of the maps with new parameters)
+    kind::Symbol                # :res or :jac
 end
 
 comp(x::Real, k) = x
@@ -78,20 +89,12 @@ function split_sum(n::Node, sgn::Float64=1.0)
     [(n, sgn)]
 end
 
-"""
-    LinearForm(terms, pf, tables, aux, kind) -> LinearForm or nothing
-
-Build the linear-map shortcut for a group, or `nothing` if some term does not qualify.
-`kind` is `:res` (linear in test slots) or `:jac` (bilinear in test and trial slots).
-"""
-function LinearForm(terms0::Vector{Term}, pf::PointForm, tables, aux::Tuple, kind::Symbol)
+"Additive terms of a group, their state inputs (shared when identical) and the expression and operations of the state function."
+function linear_parts(terms0::Vector{Term}, pf::PointForm)
     terms = Term[]
     for t in terms0, (e, sg) in split_sum(t.expr)
         push!(terms, Term(t.coef * sg, e, t.weights, t.jacobians))
     end
-    coefs = Tuple(t.coef for t in terms)
-    all(t -> dependent(t.expr), terms) || return _nolin("a term does not depend on test/trial functions")
-    # all state inputs of the group (shared between terms when identical), one state function
     inputs = Node[]
     term_inputs = [Int[] for _ in terms]
     for (i, t) in enumerate(terms)
@@ -107,8 +110,34 @@ function LinearForm(terms0::Vector{Term}, pf::PointForm, tables, aux::Tuple, kin
         $(st.body...)
         return ($(vals...),)
     end)
+    (terms, inputs, term_inputs, ex, Tuple(st.ops))
+end
+
+"The slot function of one term (expression and operations), with its state inputs substituted by `S[j]`."
+function term_parts(t::Term, gidx::Vector{Int}, inputs::Vector{Node}, pf::PointForm)
+    lst = CodegenState(pf.test, pf.trial, pf.aux, pf.nf)
+    for (j, g) in enumerate(gidx)
+        lst.subst[inputs[g]] = :(S[$j])
+    end
+    r = emit_node!(lst, t.expr)
+    lex = :((ops, S, sv, su) -> begin
+        $(lst.body...)
+        return $r
+    end)
+    (lex, Tuple(lst.ops), lst.consts)
+end
+
+"""
+    LinearForm(terms, pf, tables, aux, kind) -> LinearForm or nothing
+
+Build the linear-map shortcut for a group, or `nothing` if some term does not qualify.
+`kind` is `:res` (linear in test slots) or `:jac` (bilinear in test and trial slots).
+"""
+function LinearForm(terms0::Vector{Term}, pf::PointForm, tables, aux::Tuple, kind::Symbol)
+    terms, inputs, term_inputs, ex, ops = linear_parts(terms0, pf)
+    coefs = Tuple(t.coef for t in terms)
+    all(t -> dependent(t.expr), terms) || return _nolin("a term does not depend on test/trial functions")
     state = RuntimeGeneratedFunction(@__MODULE__, @__MODULE__, ex)
-    ops = Tuple(st.ops)
     # concrete types of the inputs: evaluate once on sample data (small random state, first cell)
     FVs = map(t -> map(T -> 0.01 * rand_value(T), field_types(t)), tables)
     As = map(a -> a[1][1], aux)
@@ -121,22 +150,14 @@ function LinearForm(terms0::Vector{Term}, pf::PointForm, tables, aux::Tuple, kin
         return _nolin("state inputs have unsupported types: $ST")
     nsv, nsu = pf.test.nslots, pf.trial.nslots
     maps = SparseMap[]
+    lterms = LinearTerm[]
     for (i, t) in enumerate(terms)
         gidx = term_inputs[i]
-        lst = CodegenState(pf.test, pf.trial, pf.aux, pf.nf)
-        for (j, g) in enumerate(gidx)
-            lst.subst[inputs[g]] = :(S[$j])
-        end
-        r = emit_node!(lst, t.expr)
-        lex = :((ops, S, sv, su) -> begin
-            $(lst.body...)
-            return $r
-        end)
+        lex, lops, consts = term_parts(t, gidx, inputs, pf)
         lin = RuntimeGeneratedFunction(@__MODULE__, @__MODULE__, lex)
-        lops = Tuple(lst.ops)
-        types = [ST.parameters[g] for g in gidx]
+        types = DataType[ST.parameters[g] for g in gidx]
         # the actual parameters, and random ones: positions and linearity must not depend on the values
-        rops = random_params(lops, lst.consts)
+        rops = random_params(lops, consts)
         coeffs(S, o) = slot_coeffs(lin, o, S, nsv, nsu, kind)
         m = try
             term_map(coeffs, rops === nothing ? Any[lops] : Any[lops, rops], types, gidx)
@@ -147,10 +168,64 @@ function LinearForm(terms0::Vector{Term}, pf::PointForm, tables, aux::Tuple, kin
         end
         m isa String && return _nolin("term $i $m")
         push!(maps, m)
+        push!(lterms, LinearTerm(lin, lops, consts, types, gidx))
     end
     apply = generate_apply(maps, ST, kind === :res ? nsv : nsv * nsu)
     vals = map_values(maps, coefs)
-    LinearForm{typeof(state),typeof(ops),typeof(coefs),ST,typeof(apply),typeof(vals)}(state, ops, coefs, maps, apply, vals, ex)
+    LinearForm{typeof(state),typeof(ops),typeof(coefs),ST,typeof(apply),typeof(vals)}(state, ops, coefs, maps, apply, vals, ex, lterms, kind)
+end
+
+"""
+    LinearForm(terms, pf, tables, aux, old::LinearForm) -> LinearForm
+
+The linear form of `terms` reusing the generated functions and map positions of `old`, for terms of
+the same structure (same signature): the operations of the state function and of every term are
+re-read from the new tree (same types), and the values of the maps — which depend on the parameters —
+are re-evaluated on unit inputs with the new parameters (no dual-number pass on random inputs: the
+positions and the linearity were established with random parameters, so they hold for any values of
+the same types).
+"""
+function LinearForm(terms0::Vector{Term}, pf::PointForm, tables, aux::Tuple, old::LinearForm{F,O,C,ST}) where {F,O,C,ST}
+    terms, inputs, term_inputs, ex, ops = linear_parts(terms0, pf)
+    ex == old.expr && typeof(ops) == typeof(old.ops) && length(terms) == length(old.terms) ||
+        error("HyperFEMKernels: the weak form changed its structure (rebinding the linear maps of another structure)")
+    coefs = Tuple(t.coef for t in terms)
+    nsv, nsu = pf.test.nslots, pf.trial.nslots
+    maps = SparseMap[]
+    lterms = LinearTerm[]
+    for (i, t) in enumerate(terms)
+        ot = old.terms[i]
+        gidx = term_inputs[i]
+        _, lops, consts = term_parts(t, gidx, inputs, pf)
+        typeof(lops) == typeof(ot.lops) && consts == ot.consts && gidx == ot.gidx ||
+            error("HyperFEMKernels: the weak form changed its structure (rebinding the linear maps of another structure)")
+        coeffs(S) = slot_coeffs(ot.lin, lops, S, nsv, nsu, old.kind)
+        push!(maps, map_with_values(old.maps[i], coeffs, ot.types, gidx))
+        push!(lterms, LinearTerm(ot.lin, lops, consts, ot.types, gidx))
+    end
+    vals = map_values(maps, coefs)
+    LinearForm{F,O,C,ST,typeof(old.apply),typeof(vals)}(old.state, ops, coefs, maps, old.apply, vals, ex, lterms, old.kind)
+end
+
+"The map `m` (positions kept) with its values re-evaluated: constant entries from zero inputs, the others from unit inputs."
+function map_with_values(m::SparseMap, coeffs, types, gidx)
+    out = SparseMap()
+    zS = Tuple(zero(T) for T in types)
+    cz = coeffs(zS)
+    cache = Dict{Tuple{Int32,Int32},Vector{Float64}}()
+    for (idx, g, k, _) in m
+        if g == 0
+            push!(out, (idx, g, k, cz[idx]))
+        else
+            cu = get!(cache, (g, k)) do
+                j = findfirst(==(Int(g)), gidx)
+                S = Tuple(jj == j ? unit_value(types[j], Int(k)) : zero(types[jj]) for jj in eachindex(types))
+                coeffs(S)
+            end
+            push!(out, (idx, g, k, cu[idx]))
+        end
+    end
+    out
 end
 
 """
