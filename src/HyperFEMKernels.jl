@@ -47,6 +47,7 @@ RuntimeGeneratedFunctions.init(@__MODULE__)
 
 export KernelOperator, update, check, allocations, MatrixFreeJacobian, prepare!, sparsity_pattern, nonzero_positions
 export MatrixFreeSolver, LaggedAssembled, BlockJacobi, eigenvalue_bounds
+export Prolongation, prolongate!, restrict!, inject!
 export KernelFunctional
 export KernelState, KernelUpdater, update_states!
 
@@ -62,6 +63,7 @@ include("coloring.jl")
 include("skeleton.jl")
 include("tensorproduct.jl")
 include("matrixfree.jl")
+include("transfers.jl")
 include("solvers.jl")
 include("preconditioners.jl")
 include("functionals.jl")
