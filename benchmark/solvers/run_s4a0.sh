@@ -22,6 +22,7 @@ case "$MODE" in
   cube-medium)    CASES=("mech_cube 20"); CONFIGS=("mumps" "$GAMG") ;;
   cube-medium-lu) CASES=("mech_cube 20"); CONFIGS=("lu") ;;
   cube-large)     CASES=("mech_cube 34"); CONFIGS=("$GAMG") ;;
+  cube-check)     CASES=("mech_cube 10" "mech_cube 20" "mech_cube 34"); CONFIGS=("$GAMG") ;;   # the acceptance case must run its 5 steps without bisection at every size
   box-large)      CASES=("mech_box 90 18 18"); CONFIGS=("$GAMG") ;;
   *) echo "unknown mode $MODE"; exit 1 ;;
 esac
