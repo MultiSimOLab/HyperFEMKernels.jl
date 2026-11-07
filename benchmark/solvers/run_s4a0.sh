@@ -18,7 +18,7 @@ case "$MODE" in
                     julia -t $T --project=benchmark/solvers benchmark/solvers/s4a_step0.jl $c 2>&1 | grep --line-buffered -v "^Info\|Warning\|└\|┌"
                   done; exit 0 ;;
   box-q1)         CASES=("mech_box 52 11 11 1" "mech_box 90 18 18 1"); CONFIGS=("$GAMG") ;;
-  cube-small)     CASES=("mech_cube 10"); CONFIGS=("lu" "mumps" "$GAMG") ;;
+  cube-small)     CASES=("mech_cube 10"); CONFIGS=("mumps" "$GAMG") ;;
   cube-medium)    CASES=("mech_cube 20"); CONFIGS=("mumps" "$GAMG") ;;
   cube-medium-lu) CASES=("mech_cube 20"); CONFIGS=("lu") ;;
   cube-large)     CASES=("mech_cube 34"); CONFIGS=("$GAMG") ;;
