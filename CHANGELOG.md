@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.2
+
+- p-multigrid preconditioner `PMultigrid` for `MatrixFreeSolver`: nested Lagrangian levels on the same mesh
+  (Q2 → Q1, Q3 → Q1, Q3 → Q2 → Q1), Chebyshev smoothing (`Chebyshev`, default degree 2) on the matrix-free
+  working order, assembled coarse level with its own solver (e.g. one GAMG V-cycle); the coarse operators are
+  rediscretised from the Newton's forms at the injected state, and the levels follow load steps (`update`) and
+  the Dirichlet projection.
+- Transfers between nested spaces: `Prolongation`, `prolongate!`, `restrict!` (exact transpose), `inject!`.
+- Nodal blocks from the stored point tangents (`block_diagonal!` route `:tangents`, ×3.5 cheaper than the
+  element pass), also for `BlockJacobi`.
+- `preconditioner_ok`: a non-finite tangent, a singular nodal block or an indefinite tangent makes the linear
+  solve fail at once (no exception), so the Newton cuts back.
+- Order-3 tensor-product tables and matrix-free product tested in CI.
+
 ## 0.2.1
 
 - Second derivatives of the unknown, test and trial functions (`∇∇(u)`, `∇(∇(u))`, `Δ(u)`) compiled by
