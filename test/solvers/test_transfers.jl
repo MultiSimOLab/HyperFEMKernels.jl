@@ -132,8 +132,22 @@ end
     end
 end
 
+@testset "Q3 embedding snapped: entries are exact zeros and ones or clearly neither" begin
+    for (pc, pf) in ((1, 3), (2, 3), (1, 2))
+        sp = nested_vector(; n=(2, 2, 1), pc, pf)
+        P = Prolongation(sp.Uc, sp.Uf)
+        for tf in P.fields, M in (tf.E, tf.Einj), e in M
+            @test e == 0 || e == 1 || (abs(e) > 1e-7 && abs(e - 1) > 1e-7)
+        end
+    end
+end
+
 @testset "errors: different meshes, non-nested or non-nodal spaces, different Dirichlet boundaries, wrong lengths" begin
     sp = nested_vector()
+    # another mesh with the same number of cells (shifted): refused
+    shifted = CartesianDiscreteModel((0.5, 1.5, 0, 1, 0, 1), (3, 2, 2))
+    Vsh = TestFESpace(shifted, ReferenceFE(lagrangian, VectorValue{3,Float64}, 1), dirichlet_tags=[1, 3, 5, 7])
+    @test_throws ErrorException Prolongation(TrialFESpace(Vsh, x -> zero(VectorValue{3,Float64})), sp.Uf)
     # an open face tag: Dirichlet on Q2 (face centre) but not on Q1 → the levels have different Dirichlet boundaries
     V1 = TestFESpace(sp.model, ReferenceFE(lagrangian, VectorValue{3,Float64}, 1), dirichlet_tags=[21])
     V2 = TestFESpace(sp.model, ReferenceFE(lagrangian, VectorValue{3,Float64}, 2), dirichlet_tags=[21])

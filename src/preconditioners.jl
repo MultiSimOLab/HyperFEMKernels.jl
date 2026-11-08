@@ -129,9 +129,11 @@ mutable struct BlockJacobiState
     fields::Vector{Any}         # FieldBlocks{NC} per field
     nthreads::Int
     nbuild::Int
+    strict::Bool                # a singular or non-finite block is an error (otherwise `ok` is cleared)
+    ok::Bool                    # every inverted block is finite
 end
 
-function preconditioner_setup(::BlockJacobi, mf::MatrixFreeJacobian)
+function preconditioner_setup(::BlockJacobi, mf::MatrixFreeJacobian; strict::Bool=true)
     _prepared(mf)
     op = mf.op
     op.signed && error("HyperFEMKernels: BlockJacobi is not available with H(div) fields yet")
@@ -141,7 +143,7 @@ function preconditioner_setup(::BlockJacobi, mf::MatrixFreeJacobian)
     isempty(op.fallback.jtrians) || error("HyperFEMKernels: BlockJacobi needs the whole Jacobian in the kernels (hybrid fallback present)")
     tables = op.jgroups[1].tables
     fields = Any[field_blocks(fl, t) for (fl, t) in zip(op.fields, tables)]
-    st = BlockJacobiState(fields, op.nthreads, 0)
+    st = BlockJacobiState(fields, op.nthreads, 0, strict, true)
     block_diagonal!(st, mf)
     st
 end
@@ -205,9 +207,12 @@ function block_diagonal!(st::BlockJacobiState, mf::MatrixFreeJacobian; route::Sy
             run_cells!(Val(:blocks), nothing, st, op, g, mf.x, dvals)
         end
     end
+    ok = true
     for fb in st.fields
-        invert_blocks!(fb, st.nthreads)
+        invert_blocks!(fb, st.nthreads, st.strict)
+        st.strict || (ok &= all(isfinite, fb.Binv))      # nb × nc² entries: the cheap finiteness check of the tangent
     end
+    st.ok = ok
     st.nbuild += 1
     st
 end
@@ -276,15 +281,15 @@ function _scatter_blocks!(fb::FieldBlocks{NC}, KeT, sc::Integer) where {NC}
     fb
 end
 
-function invert_blocks!(fb::FieldBlocks{NC}, nthreads::Int) where {NC}
+function invert_blocks!(fb::FieldBlocks{NC}, nthreads::Int, strict::Bool=true) where {NC}
     nb = size(fb.B, 3)
     nchunks = clamp(nb ÷ 256, 1, nthreads)
     @sync for ch in Iterators.partition(1:nb, cld(nb, nchunks))
-        Threads.@spawn _invert_blocks!(fb, ch)
+        Threads.@spawn _invert_blocks!(fb, ch, strict)
     end
     fb
 end
-function _invert_blocks!(fb::FieldBlocks{NC}, blocks) where {NC}
+function _invert_blocks!(fb::FieldBlocks{NC}, blocks, strict::Bool=true) where {NC}
     B, Binv, dofs = fb.B, fb.Binv, fb.dofs
     @inbounds for blk in blocks
         # rows/columns of fixed components → identity, so the block is invertible and they stay untouched
@@ -292,8 +297,8 @@ function _invert_blocks!(fb::FieldBlocks{NC}, blocks) where {NC}
                 i, j = (k - 1) % NC + 1, (k - 1) ÷ NC + 1
                 dofs[i, blk] == 0 || dofs[j, blk] == 0 ? (i == j ? 1.0 : 0.0) : B[i, j, blk]
             end, NC * NC))
-        Mi = inv(M)
-        all(isfinite, Mi) || error("HyperFEMKernels: BlockJacobi: singular nodal block (block $blk of a field with $NC components)")
+        Mi = all(isfinite, M) ? inv(M) : M                # a NaN block is left as it is (non-strict: reported through `ok`)
+        strict && !all(isfinite, Mi) && error("HyperFEMKernels: BlockJacobi: singular nodal block (block $blk of a field with $NC components)")
         for j in 1:NC, i in 1:NC
             Binv[i, j, blk] = Mi[i, j]
         end

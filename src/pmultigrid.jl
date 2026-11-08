@@ -56,6 +56,7 @@ mutable struct PLevels{ML<:Tuple,C<:CoarseLevel,PT<:Tuple}
     nbuild::Int                   # coarse builds (assembly + setup)
     nskip::Int                    # updates on a foreign operator (Dirichlet projection): levels reused
     nform::Int                    # form changes (load steps) followed
+    nconsec::Int                  # consecutive skipped updates (a working space that is never seen again is a misconfiguration)
     ok::Bool
     dfine::Vector{Float64}        # Dirichlet values of the working space (buffer)
     nthreads::Int
@@ -79,7 +80,8 @@ function PLevels(spaces::AbstractVector, res, jac; coarse_solver::Algebra.Linear
     L ≥ 2 || throw(ArgumentError("HyperFEMKernels: PLevels needs at least two levels (fine and coarse)"))
     coarse_every ≥ 1 || throw(ArgumentError("HyperFEMKernels: PLevels: coarse_every must be ≥ 1"))
     for (U, V) in spaces[2:end], s in field_spaces(U)
-        s isa TrialFESpace || error("HyperFEMKernels: the trial spaces of the coarse p-multigrid levels must be TrialFESpaces (their Dirichlet values are set by injection), got $(nameof(typeof(s)))")
+        (s isa TrialFESpace || num_dirichlet_dofs(s) == 0) ||
+            error("HyperFEMKernels: the trial spaces of the coarse p-multigrid levels must be TrialFESpaces (their Dirichlet values are set by injection), got $(nameof(typeof(s)))")
     end
     nfree(U) = sum(num_free_dofs, field_spaces(U))
     for l in 2:L
@@ -94,7 +96,7 @@ function PLevels(spaces::AbstractVector, res, jac; coarse_solver::Algebra.Linear
     Uc, Vc = spaces[L]
     opc = KernelOperator(res, jac, Uc, Vc; nthreads)
     coarse = CoarseLevel(opc, Uc, Vc, copy(sparsity_pattern(opc)), coarse_solver, nothing, zeros(nfree(Uc)), copy(dirichlet_values(Uc)))
-    PLevels(spaces[1][1], spaces[1][2], mlev, coarse, P, res, jac, false, coarse_every, 0, 0, 0, 0, 0, true,
+    PLevels(spaces[1][1], spaces[1][2], mlev, coarse, P, res, jac, false, coarse_every, 0, 0, 0, 0, 0, 0, true,
             copy(dirichlet_values(spaces[1][1])), nthreads)
 end
 
@@ -157,8 +159,11 @@ end
 Bring the coarse levels to the state of the prepared working tangent `mf` (see the header of this file):
 follow its forms, inject the state, re-prepare the matrix-free levels, re-assemble and set up the coarse level every
 `coarse_every` updates (and when the forms changed), check every tangent is finite (`levels_ok`). On a foreign operator
-with the same free dofs (the Dirichlet projection) the last prepared levels are reused; if the first update comes on a
-foreign operator, the levels are prepared from it once.
+(another trial space on the same test space: the Dirichlet projection) the last prepared levels are reused if they are
+usable, and prepared from it otherwise (first update, or levels that failed at a rejected iterate). The Dirichlet
+values are read from the operator's trial space at this call and the free values from `mf.x` (the state of the last
+`prepare!`): HyperFEM calls `jacobian!` and `numerical_setup!` back to back, with no change of the Dirichlet values in
+between.
 """
 function update_levels!(lv::PLevels, mf::MatrixFreeJacobian)
     _prepared(mf)
@@ -166,9 +171,19 @@ function update_levels!(lv::PLevels, mf::MatrixFreeJacobian)
     lv.nupdate += 1
     nf = sum(num_free_dofs, field_spaces(lv.U))
     size(mf, 2) == nf || error("HyperFEMKernels: the operator has $(size(mf, 2)) free dofs, the p-multigrid working space $nf")
-    if op.U !== lv.U && lv.built
-        lv.nskip += 1
-        return lv
+    if op.U !== lv.U
+        op.V === lv.V || error("HyperFEMKernels: p-multigrid: the operator is not on the working test space of the levels (the first pair of `spaces` must be the spaces of the Newton's operator)")
+        # another trial space on the same test space and free dofs: HyperFEM's Dirichlet projection (on ΔU). Reuse the
+        # last prepared levels — unless they failed (a non-finite level after a rejected iterate: rebuild them at this
+        # state, or the projection of the cut-back step would fail too) or were never built
+        if lv.built && lv.ok
+            lv.nskip += 1
+            lv.nconsec += 1
+            lv.nconsec == 5 && @warn "HyperFEMKernels: p-multigrid: 5 consecutive updates on an operator whose trial space is not the working space of the levels; the levels are not being updated (is the first pair of `spaces` the Newton's (U, V)?)" maxlog = 1
+            return lv
+        end
+    else
+        lv.nconsec = 0
     end
     newform = op.res !== lv.res || op.jac !== lv.jac
     newform && update_level_operators!(lv, op.res, op.jac)
@@ -226,7 +241,17 @@ symmetric for an SPD tangent with an SPD coarse solver (same pre- and post-smoot
 Per Newton iteration (`preconditioner_update!`): the levels follow the operator (`update_levels!`), the smoothers
 re-extract their blocks and interval. A non-finite tangent on any level or a non-usable smoother interval makes
 `preconditioner_ok` false: `MatrixFreeSolver` then returns at once with `linear_converged == false` (and a direct
-`ldiv!` returns NaN), so the Newton fails the iteration.
+`ldiv!` returns NaN), so the Newton fails the iteration. A negative Ritz value of the block-preconditioned tangent
+(an indefinite tangent, past a limit point or a buckling load) is reported the same way: Chebyshev would amplify the
+negative modes.
+
+Notes. The coarse operators are captured from the Newton's forms, so they integrate with the working space's quadrature
+(e.g. 27 points per Q1 cell under a Q2 measure): this makes the rediscretised coarse operator of a linear form equal to
+the Galerkin product exactly, at ≈ 3× the cost of a Q1 assembly with its own quadrature. The Dirichlet values of the
+coarse trial spaces are overwritten in place at every update: spaces handed to `PMultigrid` belong to it. The smoother
+needs the nodal blocks of the working tangent, so the working Jacobian must be entirely in the kernels (no hybrid
+fallback, no skeleton terms) with invertible nodal blocks (no zero diagonal block, as the pressure of a mixed
+formulation). Single-field spaces in practice (multi-field (u, φ) saddle points need block smoothers).
 """
 struct PMultigrid{LS<:Algebra.LinearSolver} <: OperatorPreconditioner
     spaces::Vector{Any}
@@ -277,18 +302,13 @@ function preconditioner_update!(st::PMultigridState, mf::MatrixFreeJacobian)
     nskip = lv.nskip
     update_levels!(lv, mf)
     skipped = lv.nskip > nskip
-    ok = levels_ok(lv)
-    if tangents_finite(mf)
-        smoother_update!(st.smoothers[1], mf)          # the fine smoother always follows the operator the Krylov method applies
-    else
-        ok = false
-    end
-    if !skipped && ok                                  # intermediate levels re-prepared: their smoothers follow
+    smoother_update!(st.smoothers[1], mf)              # the fine smoother always follows the operator the Krylov method applies
+    if !skipped && levels_ok(lv)                       # intermediate levels re-prepared: their smoothers follow
         for (i, ml) in enumerate(lv.mlevels)
             smoother_update!(st.smoothers[i+1], ml.mf)
         end
     end
-    st.ok = ok && all(s -> s.ok, st.smoothers)
+    st.ok = levels_ok(lv) && all(s -> s.ok, st.smoothers)
     st
 end
 

@@ -45,6 +45,7 @@ mutable struct ChebyshevState{MF}
     mf::MF                        # the level's prepared tangent (the Newton's on the fine level)
     blocks::BlockJacobiState
     λest::Float64                 # Ritz estimate of λmax(M⁻¹A)
+    λmin::Float64                 # smallest Ritz value (negative: indefinite tangent, the smoother is not usable)
     a::Float64
     b::Float64
     start::Vector{Float64}        # fixed start vector of the Arnoldi estimate
@@ -67,9 +68,9 @@ end
 Blocks of the prepared tangent `mf` (from its stored tangents) and the interval of the smoother.
 """
 function smoother_setup(cfg::Chebyshev, mf::MatrixFreeJacobian)
-    blocks = preconditioner_setup(BlockJacobi(), mf)
+    blocks = preconditioner_setup(BlockJacobi(), mf; strict=false)    # a NaN tangent clears `ok` instead of throwing
     n = size(mf, 1)
-    st = ChebyshevState(cfg, mf, blocks, 0.0, 0.0, 0.0, chebyshev_start(n), zeros(n), zeros(n), zeros(n), 0, true)
+    st = ChebyshevState(cfg, mf, blocks, 0.0, 0.0, 0.0, 0.0, chebyshev_start(n), zeros(n), zeros(n), zeros(n), 0, true)
     smoother_interval!(st)
 end
 
@@ -81,14 +82,15 @@ function smoother_update!(st::ChebyshevState, mf::MatrixFreeJacobian)
 end
 
 function smoother_interval!(st::ChebyshevState)
-    λmax = try
-        eigenvalue_bounds(st.mf, st.blocks; k=st.cfg.eig_iters, b=st.start)[2]
-    catch err
-        err isa LinearAlgebra.LAPACKException || err isa ArgumentError || rethrow()
-        NaN                                # NaN tangents: the Hessenberg eigenvalues fail
+    if !st.blocks.ok                       # a non-finite tangent (its nodal blocks are not finite): nothing to estimate
+        st.ok = false
+        return st
     end
-    st.λest = λmax
-    st.ok = isfinite(λmax) && λmax > 0     # a non-finite or non-positive estimate (NaN tangent, not SPD): not usable
+    λmin, λmax = eigenvalue_bounds(st.mf, st.blocks; k=st.cfg.eig_iters, b=st.start)
+    st.λest, st.λmin = λmax, λmin
+    # not usable: a non-finite or non-positive estimate, or a negative Ritz value (an indefinite tangent past a limit
+    # point or a buckling load: Chebyshev would amplify the negative modes; S5 handles indefinite tangents)
+    st.ok = isfinite(λmax) && λmax > 0 && λmin > 0
     st.ok || return st
     st.b = st.cfg.inflate * λmax
     st.a = st.b / st.cfg.range
@@ -104,6 +106,7 @@ end
 needs anyway for the restriction). Allocation-free.
 """
 function smooth!(x::AbstractVector, st::ChebyshevState, rhs::AbstractVector; zero_guess::Bool=false, residual=nothing)
+    st.ok || error("HyperFEMKernels: Chebyshev: the smoother has no usable interval (non-finite or indefinite tangent)")
     r, z, d, mf = st.r, st.z, st.d, st.mf
     a, b = st.a, st.b
     θ, δ = (b + a) / 2, (b - a) / 2

@@ -37,7 +37,7 @@ Dirichlet boundary — tags with their edges and vertices, as HyperFEM's `⁺` C
 reference elements: Q1 ⊂ Q2 ⊂ Q3, P1 ⊂ P2): `mul!(yf, P, xc)`,
 `mul!(yc, transpose(P), yf)`, `prolongate!`, `restrict!` on the free vectors (Dirichlet dofs read as zero,
 never written), `inject!` for the state. Cells are processed by colour (no two cells of a colour share a
-fine dof), so both transfers are threaded and allocation-free.
+fine dof), so both transfers are threaded; the cell kernels do not allocate (the tasks of the colour sweeps do).
 """
 struct Prolongation{F<:Tuple}
     fields::F
@@ -85,13 +85,22 @@ function TransferField(sc::SingleFieldFESpace, sf::SingleFieldFESpace, off_c::In
     for n in 1:NC
         q = findfirst(q -> isapprox(tcc.N[q, n], 1.0; atol=1e-6), 1:length(cnodes))
         q === nothing && error("HyperFEMKernels: the coarse space is not nodal at its dof-basis nodes")
+        all(qq -> qq == q || abs(tcc.N[qq, n]) < 1e-6, 1:length(cnodes)) || error("HyperFEMKernels: the coarse space is not nodal at its dof-basis nodes")
         cpoint_of[n] = q
     end
     tfc.ldof == tf.ldof || error("HyperFEMKernels: inconsistent node numbering of the fine space")
     Einj = [tfc.N[cpoint_of[c], f] for c in 1:NC, f in 1:NF]
+    # the bases come from inverting Vandermonde matrices (Gridap): entries that are 0 or 1 carry round-off (~5e-10 at
+    # Q3); snap them, so the Dirichlet check below and the sparsity of the cell kernels see exact zeros
+    snap(e) = abs(e) < 1e-7 ? 0.0 : abs(e - 1) < 1e-7 ? 1.0 : e
+    E .= snap.(E); Einj .= snap.(Einj)
     ndf, ndc = NF * tf.nc, NC * tc.nc
     ids_f = cell_dof_matrix(sf, ndf); ids_c = cell_dof_matrix(sc, ndc)
     size(ids_f, 2) == size(ids_c, 2) || error("HyperFEMKernels: the two levels live on different meshes")
+    cf, cc = get_cell_coordinates(get_triangulation(sf)), get_cell_coordinates(get_triangulation(sc))
+    for cell in unique((1, size(ids_f, 2) ÷ 2 + 1, size(ids_f, 2)))      # the same cells: a sample of their vertices
+        cf[cell] ≈ cc[cell] || error("HyperFEMKernels: the two levels live on different meshes (cell $cell differs)")
+    end
     # same Dirichlet boundary on both levels: a fine Dirichlet node is a zero of every coarse function that is free there
     # (so the prolongation may skip it), and a coarse node is Dirichlet iff the fine function is Dirichlet there (so the
     # injection reads the right value). Checked through the embedding: a fine Dirichlet dof must receive no weight from a
@@ -100,14 +109,14 @@ function TransferField(sc::SingleFieldFESpace, sf::SingleFieldFESpace, off_c::In
         for f in 1:NF
             ids_f[tf.ldof[f, comp], cell] > 0 && continue
             for c in 1:NC
-                abs(E[f, c]) > 1e-9 && ids_c[tc.ldof[c, comp], cell] > 0 &&
+                E[f, c] != 0 && ids_c[tc.ldof[c, comp], cell] > 0 &&
                     error("HyperFEMKernels: the two levels have different Dirichlet boundaries (a fine Dirichlet dof is interpolated from a free coarse dof; use the same closed Dirichlet set — e.g. tags with their edges and vertices — on every level)")
             end
         end
         for c in 1:NC
             ids_c[tc.ldof[c, comp], cell] > 0 && continue
             for f in 1:NF
-                abs(Einj[c, f]) > 1e-9 && ids_f[tf.ldof[f, comp], cell] > 0 &&
+                Einj[c, f] != 0 && ids_f[tf.ldof[f, comp], cell] > 0 &&
                     error("HyperFEMKernels: the two levels have different Dirichlet boundaries (a coarse Dirichlet dof is interpolated from a free fine dof)")
             end
         end

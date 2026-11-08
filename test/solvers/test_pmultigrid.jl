@@ -151,3 +151,96 @@ end
     @test_throws ArgumentError PMultigrid(c.spaces[1:1])
     @test_throws ArgumentError PMultigrid(c.spaces; coarse_every=0)
 end
+
+# --- review (2026-11-08): lifecycle sequences inside the slot, boundary groups, indefinite tangents ----------------------
+
+"Mechanics with a Robin term on one face (tag 26: a boundary Jacobian group) and Dirichlet at the four corners of x = 0."
+function pmg_robin(n, orders; k=50.0)
+    model = CartesianDiscreteModel((0, 1, 0, 1, 0, 1), (n, n, n))
+    T = VectorValue{3,Float64}
+    spaces = map(enumerate(orders)) do (l, p)
+        V = TestFESpace(model, ReferenceFE(lagrangian, T, p), dirichlet_tags=[1, 3, 5, 7])
+        (l == 1 ? TrialFESpace(V, x -> zero(T)) : TrialFESpace(V, x -> zero(T)), V)
+    end
+    dΩ = Measure(Triangulation(model), 2first(orders))
+    dΓ = Measure(BoundaryTriangulation(model; tags=[26]), 2first(orders))
+    t = VectorValue(0.1, 0.2, -0.3)
+    res(u, v) = ∫(∇(v)' ⊙ (pmg_stress ∘ (∇(u)')))dΩ + ∫(k * (v ⋅ u) - v ⋅ t)dΓ
+    jac(u, du, v) = ∫(∇(v)' ⊙ (pmg_stress ∘ (∇(du)')))dΩ + ∫(k * (v ⋅ du))dΓ
+    (; model, spaces=collect(Any, spaces), res, jac)
+end
+
+@testset "PMultigrid with a boundary Jacobian group (Robin): blocks from the stored tangents, same solution as LU" begin
+    for n in (2, 4)
+        c = pmg_robin(n, (2, 1))
+        U, V = c.spaces[1]
+        op = KernelOperator(c.res, c.jac, U, V; jacobian=:matrixfree)
+        x = zeros(num_free_dofs(U)); mf = allocate_jacobian(op, x); jacobian!(mf, op, x)
+        @test any(g -> length(g.cellmap) < num_cells(c.model), op.jgroups)          # a boundary group is there
+        st1 = HK.preconditioner_setup(BlockJacobi(), mf); st2 = HK.preconditioner_setup(BlockJacobi(), mf)
+        HK.block_diagonal!(st2, mf; route=:elements)
+        @test all(((a, b),) -> norm(a.B - b.B) ≤ 1e-12 * norm(b.B), zip(st1.fields, st2.fields))
+        ls = MatrixFreeSolver(; rtol=1e-10, maxiter=200, preconditioner=PMultigrid(c.spaces))
+        dx, ns, dx_lu = pmg_solve(c, ls, x; res=c.res, jac=c.jac)
+        @test HK.linear_converged(ns) && reldiff(dx, dx_lu) < 1e-8
+    end
+end
+
+@testset "PMultigrid lifecycle: NaN at the first setup, cut-back through the projection, load steps, wrong spaces" begin
+    c = pmg_cube(2, (2, 1))
+    U, V = c.spaces[1]
+    op = KernelOperator(c.nres, c.njac, U, V; jacobian=:matrixfree)
+    x = randx(U); xb = copy(x); xb[2] = NaN
+    b = randn(num_free_dofs(U)); dx = zeros(length(b))
+    # a NaN state at the first numerical setup: no exception, a failed solve
+    mf = allocate_jacobian(op, xb); jacobian!(mf, op, xb)
+    ls = MatrixFreeSolver(; rtol=1e-8, preconditioner=PMultigrid(c.spaces))
+    ns = numerical_setup(symbolic_setup(ls, mf), mf)
+    solve!(dx, ns, b); @test !HK.linear_converged(ns)
+    # the cut-back: the next operator is the Dirichlet projection (another trial space on the same V) at a finite state —
+    # the failed levels are rebuilt there instead of being reused
+    ΔU = TrialFESpace(V)
+    opΔ = KernelOperator(c.nres, c.njac, ΔU, V; jacobian=:matrixfree)
+    jacobian!(mf, opΔ, x); numerical_setup!(ns, mf)
+    @test HK.preconditioner_ok(ns.prec) && ns.prec.lv.nskip == 0
+    solve!(dx, ns, b); @test HK.linear_converged(ns)
+    # back on the working operator, then usable levels are reused on the projection
+    jacobian!(mf, op, x); numerical_setup!(ns, mf); solve!(dx, ns, b); @test HK.linear_converged(ns)
+    jacobian!(mf, opΔ, x); numerical_setup!(ns, mf)
+    @test ns.prec.lv.nskip == 1
+    # a new load step: the operator `update`d with other forms; the levels follow and the solve is the new problem's
+    body2 = VectorValue(-0.5, 0.1, 0.2)
+    res2(u, v) = ∫(∇(v)' ⊙ (P_svk ∘ (Fk ∘ (∇(u)'))) - v ⋅ body2)c.dΩ
+    jac2(u, du, v) = ∫(∇(v)' ⊙ (dP_svk ∘ (Fk ∘ (∇(u)'), ∇(du)')))c.dΩ
+    op2 = update(op, res2, jac2)
+    nform = ns.prec.lv.nform
+    jacobian!(mf, op2, x); numerical_setup!(ns, mf)
+    @test ns.prec.lv.nform == nform + 1
+    ref = KernelOperator(res2, jac2, U, V)
+    b2 = residual(ref, x)
+    solve!(dx, ns, b2)
+    @test HK.linear_converged(ns) && reldiff(dx, jacobian(ref, x) \ b2) < 1e-6
+    # an operator on another test space is a misconfiguration, not a projection
+    V2 = TestFESpace(c.model, ReferenceFE(lagrangian, VectorValue{3,Float64}, 2), dirichlet_tags="boundary")
+    opw = KernelOperator(c.nres, c.njac, TrialFESpace(V2, x -> zero(VectorValue{3,Float64})), V2; jacobian=:matrixfree)
+    mfw = allocate_jacobian(opw, x); jacobian!(mfw, opw, x)
+    @test_throws ErrorException HK.preconditioner_setup(PMultigrid(c.spaces), mfw)
+end
+
+@testset "PMultigrid: an indefinite tangent is reported as a failed solve (negative Ritz value)" begin
+    c = pmg_cube(4, (2, 1))
+    U, V = c.spaces[1]
+    s = 200.0                                       # elasticity − s·mass: negative low modes, positive high modes
+    ires(u, v) = ∫(∇(v)' ⊙ (pmg_stress ∘ (∇(u)')) - s * (v ⋅ u))c.dΩ
+    ijac(u, du, v) = ∫(∇(v)' ⊙ (pmg_stress ∘ (∇(du)')) - s * (v ⋅ du))c.dΩ
+    op = KernelOperator(ires, ijac, U, V; jacobian=:matrixfree)
+    x = zeros(num_free_dofs(U)); mf = allocate_jacobian(op, x); jacobian!(mf, op, x)
+    A = Matrix(jacobian(KernelOperator(ires, ijac, U, V), x))
+    λ = eigvals(Symmetric((A + A') / 2))
+    @test minimum(λ) < 0 < maximum(λ)               # the case is indefinite
+    ls = MatrixFreeSolver(; rtol=1e-8, preconditioner=PMultigrid(c.spaces))
+    ns = numerical_setup(symbolic_setup(ls, mf), mf)
+    @test ns.prec.smoothers[1].λmin < 0
+    dx = zeros(size(A, 1)); solve!(dx, ns, randn(size(A, 1)))
+    @test !HK.linear_converged(ns) && HK.linear_iterations(ns) == 0
+end

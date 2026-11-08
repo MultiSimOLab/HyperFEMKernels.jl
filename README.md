@@ -253,7 +253,8 @@ state interpolated onto each level, and follow the Newton's operator from load s
 ```julia
 # spaces of every level, finest first: the working space and the Q1 space on the same mesh and boundary conditions
 V1 = TestFESpace(model, ReferenceFE(lagrangian, VectorValue{3,Float64}, 1), dirichlet_tags = tags)
-spaces = [(U, V), (TrialFESpace(V1, g), V1)]
+spaces = [(U, V), (TrialFESpace(V1, g), V1)]          # with HyperFEM: spaces = level_spaces(U, V, D)
+N1 = near_nullspace(spaces[2][1])                     # rigid-body modes of the Q1 space (HyperFEM)
 ls = MatrixFreeSolver(; krylov = :gmres, rtol = 1e-8,
                        preconditioner = PMultigrid(spaces; coarse = PETScSolver(:preonly, :gamg; nullspace = N1),
                                                    coarse_every = 3))
@@ -264,11 +265,13 @@ with the rigid-body modes of the coarse space) is the production choice, `LUSolv
 `smoother = Chebyshev(; degree = 2, range = 20)` by default. The levels must have the same fields and
 the same closed Dirichlet boundary (tags with their edges and vertices). Our measurement (Mac
 M-series, Julia 1.13, 6 threads, PETSc serial; nonlinear elasticity on a unit cube, Q2, 5 load steps,
-Krylov rtol 1e-10): the same Newton iterations as CG + GAMG on the assembled tangent, 26–28 GMRES
+Krylov rtol 1e-10): the same Newton iterations as CG + GAMG on the assembled tangent, 25–28 GMRES
 iterations per Newton iteration from 25k to 957k dofs, and per Newton iteration ×4.8 faster at 197k
 and ×8.3 at 957k with a quarter of the memory (4.3 vs 16.8 GB); on Q3 at 227k dofs ×19. On slender
 structures (few elements across the thickness) the point smoother limits it (×3 with 86 iterations
-on a 50:5:1 Q2 cantilever).
+on a 50:5:1 Q2 cantilever, measured with a degree-4 smoother). The coarse spaces' Dirichlet values
+are overwritten by the slot; an indefinite tangent (past a limit point) or a non-finite level makes
+the linear solve fail, which the Newton handles as a failed iteration.
 
 ### Scalar functionals
 
