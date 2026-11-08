@@ -8,6 +8,7 @@ MODE=$1; shift
 T=${T:-6}
 case "$MODE" in
   cube) N=$1; shift; CASE="mech_cube $N" ;;
+  cube3) N=$1; shift; CASE="mech_cube $N 3" ;;    # Q3
   box)  CASE="mech_box 52 11 11" ;;
   boxl) CASE="mech_box 90 18 18" ;;
   *) echo "unknown mode $MODE"; exit 1 ;;
