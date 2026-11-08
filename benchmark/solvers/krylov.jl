@@ -121,6 +121,17 @@ function make_solver(config::String, N, rtol, U, bs, opts, restart=50; case=noth
         pw == "fs" && !(U isa MultiFieldFESpace) && error("mf_*_fs needs a multi-field case")
         return MatrixFreeSolver(; krylov, rtol, maxiter=300, restart, preconditioner=prec)
     end
+    if parts[1] == "hmg"                       # S4-B: hmg_<krylov>[_lagN][_degK][_rngA][_lu|_mumps]  (coarse GAMG V-cycle by default)
+        hasproperty(case, :hier) || error("hmg_* needs a hierarchy case (hcube_tet, hcube_hex)")
+        krylov = Symbol(parts[2])
+        lag = findfirst(startswith("lag"), parts); reuse = lag === nothing ? 1 : parse(Int, parts[lag][4:end])
+        deg = findfirst(startswith("deg"), parts); degree = deg === nothing ? 2 : parse(Int, parts[deg][4:end])
+        rng = findfirst(startswith("rng"), parts); range = rng === nothing ? 20.0 : parse(Float64, parts[rng][4:end])
+        Uc = TrialFESpace(case.space(level_model(case.hier, 1)))
+        coarse = "lu" in parts ? LUSolver() : "mumps" in parts ? PETScSolver(:preonly, :mumps) :
+                 PETScSolver(:preonly, :gamg; nullspace=near_nullspace(Uc), blocksize=bs, options=opts)
+        return HMultigridSolver(case.hier, case.space; krylov, rtol, maxiter=300, restart, reuse, degree, range, coarse)
+    end
     if parts[1] == "fs"                        # S2: fs_<split>[_<fact>_<prec>][_<ksp>][_lagN][_lublocks]
         U isa MultiFieldFESpace || error("fs_* needs a multi-field case")
         split_ = Symbol(parts[2])

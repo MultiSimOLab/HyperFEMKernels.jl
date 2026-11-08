@@ -136,6 +136,55 @@ function mech_cube(n::Int, p::Int=2)
     mech_case(m, p, [0.0, 0.0, 0.1])
 end
 
+# --- S4-B: the mechanical cube as a refined hierarchy (design/solvers-s4b-plan.md §4) ---------------------------------
+
+"Coarse Gmsh tetrahedral mesh of the unit cube with mesh size `h`; closed physical groups fixedup (x = 0) and topsuf (x = 1)."
+function cube_tet_mesh(h::Real)
+    file = joinpath(MESHDIR, "cube_tet_h$(h).msh")
+    isfile(file) && return file
+    gmsh = GridapGmsh.gmsh
+    gmsh.initialize(); gmsh.option.setNumber("General.Terminal", 0)
+    gmsh.model.add("cube")
+    gmsh.model.occ.addBox(0, 0, 0, 1, 1, 1); gmsh.model.occ.synchronize()
+    ents(d) = [e[2] for e in gmsh.model.getEntities(d)]
+    com(t) = gmsh.model.occ.getCenterOfMass(2, t)
+    for (name, x0) in (("fixedup", 0.0), ("topsuf", 1.0))
+        faces = [t for t in ents(2) if abs(com(t)[1] - x0) < 1e-9]
+        gmsh.model.addPhysicalGroup(2, faces, -1, name)
+        for d in (1, 0)                                   # the closure: edges and vertices under the same name
+            cl = unique([abs(e[2]) for e in gmsh.model.getBoundary([(2, t) for t in faces], false, false, d == 0) if e[1] == d])
+            gmsh.model.addPhysicalGroup(d, cl, -1, name)
+        end
+    end
+    gmsh.model.addPhysicalGroup(3, ents(3), -1, "solid")
+    gmsh.option.setNumber("Mesh.MeshSizeMax", h); gmsh.option.setNumber("Mesh.MeshSizeMin", h)
+    gmsh.model.mesh.generate(3)
+    gmsh.write(file); gmsh.finalize()
+    file
+end
+
+"""
+Mechanical cube on a hierarchy of `k` uniform refinements of a coarse mesh (`mech_cube`'s physics and boundary conditions,
+order 1): `hcube_tet(h, k)` from the Gmsh tetrahedra of size `h`, `hcube_hex(n, k)` from n³ Cartesian hexahedra. The case
+carries the hierarchy (`hier`) and the test-space builder (`space`) the h-multigrid solver needs; the Newton sees the fine
+model only.
+"""
+function hcube(coarse, k::Int; utop=[0.0, 0.0, 0.1])
+    hier = MeshHierarchy(coarse, k + 1)
+    case = mech_case(fine_model(hier), 1, utop)
+    Du = case.D
+    space(m) = TestFESpace(m, ReferenceFE(lagrangian, VectorValue{3,Float64}, 1), Du, conformity=:H1)
+    (; case..., hier, space)
+end
+hcube_tet(h::Real, k::Int) = hcube(GmshDiscreteModel(cube_tet_mesh(h)), k)
+function hcube_hex(n::Int, k::Int)
+    m = CartesianDiscreteModel((0.0, 1.0, 0.0, 1.0, 0.0, 1.0), (n, n, n))
+    labels = get_face_labeling(m)
+    add_tag_from_tags!(labels, "fixedup", CartesianTags.face0YZ⁺)
+    add_tag_from_tags!(labels, "topsuf", CartesianTags.face1YZ⁺)
+    hcube(m, k)
+end
+
 # Periodic unit cell of a magneto-active composite (the "periodic cell" study of 2026-09, magnetoactive_unit_cell_2D.jl,
 # adapted to the BoundaryConditions API and to both backends; 3D by the same construction): soft magnetically inert
 # matrix (Mooney–Rivlin + IdealMagnetic, χ = 0), rigid inclusion (×100) with remanent magnetisation Mr along x
@@ -190,6 +239,8 @@ function build_case(words)
     kind == "hmre_cell" && return hmre_cell(parse(Int, words[2]), parse(Float64, words[3]), parse(Int, get(words, 4, "1"))), "hmre_cell$(words[2])d_h$(words[3])_p$(get(words, 4, "1"))"
     kind == "mech_plate" && return mech_plate(parse(Int, words[2])), "mech_plate_n$(words[2])"
     kind == "mech_box" && return mech_box(parse.(Int, words[2:4])..., parse(Int, get(words, 5, "2"))), "mech_box_$(join(words[2:4], 'x'))" * (get(words, 5, "2") == "2" ? "" : "_p$(words[5])")
+    kind == "hcube_tet" && return hcube_tet(parse(Float64, words[2]), parse(Int, words[3])), "hcube_tet_h$(words[2])_k$(words[3])"
+    kind == "hcube_hex" && return hcube_hex(parse(Int, words[2]), parse(Int, words[3])), "hcube_hex_$(words[2])_k$(words[3])"
     kind == "mech_cube" && return mech_cube(parse(Int, words[2]), parse(Int, get(words, 3, "2"))), "mech_cube_$(words[2])_p$(get(words, 3, "2"))"
     kind == "em_plate" && return em_plate(parse(Int, words[2])), "em_plate_n$(words[2])"
     kind == "em_plate_c" && return em_plate_c(parse(Int, words[2])), "em_plate_c_n$(words[2])"
