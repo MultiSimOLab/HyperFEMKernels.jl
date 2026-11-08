@@ -206,3 +206,116 @@ function update_levels!(lv::PLevels, mf::MatrixFreeJacobian)
 end
 
 num_dirichlet_dofs_total(U::FESpace) = sum(num_dirichlet_dofs, field_spaces(U); init=0)
+
+# ---------------------------------------------------------------------------------------------
+# PMultigrid: the V-cycle as a preconditioner slot of MatrixFreeSolver (S4-A step 4)
+
+"""
+    PMultigrid(spaces; smoother = Chebyshev(), coarse = LUSolver(), coarse_every = 1)
+
+Preconditioner slot of `MatrixFreeSolver`: one V-cycle of p-multigrid on the levels `spaces` (`(U, V)` per level,
+finest first — the first is the working space of the Newton; see `PLevels`). On every level but the coarsest:
+pre-smoothing from zero with `smoother` (Chebyshev on the block-preconditioned tangent), restriction of the residual,
+the coarser level, prolongation of its correction, post-smoothing with the same polynomial; on the coarsest (assembled)
+level one application of `coarse` — any Gridap `LinearSolver`: `LUSolver()` in tests; in production one AMG V-cycle
+(HyperFEM's `PETScSolver(:preonly, :gamg)` with the rigid-body modes, which it receives through
+`numerical_setup_state`) or MUMPS for thin structures. A coarse solver that is a Krylov solve to a tolerance makes the
+cycle a variable operator: use `krylov = :fgmres` then; with a fixed coarse operator the cycle is linear (GMRES), and
+symmetric for an SPD tangent with an SPD coarse solver (same pre- and post-smoother: CG applies).
+
+Per Newton iteration (`preconditioner_update!`): the levels follow the operator (`update_levels!`), the smoothers
+re-extract their blocks and interval. A non-finite tangent on any level or a non-usable smoother interval makes
+`preconditioner_ok` false: `MatrixFreeSolver` then returns at once with `linear_converged == false` (and a direct
+`ldiv!` returns NaN), so the Newton fails the iteration.
+"""
+struct PMultigrid{LS<:Algebra.LinearSolver} <: OperatorPreconditioner
+    spaces::Vector{Any}
+    smoother::Chebyshev
+    coarse::LS
+    coarse_every::Int
+    function PMultigrid(spaces::AbstractVector; smoother::Chebyshev=Chebyshev(), coarse::Algebra.LinearSolver=LUSolver(),
+                        coarse_every::Int=1)
+        length(spaces) ≥ 2 || throw(ArgumentError("HyperFEMKernels: PMultigrid needs at least two levels"))
+        coarse_every ≥ 1 || throw(ArgumentError("HyperFEMKernels: PMultigrid: coarse_every must be ≥ 1"))
+        new{typeof(coarse)}(collect(Any, spaces), smoother, coarse, coarse_every)
+    end
+end
+
+"Work vectors of one smoothed level: its residual and prolongated correction, the restricted rhs and the coarser solution."
+struct CycleWork
+    r::Vector{Float64}
+    e::Vector{Float64}
+    bc::Vector{Float64}
+    xc::Vector{Float64}
+end
+
+mutable struct PMultigridState{LV<:PLevels,SM<:Tuple,W<:Tuple}
+    prec::PMultigrid
+    lv::LV
+    smoothers::SM                 # ChebyshevState of levels 1 … L−1 (level 1 on the Newton's tangent)
+    work::W                       # CycleWork of levels 1 … L−1
+    ok::Bool
+    ncycle::Int
+end
+
+function preconditioner_setup(p::PMultigrid, mf::MatrixFreeJacobian)
+    _prepared(mf)
+    lv = PLevels(p.spaces, mf.op.res, mf.op.jac; coarse_solver=p.coarse, coarse_every=p.coarse_every, nthreads=mf.nthreads)
+    update_levels!(lv, mf)
+    mfs = (mf, map(ml -> ml.mf, lv.mlevels)...)
+    smoothers = map(m -> smoother_setup(p.smoother, m), mfs)
+    sizes = (size(mf, 1), map(ml -> length(ml.x), lv.mlevels)..., length(lv.coarse.x))
+    work = ntuple(l -> CycleWork(zeros(sizes[l]), zeros(sizes[l]), zeros(sizes[l+1]), zeros(sizes[l+1])), length(sizes) - 1)
+    st = PMultigridState(p, lv, smoothers, work, true, 0)
+    st.ok = levels_ok(lv) && all(s -> s.ok, smoothers)
+    st
+end
+
+function preconditioner_update!(st::PMultigridState, mf::MatrixFreeJacobian)
+    _prepared(mf)
+    lv = st.lv
+    nskip = lv.nskip
+    update_levels!(lv, mf)
+    skipped = lv.nskip > nskip
+    ok = levels_ok(lv)
+    if tangents_finite(mf)
+        smoother_update!(st.smoothers[1], mf)          # the fine smoother always follows the operator the Krylov method applies
+    else
+        ok = false
+    end
+    if !skipped && ok                                  # intermediate levels re-prepared: their smoothers follow
+        for (i, ml) in enumerate(lv.mlevels)
+            smoother_update!(st.smoothers[i+1], ml.mf)
+        end
+    end
+    st.ok = ok && all(s -> s.ok, st.smoothers)
+    st
+end
+
+"One V-cycle on `A x = b` from the level of `smoothers[1]` down (tuples peeled at compile time: no dispatch per level)."
+function vcycle!(x, b, smoothers::Tuple, Ps::Tuple, work::Tuple, coarse::CoarseLevel)
+    S, P, w = first(smoothers), first(Ps), first(work)
+    smooth!(x, S, b; zero_guess=true, residual=w.r)                  # pre-smoothing, residual for the restriction
+    restrict!(w.bc, P, w.r)
+    if length(smoothers) == 1
+        solve!(w.xc, coarse.ns, w.bc)                                 # coarsest level
+    else
+        vcycle!(w.xc, w.bc, Base.tail(smoothers), Base.tail(Ps), Base.tail(work), coarse)
+    end
+    prolongate!(w.e, P, w.xc)
+    x .+= w.e
+    smooth!(x, S, b)                                                  # post-smoothing (same polynomial: symmetric cycle)
+    x
+end
+
+function LinearAlgebra.ldiv!(y::AbstractVector, st::PMultigridState, r::AbstractVector)
+    if !st.ok
+        fill!(y, NaN)                                                 # reported by the Krylov solve as not converged
+        return y
+    end
+    st.ncycle += 1
+    vcycle!(y, r, st.smoothers, st.lv.P, st.work, st.lv.coarse)
+end
+
+preconditioner_builds(st::PMultigridState) = preconditioner_builds(st.lv)
+preconditioner_ok(st::PMultigridState) = st.ok

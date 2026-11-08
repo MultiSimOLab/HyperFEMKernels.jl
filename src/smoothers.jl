@@ -50,6 +50,7 @@ mutable struct ChebyshevState{MF}
     z::Vector{Float64}
     d::Vector{Float64}
     nbuild::Int
+    ok::Bool                      # the last estimate was finite and positive (otherwise the interval is not usable)
 end
 
 "Fixed start vector for the eigenvalue estimate (deterministic, not aligned with any special mode)."
@@ -66,7 +67,7 @@ Blocks of the prepared tangent `mf` (from its stored tangents) and the interval 
 function smoother_setup(cfg::Chebyshev, mf::MatrixFreeJacobian)
     blocks = preconditioner_setup(BlockJacobi(), mf)
     n = size(mf, 1)
-    st = ChebyshevState(cfg, mf, blocks, 0.0, 0.0, 0.0, chebyshev_start(n), zeros(n), zeros(n), zeros(n), 0)
+    st = ChebyshevState(cfg, mf, blocks, 0.0, 0.0, 0.0, chebyshev_start(n), zeros(n), zeros(n), zeros(n), 0, true)
     smoother_interval!(st)
 end
 
@@ -78,9 +79,15 @@ function smoother_update!(st::ChebyshevState, mf::MatrixFreeJacobian)
 end
 
 function smoother_interval!(st::ChebyshevState)
-    _, λmax = eigenvalue_bounds(st.mf, st.blocks; k=st.cfg.eig_iters, b=st.start)
-    (isfinite(λmax) && λmax > 0) || error("HyperFEMKernels: Chebyshev: the estimate of λmax of the block-preconditioned tangent is $λmax (not SPD?)")
+    λmax = try
+        eigenvalue_bounds(st.mf, st.blocks; k=st.cfg.eig_iters, b=st.start)[2]
+    catch err
+        err isa LinearAlgebra.LAPACKException || err isa ArgumentError || rethrow()
+        NaN                                # NaN tangents: the Hessenberg eigenvalues fail
+    end
     st.λest = λmax
+    st.ok = isfinite(λmax) && λmax > 0     # a non-finite or non-positive estimate (NaN tangent, not SPD): not usable
+    st.ok || return st
     st.b = st.cfg.inflate * λmax
     st.a = st.b / st.cfg.range
     st.nbuild += 1
