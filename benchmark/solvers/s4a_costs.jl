@@ -37,3 +37,21 @@ tpro = best(() -> prolongate!(y, P, xc), 10); tres = best(() -> restrict!(yc, P,
 @printf("  λmax estimate (10)   %.2f ms  (%.1f P)   λest %.3f\n", 1e3teig, teig / tP, sm.λest)
 @printf("  Chebyshev degree %d  %.2f ms  (%.1f P; zero guess + residual)\n", cfg.degree, 1e3tsm, tsm / tP)
 @printf("  prolongation         %.2f ms  (%.2f P)   restriction %.2f ms (%.2f P)\n", 1e3tpro, tpro / tP, 1e3tres, tres / tP)
+
+# the V-cycle and its setup (coarse LU; GAMG through krylov.jl)
+model = get_background_model(get_triangulation(c2.U))
+V1 = TestFESpace(model, ReferenceFE(lagrangian, VectorValue{3,Float64}, 1), c2.D, conformity=:H1)
+spaces = Any[(c2.U, c2.V), (TrialFESpace(V1, c2.D, 0.0), V1)]
+pst = HK.preconditioner_setup(PMultigrid(spaces), mf)
+ldiv!(y, pst, v)
+tcyc = best(() -> ldiv!(y, pst, v), 10)
+acyc = @allocated ldiv!(y, pst, v)
+w = pst.work[1]
+tco = best(() -> solve!(w.xc, pst.lv.coarse.ns, w.bc), 10)
+tup = best(() -> HK.preconditioner_update!(pst, mf), 3)
+aup = @allocated HK.preconditioner_update!(pst, mf)
+tlv = best(() -> HK.update_levels!(pst.lv, mf), 3)
+tsu = best(() -> HK.smoother_update!(pst.smoothers[1], mf), 3)
+@printf("  V-cycle (LU coarse)  %.2f ms  (%.1f P), %.1f kB allocated; coarse LU solve %.2f ms (%.1f P)\n", 1e3tcyc, tcyc / tP, acyc / 1e3, 1e3tco, tco / tP)
+@printf("  update per Newton it %.1f ms  (%.1f P), %.1f MB allocated; levels %.1f ms (%.1f P), fine smoother %.1f ms (%.1f P)\n",
+        1e3tup, tup / tP, aup / 1e6, 1e3tlv, tlv / tP, 1e3tsu, tsu / tP)
