@@ -18,7 +18,7 @@
 Gridap `LinearSolver` for a `KernelOperator` with `jacobian = :matrixfree`: a Krylov method of
 Krylov.jl (`:gmres`, `:fgmres`, `:cg`) applied to the `MatrixFreeJacobian` returned by
 `allocate_jacobian`, right-preconditioned by `preconditioner` (an operator slot: `LaggedAssembled`,
-`BlockJacobi`; `nothing` = none). The stopping test is on the true residual,
+`BlockJacobi`, `PMultigrid`; `nothing` = none). The stopping test is on the true residual,
 `‖b − J x‖ ≤ atol + rtol ‖b‖`; `restart` is the GMRES memory; `maxiter` counts all iterations.
 `:cg` applies the preconditioner on the left (symmetric form; the monitored norm is then the
 preconditioned one, as in Krylov.jl). `vector` is the vector type of the Krylov workspace.
@@ -102,8 +102,17 @@ function Algebra.numerical_setup!(ns::MatrixFreeSolverNS, mf::MatrixFreeJacobian
     ns
 end
 
+"Whether a preconditioner state can be applied (a p-multigrid with a non-finite level cannot); `true` by default."
+preconditioner_ok(::Any) = true
+
 function Algebra.solve!(x::AbstractVector, ns::MatrixFreeSolverNS, b::AbstractVector)
     s, ws, P = ns.solver, ns.workspace, ns.prec
+    if P !== nothing && !preconditioner_ok(P)
+        # e.g. a NaN tangent on a coarse level of the p-multigrid: no Krylov iteration, a failed solve the Newton handles
+        fill!(x, 0.0)
+        ns.iters, ns.converged, ns.rnorm = 0, false, NaN
+        return x
+    end
     ldiv = P !== nothing
     N = ldiv ? P : LinearAlgebra.I
     kw = (; atol=s.atol, rtol=ns.rtol, itmax=s.maxiter, verbose=s.verbose)

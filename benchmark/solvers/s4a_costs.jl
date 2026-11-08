@@ -1,0 +1,57 @@
+# S4-A: cost of the p-multigrid pieces against one matrix-free product on the cube (design/solvers-s4a-status.md).
+#   julia -t 6 --project=benchmark/solvers benchmark/solvers/s4a_costs.jl 20
+include(joinpath(@__DIR__, "cases.jl"))
+using HyperFEMKernels
+using Gridap.Algebra
+using LinearAlgebra, SparseArrays, Printf, Random
+const HK = HyperFEMKernels
+Random.seed!(1)
+best(f, n=5) = minimum(@elapsed(f()) for _ in 1:n)
+n = parse(Int, ARGS[1])
+c2, _ = build_case(["mech_cube", string(n), "2"]); c1, _ = build_case(["mech_cube", string(n), "1"])
+res, jac = c2.res(1.0), c2.jac(1.0)
+op = KernelOperator(res, jac, c2.U, c2.V; jacobian=:matrixfree)
+N = num_free_dofs(c2.U)
+x = get_free_dof_values(interpolate(X -> VectorValue(0.0, 0.0, 0.1X[1]), c2.U))
+mf = allocate_jacobian(op, x); jacobian!(mf, op, x)
+v = randn(N); y = zeros(N)
+tP = best(() -> mul!(y, mf, v), 20)
+tprep = best(() -> prepare!(mf, x))
+st = HK.preconditioner_setup(BlockJacobi(), mf)
+tbt = best(() -> HK.block_diagonal!(st, mf; route=:tangents))
+tbe = best(() -> HK.block_diagonal!(st, mf; route=:elements), 3)
+tdiv = best(() -> ldiv!(y, st, v), 10)
+cfg = HK.Chebyshev()
+sm = HK.smoother_setup(cfg, mf)
+teig = best(() -> HK.smoother_interval!(sm), 3)
+r = zeros(N)
+tsm = best(() -> HK.smooth!(y, sm, v; zero_guess=true, residual=r), 15)
+P = Prolongation(c1.U, c2.U)
+xc = randn(size(P, 2)); yc = zeros(size(P, 2))
+tpro = best(() -> prolongate!(y, P, xc), 10); tres = best(() -> restrict!(yc, P, v), 10)
+@printf("mech_cube %d Q2: %d dofs, Q1 %d dofs, threads %d\n", n, N, size(P, 2), Threads.nthreads())
+@printf("  product P            %.2f ms\n", 1e3tP)
+@printf("  prepare!             %.2f ms  (%.1f P)\n", 1e3tprep, tprep / tP)
+@printf("  blocks :tangents     %.2f ms  (%.1f P)   :elements %.2f ms (%.1f P)\n", 1e3tbt, tbt / tP, 1e3tbe, tbe / tP)
+@printf("  block application    %.2f ms  (%.2f P)\n", 1e3tdiv, tdiv / tP)
+@printf("  λmax estimate (10)   %.2f ms  (%.1f P)   λest %.3f\n", 1e3teig, teig / tP, sm.λest)
+@printf("  Chebyshev degree %d  %.2f ms  (%.1f P; zero guess + residual)\n", cfg.degree, 1e3tsm, tsm / tP)
+@printf("  prolongation         %.2f ms  (%.2f P)   restriction %.2f ms (%.2f P)\n", 1e3tpro, tpro / tP, 1e3tres, tres / tP)
+
+# the V-cycle and its setup (coarse LU; GAMG through krylov.jl)
+model = get_background_model(get_triangulation(c2.U))
+V1 = TestFESpace(model, ReferenceFE(lagrangian, VectorValue{3,Float64}, 1), c2.D, conformity=:H1)
+spaces = Any[(c2.U, c2.V), (TrialFESpace(V1, c2.D, 0.0), V1)]
+pst = HK.preconditioner_setup(PMultigrid(spaces), mf)
+ldiv!(y, pst, v)
+tcyc = best(() -> ldiv!(y, pst, v), 10)
+acyc = @allocated ldiv!(y, pst, v)
+w = pst.work[1]
+tco = best(() -> solve!(w.xc, pst.lv.coarse.ns, w.bc), 10)
+tup = best(() -> HK.preconditioner_update!(pst, mf), 3)
+aup = @allocated HK.preconditioner_update!(pst, mf)
+tlv = best(() -> HK.update_levels!(pst.lv, mf), 3)
+tsu = best(() -> HK.smoother_update!(pst.smoothers[1], mf), 3)
+@printf("  V-cycle (LU coarse)  %.2f ms  (%.1f P), %.1f kB allocated; coarse LU solve %.2f ms (%.1f P)\n", 1e3tcyc, tcyc / tP, acyc / 1e3, 1e3tco, tco / tP)
+@printf("  update per Newton it %.1f ms  (%.1f P), %.1f MB allocated; levels %.1f ms (%.1f P), fine smoother %.1f ms (%.1f P)\n",
+        1e3tup, tup / tP, aup / 1e6, 1e3tlv, tlv / tP, 1e3tsu, tsu / tP)

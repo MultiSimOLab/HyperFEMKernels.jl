@@ -107,10 +107,11 @@ Preconditioner slot: the inverse of the nodal block diagonal of the tangent, per
 one; couplings between fields are dropped). The blocks are gathered from the element tangents by a
 kernel that scatters only the diagonal blocks (no sparsity pattern, `nc² × nodes` storage) at
 every update and inverted with StaticArrays (a singular block is an error). Weak on its own; it is
-the Jacobi part of the Chebyshev–Jacobi smoother of the p-multigrid (S4). Cost of an update: one
-element-tangent pass (an assembly without the scatter); computing the blocks from the tangents
-`prepare!` stores is the cheaper route left for S4. Needs the same numbering of test and trial
-dofs; not available with H(div) fields or skeleton integrals in the Jacobian.
+the Jacobi part of the Chebyshev–Jacobi smoother of the p-multigrid (S4). The blocks come from the
+point tangents `prepare!` stored (≈ one matrix-free product per update) when every Jacobian group
+has nodal fields without Hessian slots, and from an element-tangent pass otherwise (see
+`block_diagonal!`). Needs the same numbering of test and trial dofs; not available with H(div)
+fields or skeleton integrals in the Jacobian.
 """
 struct BlockJacobi <: OperatorPreconditioner end
 
@@ -128,9 +129,11 @@ mutable struct BlockJacobiState
     fields::Vector{Any}         # FieldBlocks{NC} per field
     nthreads::Int
     nbuild::Int
+    strict::Bool                # a singular or non-finite block is an error (otherwise `ok` is cleared)
+    ok::Bool                    # every inverted block is finite
 end
 
-function preconditioner_setup(::BlockJacobi, mf::MatrixFreeJacobian)
+function preconditioner_setup(::BlockJacobi, mf::MatrixFreeJacobian; strict::Bool=true)
     _prepared(mf)
     op = mf.op
     op.signed && error("HyperFEMKernels: BlockJacobi is not available with H(div) fields yet")
@@ -140,7 +143,7 @@ function preconditioner_setup(::BlockJacobi, mf::MatrixFreeJacobian)
     isempty(op.fallback.jtrians) || error("HyperFEMKernels: BlockJacobi needs the whole Jacobian in the kernels (hybrid fallback present)")
     tables = op.jgroups[1].tables
     fields = Any[field_blocks(fl, t) for (fl, t) in zip(op.fields, tables)]
-    st = BlockJacobiState(fields, op.nthreads, 0)
+    st = BlockJacobiState(fields, op.nthreads, 0, strict, true)
     block_diagonal!(st, mf)
     st
 end
@@ -168,21 +171,95 @@ function field_blocks(fl::FieldLayout, t::FieldTable)
 end
 field_blocks(::FieldLayout, ::PiolaTable) = error("HyperFEMKernels: BlockJacobi is not available with H(div) fields yet")
 
-"Accumulate the nodal blocks of the tangent at `mf.x` and invert them."
-function block_diagonal!(st::BlockJacobiState, mf::MatrixFreeJacobian)
+"""
+    block_diagonal!(st, mf; route = :auto)
+
+Accumulate the nodal blocks of the tangent at `mf.x` and invert them. Two routes, same blocks:
+- `:tangents` (S4-A): from the point tangents `prepare!` already stored in `mf` — per cell and point the weight
+  matrices of the field and `B_n[ci, cj] += dV Σ_{a,b} W_v[n, a] T[slot_v(ci, a), slot_u(cj, b)] W_u[n, b]`, no element
+  tangent formed (≈ the cost of one matrix-free product);
+- `:elements`: one element-tangent pass of the kernels scattering only the diagonal blocks (an assembly without the
+  scatter; the S3 route).
+`:auto` takes `:tangents` when every Jacobian group supports it (nodal fields without Hessian slots) and `:elements`
+otherwise.
+"""
+function block_diagonal!(st::BlockJacobiState, mf::MatrixFreeJacobian; route::Symbol=:auto)
     op = mf.op
+    route === :auto && (route = blocks_from_tangents_ok(op) ? :tangents : :elements)
+    route in (:tangents, :elements) || throw(ArgumentError("HyperFEMKernels: block_diagonal!: route must be :auto, :tangents or :elements"))
     for fb in st.fields
         fill!(fb.B, 0.0)
     end
-    dvals = [get_dirichlet_dof_values(s) for s in field_spaces(op.U)]
-    for g in op.jgroups
-        run_cells!(Val(:blocks), nothing, st, op, g, mf.x, dvals)
+    if route === :tangents
+        blocks_from_tangents_ok(op) || error("HyperFEMKernels: the nodal blocks cannot be computed from the stored tangents (Hessian slots or non-nodal fields)")
+        for (gi, g) in enumerate(op.jgroups)
+            gd = mf.data[gi]
+            for color in g.colors                     # cells of a colour share no free test dof: no shared block
+                nchunks = clamp(length(color) ÷ 16, 1, st.nthreads)
+                @sync for ch in Iterators.partition(color, cld(length(color), nchunks))
+                    Threads.@spawn blocks_from_tangents!(st.fields, g, gd, ch)
+                end
+            end
+        end
+    else
+        dvals = [get_dirichlet_dof_values(s) for s in field_spaces(op.U)]
+        for g in op.jgroups
+            run_cells!(Val(:blocks), nothing, st, op, g, mf.x, dvals)
+        end
     end
+    ok = true
     for fb in st.fields
-        invert_blocks!(fb, st.nthreads)
+        invert_blocks!(fb, st.nthreads, st.strict)
+        st.strict || (ok &= all(isfinite, fb.Binv))      # nb × nc² entries: the cheap finiteness check of the tangent
     end
+    st.ok = ok
     st.nbuild += 1
     st
+end
+
+"Whether every Jacobian group of `op` lets the nodal blocks come from the stored tangents."
+blocks_from_tangents_ok(op) = all(op.jgroups) do g
+    g isa Group && all(t -> t isa FieldTable, g.tables) && !any(has_hess, g.smv) && !any(has_hess, g.smu)
+end
+
+"Nodal blocks of the cells `cells` of group `g` from its stored tangents `gd` (one task; buffers allocated per call)."
+function blocks_from_tangents!(fields, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D}, gd::GroupData{D}, cells) where {NSV,NSU,PF,TT,AUX,SV,SU,D}
+    Ws = map(t -> zeros(t.nn, wcols(t)), g.tables)
+    map(fields, g.tables, g.smv, g.smu, Ws) do fb, t, spv, spu, W
+        _blocks_from_tangents!(fb, t, spv, spu, W, g, gd, cells)
+    end
+    nothing
+end
+
+function _blocks_from_tangents!(fb::FieldBlocks{NC}, t::FieldTable{D,T,NN,NC}, spv::SlotSpec{NC,LVV}, spu::SlotSpec{NC,LVU}, W,
+                                g::Group{NSV}, gd::GroupData{D}, cells) where {NC,D,T,NN,LVV,LVU,NSV}
+    (LVV == 0 || LVU == 0) && return nothing          # the field enters the Jacobian only off the diagonal block (or not at all)
+    np = g.geo.np
+    B = fb.B
+    @inbounds for cell in cells
+        sc = g.cellmap[cell]
+        for q in 1:np
+            iJt = TensorValue{D,D,Float64,D * D}(ntuple(i -> gd.iJt[i, q, cell], Val(D * D)))
+            point_weights!(W, t, q, iJt)
+            dV = gd.dV[q, cell]
+            for n in 1:NN
+                blk = fb.block_of[n, sc]
+                blk == 0 && continue
+                for cj in 1:NC, ci in 1:NC
+                    s = 0.0
+                    for b in 1:LVU
+                        wu = W[n, wcol(spu, b)]
+                        ju = spu.sm[cj, b]
+                        for a in 1:LVV
+                            s += W[n, wcol(spv, a)] * gd.T[spv.sm[ci, a]+(ju-1)*NSV, q, cell] * wu
+                        end
+                    end
+                    B[ci, cj, blk] += dV * s
+                end
+            end
+        end
+    end
+    nothing
 end
 
 "Scatter the diagonal node blocks of the element tangent `KeT` (stored transposed) of cell `sc`."
@@ -204,15 +281,15 @@ function _scatter_blocks!(fb::FieldBlocks{NC}, KeT, sc::Integer) where {NC}
     fb
 end
 
-function invert_blocks!(fb::FieldBlocks{NC}, nthreads::Int) where {NC}
+function invert_blocks!(fb::FieldBlocks{NC}, nthreads::Int, strict::Bool=true) where {NC}
     nb = size(fb.B, 3)
     nchunks = clamp(nb ÷ 256, 1, nthreads)
     @sync for ch in Iterators.partition(1:nb, cld(nb, nchunks))
-        Threads.@spawn _invert_blocks!(fb, ch)
+        Threads.@spawn _invert_blocks!(fb, ch, strict)
     end
     fb
 end
-function _invert_blocks!(fb::FieldBlocks{NC}, blocks) where {NC}
+function _invert_blocks!(fb::FieldBlocks{NC}, blocks, strict::Bool=true) where {NC}
     B, Binv, dofs = fb.B, fb.Binv, fb.dofs
     @inbounds for blk in blocks
         # rows/columns of fixed components → identity, so the block is invertible and they stay untouched
@@ -220,8 +297,8 @@ function _invert_blocks!(fb::FieldBlocks{NC}, blocks) where {NC}
                 i, j = (k - 1) % NC + 1, (k - 1) ÷ NC + 1
                 dofs[i, blk] == 0 || dofs[j, blk] == 0 ? (i == j ? 1.0 : 0.0) : B[i, j, blk]
             end, NC * NC))
-        Mi = inv(M)
-        all(isfinite, Mi) || error("HyperFEMKernels: BlockJacobi: singular nodal block (block $blk of a field with $NC components)")
+        Mi = all(isfinite, M) ? inv(M) : M                # a NaN block is left as it is (non-strict: reported through `ok`)
+        strict && !all(isfinite, Mi) && error("HyperFEMKernels: BlockJacobi: singular nodal block (block $blk of a field with $NC components)")
         for j in 1:NC, i in 1:NC
             Binv[i, j, blk] = Mi[i, j]
         end

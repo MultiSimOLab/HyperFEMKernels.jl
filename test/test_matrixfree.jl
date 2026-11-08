@@ -1,5 +1,10 @@
 Random.seed!(1)
 const TOL_MF = 1e-11   # different summation order than the assembled product (sum factorisation)
+# Order 3: Gridap's nodal basis comes from inverting the monomial Vandermonde matrix of the whole n-cube (64 × 64 in 3D)
+# and agrees with the closed-form 1D Lagrange polynomials of the tensor-product tables to ~5e-10 only (round-off of that
+# inversion, not of the kernels; measured 2026-11-07); the Jacobian products then agree to ~1e-10.
+tol_tables(order) = order >= 3 ? 1e-8 : 1e-12
+tol_mf(order) = order >= 3 ? 1e-9 : TOL_MF
 
 @testset "1D Lagrange basis: partition of unity, Kronecker property, derivative sum" begin
     for Q in 1:4, ξ in (0.0, 0.3, 1.0)
@@ -11,8 +16,10 @@ const TOL_MF = 1e-11   # different summation order than the assembled product (s
     @test N ≈ [0.0, 1.0, 0.0]
 end
 
-@testset "tensor-product tables reproduce the ND tables (Q1/Q2, 2D/3D)" begin
-    for (prob, D) in ((poisson_2d(), 2), (poisson_2d(; order=2), 2), (elasticity_3d(), 3), (elasticity_3d(; order=2), 3))
+@testset "tensor-product tables reproduce the ND tables (Q1/Q2/Q3, 2D/3D)" begin
+    for (prob, D, order) in ((poisson_2d(), 2, 1), (poisson_2d(; order=2), 2, 2), (poisson_2d(; order=3), 2, 3),
+                             (elasticity_3d(), 3, 1), (elasticity_3d(; order=2), 3, 2), (elasticity_3d(; n=(2, 2, 1), order=3), 3, 3))
+        atol = tol_tables(order)
         xq = quad_points(prob.dΩ)
         t = HK.FieldTable(prob.U, xq, D)
         tp = HK.TPTable(t, xq)
@@ -23,10 +30,10 @@ end
         for (lin, idx) in enumerate(CartesianIndices(ntuple(_ -> Q, D))), (pl, pidx) in enumerate(CartesianIndices(ntuple(_ -> P, D)))
             n = tp.nodeperm[lin]; q = tp.pointperm[pl]
             ii, aa = Tuple(idx), Tuple(pidx)
-            @test t.N[q, n] ≈ prod(d -> tp.N1[aa[d], ii[d]], 1:D) atol = 1e-12
+            @test t.N[q, n] ≈ prod(d -> tp.N1[aa[d], ii[d]], 1:D) atol = atol
             for d in 1:D
                 g = prod(e -> e == d ? tp.dN1[aa[e], ii[e]] : tp.N1[aa[e], ii[e]], 1:D)
-                @test t.dN[q, n][d] ≈ g atol = 1e-10
+                @test t.dN[q, n][d] ≈ g atol = 100atol
             end
         end
     end
@@ -65,9 +72,11 @@ end
 end
 
 @testset "matrix-free Jacobian equals the assembled one" begin
-    for (name, prob) in (("Poisson Q1", poisson_2d()), ("Poisson Q2", poisson_2d(; order=2)),
-                         ("elasticity Q2", elasticity_3d(; order=2)), ("coupled u–φ Q1", coupled_3d()),
-                         ("Poisson P1 (dense fallback)", poisson_2d(; simplex=true)))
+    for (name, prob, order) in (("Poisson Q1", poisson_2d(), 1), ("Poisson Q2", poisson_2d(; order=2), 2),
+                                ("elasticity Q2", elasticity_3d(; order=2), 2), ("elasticity Q3", elasticity_3d(; n=(2, 2, 1), order=3), 3),
+                                ("Poisson Q3", poisson_2d(; n=(3, 2), order=3), 3), ("coupled u–φ Q1", coupled_3d(), 1),
+                                ("Poisson P1 (dense fallback)", poisson_2d(; simplex=true), 1))
+        tol = tol_mf(order)
         x = randx(prob.U)
         op = KernelOperator(prob.res, prob.jac, prob.U, prob.V)
         A = Algebra.jacobian(op, x)
@@ -76,13 +85,13 @@ end
         dx = randn(num_free_dofs(prob.U))
         y = mf * dx
         @test size(mf) == size(A)
-        @test reldiff(y, A * dx) < TOL_MF
+        @test reldiff(y, A * dx) < tol
         y2 = similar(y); LinearAlgebra.mul!(y2, mf, dx)
         @test y2 == y
         # new state → prepare! again
         x2 = randx(prob.U)
         prepare!(mf, x2)
-        @test reldiff(mf * dx, Algebra.jacobian(op, x2) * dx) < TOL_MF
+        @test reldiff(mf * dx, Algebra.jacobian(op, x2) * dx) < tol
     end
 end
 

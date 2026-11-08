@@ -111,13 +111,29 @@ end
 "Mechanical plate: the EM plate mesh (8 × 0.8 × 40), order 1, top face sheared by 0.4 along z (shear strain 0.5)."
 mech_plate(n::Int) = mech_case(GmshDiscreteModel(joinpath(MESHDIR, "em_plate_n$(n).msh")), 1, [0.0, 0.0, 0.4])
 
-"Mechanical box: the EM box, order 2, top face sheared by 0.001 along x (shear strain 0.5)."
-function mech_box(nx::Int, ny::Int, nz::Int)
+"""
+Mechanical box: the EM box (0.1 × 0.01 × 0.002, slender; Cartesian elements 10:5:1), order `p` (2 by default),
+top face sheared by 0.001 along x (shear strain 0.5). With `p = 1` it is the Q1 discretisation S4-A's coarse level sees.
+"""
+function mech_box(nx::Int, ny::Int, nz::Int, p::Int=2)
     m = CartesianDiscreteModel((0.0, 0.1, 0.0, 0.01, 0.0, 0.002), (nx, ny, nz))
     labels = get_face_labeling(m)
     add_tag_from_tags!(labels, "fixedup", CartesianTags.face0YZ⁺)
     add_tag_from_tags!(labels, "topsuf", CartesianTags.faceXY1⁺)
-    mech_case(m, 2, [0.001, 0.0, 0.0])
+    mech_case(m, p, [0.001, 0.0, 0.0])
+end
+
+"""
+Mechanical cube: unit cube of n³ cubic hexahedra (isotropic), order `p` (2 by default), clamped at x = 0 and sheared
+at x = 1 by 0.1 along z (shear strain 0.1; at 0.5 and 0.2 the clamped–sheared cube bisected: 97 Newton iterations in 5 steps at n = 10, 7–12 solves at n = 20–34). The h-independence acceptance case of S4-A (design/solvers-s4a-plan.md,
+DS4A-3): the same physics as the box without its element anisotropy. Q2 dofs ≈ 3 (2n+1)³: n = 20 → 207k, n = 34 → 985k.
+"""
+function mech_cube(n::Int, p::Int=2)
+    m = CartesianDiscreteModel((0.0, 1.0, 0.0, 1.0, 0.0, 1.0), (n, n, n))
+    labels = get_face_labeling(m)
+    add_tag_from_tags!(labels, "fixedup", CartesianTags.face0YZ⁺)
+    add_tag_from_tags!(labels, "topsuf", CartesianTags.face1YZ⁺)
+    mech_case(m, p, [0.0, 0.0, 0.1])
 end
 
 # Periodic unit cell of a magneto-active composite (the "periodic cell" study of 2026-09, magnetoactive_unit_cell_2D.jl,
@@ -173,7 +189,8 @@ function build_case(words)
     kind == "hmre_cell_c" && return hmre_cell(parse(Int, words[2]), parse(Float64, words[3]), parse(Int, words[4]); contrast=parse(Float64, words[5])), "hmre_cell$(words[2])d_h$(words[3])_p$(words[4])_c$(words[5])"
     kind == "hmre_cell" && return hmre_cell(parse(Int, words[2]), parse(Float64, words[3]), parse(Int, get(words, 4, "1"))), "hmre_cell$(words[2])d_h$(words[3])_p$(get(words, 4, "1"))"
     kind == "mech_plate" && return mech_plate(parse(Int, words[2])), "mech_plate_n$(words[2])"
-    kind == "mech_box" && return mech_box(parse.(Int, words[2:4])...), "mech_box_$(join(words[2:4], 'x'))"
+    kind == "mech_box" && return mech_box(parse.(Int, words[2:4])..., parse(Int, get(words, 5, "2"))), "mech_box_$(join(words[2:4], 'x'))" * (get(words, 5, "2") == "2" ? "" : "_p$(words[5])")
+    kind == "mech_cube" && return mech_cube(parse(Int, words[2]), parse(Int, get(words, 3, "2"))), "mech_cube_$(words[2])_p$(get(words, 3, "2"))"
     kind == "em_plate" && return em_plate(parse(Int, words[2])), "em_plate_n$(words[2])"
     kind == "em_plate_c" && return em_plate_c(parse(Int, words[2])), "em_plate_c_n$(words[2])"
     kind == "em_box" && return em_box(parse.(Int, words[2:4])...), "em_box_$(join(words[2:4], 'x'))"

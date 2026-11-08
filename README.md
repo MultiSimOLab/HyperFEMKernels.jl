@@ -236,9 +236,42 @@ in between, the exact tangent is applied matrix-free, so the Newton trajectory i
 while the factorisations or AMG hierarchies are paid `1/k` of the time (our measurement, same
 machine: Q2 electro-mechanics, 218k dofs, MUMPS as the slot's solver, ×5 on the whole `solve!` with
 `k = 3` and the same 20 Newton iterations as MUMPS at every iteration).
-`BlockJacobi()` is the nodal block diagonal gathered without a matrix (the smoother of the coming
-p-multigrid). With HyperFEM, `StaticNonlinearModel(…; backend = CompiledBackend(jacobian = :matrixfree),
+`BlockJacobi()` is the nodal block diagonal, computed from the point tangents the matrix-free
+Jacobian already stores (no matrix, no second element pass). With HyperFEM,
+`StaticNonlinearModel(…; backend = CompiledBackend(jacobian = :matrixfree),
 nls = NewtonRaphson(MatrixFreeSolver(…)))` runs this inside the drivers (line searches included).
+
+### p-multigrid
+
+On quadrilaterals and hexahedra of order 2 and higher the tangent never needs to be assembled:
+`PMultigrid` is a preconditioner slot that runs one V-cycle per Krylov iteration over lower-order
+spaces on the same mesh — Chebyshev smoothing on the block-preconditioned tangent of every
+matrix-free level, exact transfers between the nested Lagrangian spaces, and a coarse solver on the
+assembled lowest-order level. The coarse operators are rediscretised from the same weak form at the
+state interpolated onto each level, and follow the Newton's operator from load step to load step.
+
+```julia
+# spaces of every level, finest first: the working space and the Q1 space on the same mesh and boundary conditions
+V1 = TestFESpace(model, ReferenceFE(lagrangian, VectorValue{3,Float64}, 1), dirichlet_tags = tags)
+spaces = [(U, V), (TrialFESpace(V1, g), V1)]          # with HyperFEM: spaces = level_spaces(U, V, D)
+N1 = near_nullspace(spaces[2][1])                     # rigid-body modes of the Q1 space (HyperFEM)
+ls = MatrixFreeSolver(; krylov = :gmres, rtol = 1e-8,
+                       preconditioner = PMultigrid(spaces; coarse = PETScSolver(:preonly, :gamg; nullspace = N1),
+                                                   coarse_every = 3))
+```
+
+`coarse` is any Gridap `LinearSolver`; one AMG V-cycle (HyperFEM's `PETScSolver(:preonly, :gamg)`
+with the rigid-body modes of the coarse space) is the production choice, `LUSolver()` the reference.
+`smoother = Chebyshev(; degree = 2, range = 20)` by default. The levels must have the same fields and
+the same closed Dirichlet boundary (tags with their edges and vertices). Our measurement (Mac
+M-series, Julia 1.13, 6 threads, PETSc serial; nonlinear elasticity on a unit cube, Q2, 5 load steps,
+Krylov rtol 1e-10): the same Newton iterations as CG + GAMG on the assembled tangent, 25–28 GMRES
+iterations per Newton iteration from 25k to 957k dofs, and per Newton iteration ×4.8 faster at 197k
+and ×8.3 at 957k with a quarter of the memory (4.3 vs 16.8 GB); on Q3 at 227k dofs ×19. On slender
+structures (few elements across the thickness) the point smoother limits it (×3 with 86 iterations
+on a 50:5:1 Q2 cantilever, measured with a degree-4 smoother). The coarse spaces' Dirichlet values
+are overwritten by the slot; an indefinite tangent (past a limit point) or a non-finite level makes
+the linear solve fail, which the Newton handles as a failed iteration.
 
 ### Scalar functionals
 
@@ -288,6 +321,8 @@ run with both backends as part of the test suite.
 - Second derivatives of Lagrangian fields in cell and boundary integrals and in the matrix-free
   Jacobian (dense weights; sum factorisation is used for the fields without Hessian terms). `∇∇` on
   skeleton integrals and of Raviart–Thomas fields goes to the Gridap fallback; third derivatives too.
+- p-multigrid for single-field problems; multi-field (u, φ) saddle points need a block smoother and
+  are not covered yet (use `LaggedAssembled` with HyperFEM's block preconditioners).
 - Shared-memory parallelism (threads). Distributed runs with GridapDistributed and GPU execution
   are design targets: kernels are allocation-free and states use a GPU-friendly layout.
 - Gridap is pinned to 0.19.9, because the engine reads Gridap's internal expression tree.
