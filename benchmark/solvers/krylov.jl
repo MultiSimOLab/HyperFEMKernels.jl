@@ -105,7 +105,7 @@ function make_solver(config::String, N, rtol, U, bs, opts, restart=50; case=noth
         pw = String(parts[findfirst(i -> i ≥ 3 && !startswith(parts[i], "lag"), eachindex(parts))])
         if startswith(pw, "pmg")                # S4-A: mf_<krylov>_pmg[lu|mumps][_lagN][_degK][_rngA][_q3] (coarse GAMG V-cycle by default)
             deg = findfirst(startswith("deg"), parts); rng = findfirst(startswith("rng"), parts)
-            smoother = Chebyshev(; degree=deg === nothing ? 4 : parse(Int, parts[deg][4:end]),
+            smoother = Chebyshev(; degree=deg === nothing ? 2 : parse(Int, parts[deg][4:end]),
                                  range=rng === nothing ? 20.0 : parse(Float64, parts[rng][4:end]))
             orders = "q3" in parts ? (3, 2, 1) : (hex_order(case.V), 1)
             spaces = pmg_level_spaces(case, orders)

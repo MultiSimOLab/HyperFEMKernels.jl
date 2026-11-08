@@ -9,19 +9,21 @@
 # block application per degree, the first product saved when the initial guess is zero.
 
 """
-    Chebyshev(; degree = 4, range = 20.0, inflate = 1.1, eig_iters = 10)
+    Chebyshev(; degree = 2, range = 20.0, inflate = 1.1, eig_iters = 10)
 
 Smoother configuration: Chebyshev iteration of `degree` on `[b/range, b]`, `b = inflate · λmax`, with `λmax` the Ritz
 estimate of the block-preconditioned operator after `eig_iters` Arnoldi steps from a fixed start vector (reproducible
-iteration counts). Defaults: degree 4, range 20 (DS4A-9, provisional until the step 5 sweep); deal.II's step-37 uses
-degree 5 and range 15–20, PETSc's GAMG smoother `esteig` [0.1, 1.1]·λmax.
+iteration counts). Defaults: degree 2, range 20 (DS4A-9, decided 2026-11-08 by measurement: with one AMG V-cycle as
+coarse solver the p-multigrid cycle is coarse-limited, degrees 2–5 give 26.6–21.7 Krylov iterations on the Q2 cube at
+197k dofs and degree 2 the lowest time; degree 1 doubles the iterations; the range changes them by ±2 %). deal.II's
+step-37 uses degree 5 and range 15–20 with an exact coarse solve, PETSc's GAMG smoother `esteig` [0.1, 1.1]·λmax.
 """
 struct Chebyshev
     degree::Int
     range::Float64
     inflate::Float64
     eig_iters::Int
-    function Chebyshev(; degree::Int=4, range::Real=20.0, inflate::Real=1.1, eig_iters::Int=10)
+    function Chebyshev(; degree::Int=2, range::Real=20.0, inflate::Real=1.1, eig_iters::Int=10)
         degree ≥ 1 || throw(ArgumentError("HyperFEMKernels: Chebyshev: degree must be ≥ 1"))
         range > 1 || throw(ArgumentError("HyperFEMKernels: Chebyshev: range must be > 1"))
         inflate ≥ 1 || throw(ArgumentError("HyperFEMKernels: Chebyshev: inflate must be ≥ 1"))
