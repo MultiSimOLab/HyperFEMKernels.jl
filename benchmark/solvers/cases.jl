@@ -200,11 +200,11 @@ function hem_plate_c(n::Int, k::Int, φtop::Real=0.2; hybrid::Bool=false)
     add_tag_from_tags!(labels, "topsuf", CartesianTags.faceX1Z⁺)
     hier = MeshHierarchy(m, k + 1)
     model = fine_model(hier)
-    # hybrid = true (S5): the mechanical part wrapped in HessianRegularization with a TangentSwitch, so that the Newton's
-    # HybridTangent can project the mechanical tangent (the electro-mechanical coupling itself is not projected)
+    # hybrid = true (S5): the coupled model wrapped in HessianRegularization with a TangentSwitch — the Newton's
+    # HybridTangent projects the total mechanical tangent ∂²Ψ/∂F∂F(F, E), elastic and Maxwell parts, in E
     switch = hybrid ? TangentSwitch() : nothing
-    mech = hybrid ? HessianRegularization(NeoHookean3D(λ=10.0, μ=1.0); δ=1e-6, switch) : NeoHookean3D(λ=10.0, μ=1.0)
-    physmodel = ElectroMechModel(IdealDielectric(ε=1.0), mech)
+    em = ElectroMechModel(IdealDielectric(ε=1.0), NeoHookean3D(λ=10.0, μ=1.0))
+    physmodel = hybrid ? HessianRegularization(em; δ=1e-6, switch) : em
     kin = (Kinematics(Mechano, Solid), Kinematics(Electro, Solid))
     Ω = Triangulation(model); dΩ = Measure(Ω, 2)
     Du = BoundaryConditions(BoundaryCondition("fixedup", [0.0, 0.0, 0.0]),
