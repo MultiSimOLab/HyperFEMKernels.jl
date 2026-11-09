@@ -49,7 +49,9 @@ function parse_args(args)
     grow = parse(Float64, get(kw, "grow", "1"))      # LoadStepping: growth of ΔΛ after an easy step (1: never)
     easy = parse(Int, get(kw, "easy", "10"))         # LoadStepping: a step with ≤ easy Newton iterations is easy
     atolp = parse(Float64, get(kw, "atolp", "1e-6"))  # HybridTangent: absolute tolerance of the projected mode (S5 cases)
-    words, backend, config, rtol, nsteps, bs, opts, ewmax, probe, restart, grow, easy, atolp
+    nlverbose = parse(Int, get(kw, "verbose", "1"))   # Newton verbosity (2: one row per iteration)
+    maxit = parse(Int, get(kw, "maxit", "0"))         # Newton maxiter (0: the case's)
+    words, backend, config, rtol, nsteps, bs, opts, ewmax, probe, restart, grow, easy, atolp, nlverbose, maxit
 end
 
 "Matrix-free product vs SpMV of the assembled tangent, and one preconditioner application, at the final state (10 repetitions each)."
@@ -177,7 +179,7 @@ function make_solver(config::String, N, rtol, U, bs, opts, restart=50; case=noth
 end
 
 function main(args)
-    words, backend, config, rtol, nsteps_arg, bs, opts, ewmax, probe, restart, grow, easy, atolp = parse_args(args)
+    words, backend, config, rtol, nsteps_arg, bs, opts, ewmax, probe, restart, grow, easy, atolp, nlverbose, maxit = parse_args(args)
     t0 = time()
     t_case = @elapsed ((case, tag) = build_case(words))
     nsteps = nsteps_arg > 0 ? nsteps_arg : case.nsteps
@@ -188,7 +190,8 @@ function main(args)
     # S5: a case with a TangentSwitch (hem_plate_ch) runs the hybrid Newton — the projected tangent after a failed line
     # search or an indefinite tangent reported by the linear solver; atolp= is its absolute tolerance in projected mode
     tangent = hasproperty(case, :switch) && case.switch !== nothing ? HybridTangent(; atol_projected=atolp) : ConsistentTangent()
-    nls = NewtonRaphson(ls; case.nls_kw..., verbose=1, tangent,
+    nlkw = maxit > 0 ? merge(case.nls_kw, (; maxiter=maxit)) : case.nls_kw
+    nls = NewtonRaphson(ls; nlkw..., verbose=nlverbose, tangent,
                         forcing=!ew ? nothing : ewmax === nothing ? EisenstatWalker() : EisenstatWalker(ηmax=ewmax, η0=min(1e-2, ewmax)))
     t_build = @elapsed (m = StaticNonlinearModel(case.res, case.jac, case.U, case.V, case.D; nls, backend, case.extra...))
     n = length(m.caches.x)
