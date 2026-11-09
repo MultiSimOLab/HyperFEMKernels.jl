@@ -132,7 +132,22 @@ function make_solver(config::String, N, rtol, U, bs, opts, restart=50; case=noth
                  PETScSolver(:preonly, :gamg; nullspace=near_nullspace(Uc), blocksize=bs, options=opts)
         return HMultigridSolver(case.hier, case.space; krylov, rtol, maxiter=300, restart, reuse, degree, range, coarse)
     end
-    if parts[1] == "fs"                        # S2: fs_<split>[_<fact>_<prec>][_<ksp>][_lagN][_lublocks]
+    if parts[1] == "fshmg"                     # S4-B step 5: fshmg_<split>[_lagN][_lu]  (one h-multigrid V-cycle per block, coarse GAMG by default)
+        hasproperty(case, :hier) && hasproperty(case, :spaces) || error("fshmg_* needs a multi-field hierarchy case (hem_plate_c)")
+        split_ = Symbol(parts[2])
+        lag = findfirst(startswith("lag"), parts); reuse = lag === nothing ? 1 : parse(Int, parts[lag][4:end])
+        blocks = map(case.spaces) do space
+            Vc = space(level_model(case.hier, 1))
+            Uc = TrialFESpace(Vc)
+            bl = HyperFEM.Solvers.nodal_blocks(Vc)
+            ncomp = allequal(length, bl) ? length(bl[1]) : 1         # 3 for an unmasked displacement, 1 with masked components or for the potential
+            coarse = "lu" in parts ? LUSolver() :
+                     PETScSolver(:preonly, :gamg; nullspace=near_nullspace(Uc), blocksize=ncomp, options=opts)
+            HMultigridSolver(case.hier, space; krylov=:cg, reuse, coarse)
+        end
+        return FieldSplitSolver(U, blocks; split=split_, rtol, maxiter=300, restart)
+    end
+    if parts[1] == "fs"                        # S2: fs_<split>[_<fact>_<prec>][_<ksp>][_lublocks]
         U isa MultiFieldFESpace || error("fs_* needs a multi-field case")
         split_ = Symbol(parts[2])
         fact = length(parts) ≥ 4 && parts[3] in ("upper", "lower", "full", "diag") ? Symbol(parts[3]) : :upper

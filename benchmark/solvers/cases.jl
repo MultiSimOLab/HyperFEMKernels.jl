@@ -185,6 +185,39 @@ function hcube_hex(n::Int, k::Int, λ::Real=10.0)
     hcube(m, k; λ)
 end
 
+"""
+EM plate with constrained electrodes on a hierarchy (S4-B step 5): the 8 × 0.8 × 40 plate as (7n, 2n, 19n) Cartesian
+hexahedra refined `k` times, clamped at z = 0, electrodes on both faces y = 0 (φ = 0) and y = 0.8 (φ = φtop) with u_y = 0
+on them (closed Cartesian tags inherited by every level; `em_plate_c`'s mid-plane electrode is a vertex tag that the
+refinement does not inherit). φtop = 0.2 over the whole thickness: the field of `em_plate_c` (0.1 over half of it).
+The case carries the hierarchy and the test-space builders of the two fields (`spaces`).
+"""
+function hem_plate_c(n::Int, k::Int, φtop::Real=0.2)
+    m = CartesianDiscreteModel((0.0, 8.0, 0.0, 0.8, 0.0, 40.0), (7n, 2n, 19n))
+    labels = get_face_labeling(m)
+    add_tag_from_tags!(labels, "fixedup", CartesianTags.faceXY0⁺)
+    add_tag_from_tags!(labels, "botsuf", CartesianTags.faceX0Z⁺)
+    add_tag_from_tags!(labels, "topsuf", CartesianTags.faceX1Z⁺)
+    hier = MeshHierarchy(m, k + 1)
+    model = fine_model(hier)
+    physmodel = ElectroMechModel(IdealDielectric(ε=1.0), NeoHookean3D(λ=10.0, μ=1.0))
+    kin = (Kinematics(Mechano, Solid), Kinematics(Electro, Solid))
+    Ω = Triangulation(model); dΩ = Measure(Ω, 2)
+    Du = BoundaryConditions(BoundaryCondition("fixedup", [0.0, 0.0, 0.0]),
+                            BoundaryCondition("topsuf", [0.0, 0.0, 0.0]; mask=(false, true, false)),
+                            BoundaryCondition("botsuf", [0.0, 0.0, 0.0]; mask=(false, true, false)))
+    Dφ = BoundaryConditions(BoundaryCondition("botsuf", 0.0, Λ -> Λ), BoundaryCondition("topsuf", φtop, Λ -> Λ))
+    D = MultiFieldBC([Du, Dφ])
+    space_u(mm) = TestFESpace(mm, ReferenceFE(lagrangian, VectorValue{3,Float64}, 1), Du, conformity=:H1)
+    space_φ(mm) = TestFESpace(mm, ReferenceFE(lagrangian, Float64, 1), Dφ, conformity=:H1)
+    Vu, Vφ = space_u(model), space_φ(model)
+    V = MultiFieldFESpace([Vu, Vφ])
+    U = MultiFieldFESpace([TrialFESpace(Vu, Du, 1.0), TrialFESpace(Vφ, Dφ, 1.0)])
+    res(Λ) = ((u, φ), (v, vφ)) -> HyperFEM.residual(physmodel, kin, (u, φ), (v, vφ), dΩ)
+    jac(Λ) = ((u, φ), (du, dφ), (v, vφ)) -> HyperFEM.jacobian(physmodel, kin, (u, φ), (du, dφ), (v, vφ), dΩ)
+    (; res, jac, U, V, D, nls_kw=(maxiter=20, atol=1e-10, rtol=1e-8), nsteps=5, extra=(;), hier, spaces=(space_u, space_φ))
+end
+
 # Periodic unit cell of a magneto-active composite (the "periodic cell" study of 2026-09, magnetoactive_unit_cell_2D.jl,
 # adapted to the BoundaryConditions API and to both backends; 3D by the same construction): soft magnetically inert
 # matrix (Mooney–Rivlin + IdealMagnetic, χ = 0), rigid inclusion (×100) with remanent magnetisation Mr along x
@@ -232,7 +265,7 @@ function hmre_cell(dim::Int, h::Real, order::Int=1, R::Real=(dim == 2 ? 0.175 : 
     (; res, jac, U, V, D, nls_kw=(maxiter=20, atol=1e-10, rtol=1e-8), nsteps=10, extra=(;))
 end
 
-"Case from command-line words: em_plate n | em_box nx ny nz | hmre r [rv] | mech_plate n | mech_box nx ny nz | hmre_cell dim h [order] | hmre_cell_c dim h order contrast."
+"Case from command-line words: em_plate n | em_plate_c n | hem_plate_c n k | em_box nx ny nz | hmre r [rv] | mech_plate n | mech_box nx ny nz | hmre_cell dim h [order] | hmre_cell_c dim h order contrast."
 function build_case(words)
     kind = words[1]
     kind == "hmre_cell_c" && return hmre_cell(parse(Int, words[2]), parse(Float64, words[3]), parse(Int, words[4]); contrast=parse(Float64, words[5])), "hmre_cell$(words[2])d_h$(words[3])_p$(words[4])_c$(words[5])"
@@ -244,6 +277,7 @@ function build_case(words)
     kind == "mech_cube" && return mech_cube(parse(Int, words[2]), parse(Int, get(words, 3, "2"))), "mech_cube_$(words[2])_p$(get(words, 3, "2"))"
     kind == "em_plate" && return em_plate(parse(Int, words[2])), "em_plate_n$(words[2])"
     kind == "em_plate_c" && return em_plate_c(parse(Int, words[2])), "em_plate_c_n$(words[2])"
+    kind == "hem_plate_c" && return hem_plate_c(parse(Int, words[2]), parse(Int, words[3])), "hem_plate_c_n$(words[2])_k$(words[3])"
     kind == "em_box" && return em_box(parse.(Int, words[2:4])...), "em_box_$(join(words[2:4], 'x'))"
     kind == "hmre" && return hmre(parse(Float64, words[2]), parse(Float64, get(words, 3, "2"))), "hmre_r$(words[2])"
     error("unknown case $kind")

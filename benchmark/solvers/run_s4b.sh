@@ -11,6 +11,7 @@ case "$MODE" in
   hex) N=$1; K=$2; shift 2; CASE="hcube_hex $N $K" ;;
   tetl) H=$1; K=$2; L=$3; shift 3; CASE="hcube_tet $H $K $L" ;;     # λ of the neo-Hookean law (10: ν = 0.45; 1.5: ν = 0.3)
   hexl) N=$1; K=$2; L=$3; shift 3; CASE="hcube_hex $N $K $L" ;;
+  em) N=$1; K=$2; shift 2; CASE="hem_plate_c $N $K" ;;                # step 5: EM plate (u, φ), fs_additive vs fshmg_additive
   *) echo "unknown mode $MODE"; exit 1 ;;
 esac
 for cfg in "$@"; do
