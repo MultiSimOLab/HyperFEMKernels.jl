@@ -12,6 +12,8 @@ case "$MODE" in
   tetl) H=$1; K=$2; L=$3; shift 3; CASE="hcube_tet $H $K $L" ;;     # λ of the neo-Hookean law (10: ν = 0.45; 1.5: ν = 0.3)
   hexl) N=$1; K=$2; L=$3; shift 3; CASE="hcube_hex $N $K $L" ;;
   em) N=$1; K=$2; shift 2; CASE="hem_plate_c $N $K" ;;                # step 5: EM plate (u, φ), fs_additive vs fshmg_additive
+  emphi) N=$1; K=$2; P=$3; shift 3; CASE="hem_plate_c $N $K $P" ;;     # S5: EM plate with the electrode voltage P (pull-in sweep)
+  emh) N=$1; K=$2; P=$3; shift 3; CASE="hem_plate_ch $N $K $P" ;;     # S5: the same with the hybrid Newton (projected mechanical tangent)
   *) echo "unknown mode $MODE"; exit 1 ;;
 esac
 for cfg in "$@"; do

@@ -46,7 +46,10 @@ function parse_args(args)
     ewmax = haskey(kw, "ewmax") ? parse(Float64, kw["ewmax"]) : nothing   # ηmax of the forcing term (_ew); library default if absent
     probe = get(kw, "probe", "0") == "1"          # mf_*: time the matrix-free product vs the SpMV and the preconditioner application
     restart = parse(Int, get(kw, "restart", "50"))   # mf_*: GMRES restart (PETSc's default is 30)
-    words, backend, config, rtol, nsteps, bs, opts, ewmax, probe, restart
+    grow = parse(Float64, get(kw, "grow", "1"))      # LoadStepping: growth of ΔΛ after an easy step (1: never)
+    easy = parse(Int, get(kw, "easy", "10"))         # LoadStepping: a step with ≤ easy Newton iterations is easy
+    atolp = parse(Float64, get(kw, "atolp", "1e-6"))  # HybridTangent: absolute tolerance of the projected mode (S5 cases)
+    words, backend, config, rtol, nsteps, bs, opts, ewmax, probe, restart, grow, easy, atolp
 end
 
 "Matrix-free product vs SpMV of the assembled tangent, and one preconditioner application, at the final state (10 repetitions each)."
@@ -174,7 +177,7 @@ function make_solver(config::String, N, rtol, U, bs, opts, restart=50; case=noth
 end
 
 function main(args)
-    words, backend, config, rtol, nsteps_arg, bs, opts, ewmax, probe, restart = parse_args(args)
+    words, backend, config, rtol, nsteps_arg, bs, opts, ewmax, probe, restart, grow, easy, atolp = parse_args(args)
     t0 = time()
     t_case = @elapsed ((case, tag) = build_case(words))
     nsteps = nsteps_arg > 0 ? nsteps_arg : case.nsteps
@@ -182,13 +185,18 @@ function main(args)
     ew = endswith(config, "_ew")
     ls = make_solver(ew ? config[1:end-3] : config, N, rtol, case.U, bs, opts, restart; case)
     startswith(config, "mf_") && (backend = CompiledBackend(jacobian=:matrixfree))   # the Newton receives the operator
-    nls = NewtonRaphson(ls; case.nls_kw..., verbose=1, forcing=!ew ? nothing : ewmax === nothing ? EisenstatWalker() : EisenstatWalker(ηmax=ewmax, η0=min(1e-2, ewmax)))
+    # S5: a case with a TangentSwitch (hem_plate_ch) runs the hybrid Newton — the projected tangent after a failed line
+    # search or an indefinite tangent reported by the linear solver; atolp= is its absolute tolerance in projected mode
+    tangent = hasproperty(case, :switch) && case.switch !== nothing ? HybridTangent(; atol_projected=atolp) : ConsistentTangent()
+    nls = NewtonRaphson(ls; case.nls_kw..., verbose=1, tangent,
+                        forcing=!ew ? nothing : ewmax === nothing ? EisenstatWalker() : EisenstatWalker(ηmax=ewmax, η0=min(1e-2, ewmax)))
     t_build = @elapsed (m = StaticNonlinearModel(case.res, case.jac, case.U, case.V, case.D; nls, backend, case.extra...))
     n = length(m.caches.x)
-    @printf("%s  backend=%s  config=%s  rtol=%.0e  bs=%d  opts=\"%s\"  threads=%d  DOFs=%d  nullspace %d modes (%.2f s)  build %.1f s  rss %.2f GB\n",
-            tag, backend isa Symbol ? backend : "compiled/$(backend.jacobian)", config, rtol, bs, opts, Threads.nthreads(), n, size(N, 2), t_null, t_build, rss())
+    @printf("%s  backend=%s  config=%s  rtol=%.0e  bs=%d  opts=\"%s\"  threads=%d  DOFs=%d  nullspace %d modes (%.2f s)  build %.1f s  rss %.2f GB%s%s\n",
+            tag, backend isa Symbol ? backend : "compiled/$(backend.jacobian)", config, rtol, bs, opts, Threads.nthreads(), n, size(N, 2), t_null, t_build, rss(),
+            grow > 1 ? "  grow=$grow easy=$easy" : "", tangent isa HybridTangent ? "  hybrid atolp=$atolp" : "")
     flush(stdout)
-    st = @timed solve!(m; stepping=(nsteps=nsteps, maxbisec=2))
+    st = @timed solve!(m; stepping=LoadStepping(; nsteps, maxbisec=2, grow, easy))
     x, flag = st.value
     log = nls.log
     nit = log.niters; nsolves = log.nsolves

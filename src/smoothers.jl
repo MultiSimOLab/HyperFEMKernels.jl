@@ -39,6 +39,14 @@ function chebyshev_damping(c::Chebyshev)
     1 / cosh(c.degree * acosh(θ / δ))
 end
 
+"""
+Whether the smoother's last interval estimate found an **indefinite** operator: finite nodal blocks and a finite
+Ritz estimate, but a non-positive Ritz value (a limit point, pull-in, buckling). Distinct from a non-finite tangent
+(`ok == false` as well, `smoother_indefinite == false`), which is a plain failure; the Newton with a `HybridTangent`
+switches to the projected tangent on the indefinite signal (S5).
+"""
+smoother_indefinite(st) = !st.ok && st.blocks.ok && isfinite(st.λest) && isfinite(st.λmin) && (st.λmin ≤ 0 || st.λest ≤ 0)
+
 "Smoother state on one level: the operator, its nodal blocks, the interval and the work vectors."
 mutable struct ChebyshevState{MF}
     cfg::Chebyshev

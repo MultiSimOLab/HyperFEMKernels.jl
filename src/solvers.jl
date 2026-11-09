@@ -8,7 +8,7 @@
 # `preconditioners.jl`, applied with `ldiv!`.
 #
 # Hooks read by a Newton solver (HyperFEM's `NewtonRaphson` through its HyperFEMKernels extension):
-# `linear_converged`, `linear_iterations`, `set_tolerance!`, `tolerance`, `preconditioner_builds`.
+# `linear_converged`, `linear_iterations`, `linear_indefinite`, `set_tolerance!`, `tolerance`, `preconditioner_builds`.
 # They are generic functions of this package, not exported.
 
 """
@@ -75,6 +75,7 @@ mutable struct MatrixFreeSolverNS{S<:MatrixFreeSolver,W,P,V} <: Algebra.Numerica
     rtol::Float64            # tolerance in force for the next solves (`set_tolerance!`)
     iters::Int
     converged::Bool
+    indefinite::Bool         # the last solve met an indefinite operator (a negative curvature in CG, an indefinite level)
     rnorm::Float64           # relative residual of the last solve when it had to be checked (NaN otherwise)
     nsetup::Int
 end
@@ -92,7 +93,7 @@ function Algebra.numerical_setup(ss::MatrixFreeSolverSS, mf::MatrixFreeJacobian)
     length(mf.x) == n || error("HyperFEMKernels: the MatrixFreeJacobian has not been prepared (call jacobian!(mf, op, x) before numerical_setup)")
     prec = s.preconditioner === nothing ? nothing : preconditioner_setup(s.preconditioner, mf)
     ws = _workspace(s, n)
-    MatrixFreeSolverNS(s, mf, ws, prec, similar(ws.x), s.rtol, 0, true, NaN, 1)
+    MatrixFreeSolverNS(s, mf, ws, prec, similar(ws.x), s.rtol, 0, true, false, NaN, 1)
 end
 
 function Algebra.numerical_setup!(ns::MatrixFreeSolverNS, mf::MatrixFreeJacobian)
@@ -104,13 +105,18 @@ end
 
 "Whether a preconditioner state can be applied (a p-multigrid with a non-finite level cannot); `true` by default."
 preconditioner_ok(::Any) = true
+"Whether a preconditioner state found an indefinite tangent (the S5 instability signal); `false` by default."
+preconditioner_indefinite(::Any) = false
 
 function Algebra.solve!(x::AbstractVector, ns::MatrixFreeSolverNS, b::AbstractVector)
     s, ws, P = ns.solver, ns.workspace, ns.prec
+    ns.indefinite = false
     if P !== nothing && !preconditioner_ok(P)
-        # e.g. a NaN tangent on a coarse level of the p-multigrid: no Krylov iteration, a failed solve the Newton handles
+        # e.g. a NaN tangent on a coarse level of the p-multigrid: no Krylov iteration, a failed solve the Newton handles;
+        # an indefinite level is reported as such (the Newton with a HybridTangent switches tangent, S5)
         fill!(x, 0.0)
         ns.iters, ns.converged, ns.rnorm = 0, false, NaN
+        ns.indefinite = preconditioner_indefinite(P)
         return x
     end
     ldiv = P !== nothing
@@ -124,7 +130,9 @@ function Algebra.solve!(x::AbstractVector, ns::MatrixFreeSolverNS, b::AbstractVe
         elseif s.krylov === :fgmres
             Krylov.fgmres!(ws, ns.mf, b; N, ldiv, restart=true, kw...)
         else
-            Krylov.cg!(ws, ns.mf, b; M=N, ldiv, kw...)
+            # linesearch = true: a non-positive curvature pᵀAp ≤ 0 stops CG (status "nonpositive curvature detected") with
+            # the last positive-curvature iterate instead of diverging — reported below as a failed, indefinite solve
+            Krylov.cg!(ws, ns.mf, b; M=N, ldiv, linesearch=true, kw...)
         end
     finally
         s.blas_threads > 0 && BLAS.set_num_threads(nblas)
@@ -133,6 +141,11 @@ function Algebra.solve!(x::AbstractVector, ns::MatrixFreeSolverNS, b::AbstractVe
     ns.iters = ws.stats.niter
     ns.converged = ws.stats.solved
     ns.rnorm = NaN
+    if s.krylov === :cg && occursin("curvature", ws.stats.status)
+        ns.converged = false
+        ns.indefinite = true
+        return x
+    end
     if !ns.converged
         # Krylov.jl stops without its residual test on an Arnoldi breakdown (an exact preconditioner
         # solves in one iteration) or at the iteration limit: decide on the true residual
@@ -151,6 +164,8 @@ end
 linear_converged(ns::MatrixFreeSolverNS) = ns.converged
 "Krylov iterations of the last `solve!`."
 linear_iterations(ns::MatrixFreeSolverNS) = ns.iters
+"Whether the last `solve!` met an indefinite operator (CG's non-positive curvature, or an indefinite multigrid level): S5."
+linear_indefinite(ns::MatrixFreeSolverNS) = ns.indefinite
 "Relative tolerance of the next solves (`nothing` restores the solver's own)."
 set_tolerance!(ns::MatrixFreeSolverNS, rtol) = (ns.rtol = rtol === nothing ? ns.solver.rtol : _check_rtol(rtol); ns)
 "Relative tolerance in force."
