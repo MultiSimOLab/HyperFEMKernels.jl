@@ -9,6 +9,8 @@ T=${T:-6}
 case "$MODE" in
   tet) H=$1; K=$2; shift 2; CASE="hcube_tet $H $K" ;;
   hex) N=$1; K=$2; shift 2; CASE="hcube_hex $N $K" ;;
+  tetl) H=$1; K=$2; L=$3; shift 3; CASE="hcube_tet $H $K $L" ;;     # λ of the neo-Hookean law (10: ν = 0.45; 1.5: ν = 0.3)
+  hexl) N=$1; K=$2; L=$3; shift 3; CASE="hcube_hex $N $K $L" ;;
   *) echo "unknown mode $MODE"; exit 1 ;;
 esac
 for cfg in "$@"; do

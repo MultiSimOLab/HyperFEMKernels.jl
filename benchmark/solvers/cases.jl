@@ -96,8 +96,8 @@ end
 
 # Mechanical block alone (the clean S1 measurement, D4 refined 2026-10-30): the EM geometries with the
 # neo-Hookean solid only, clamped at "fixedup" and sheared by a prescribed displacement of "topsuf".
-function mech_case(model, order, utop)
-    physmodel = NeoHookean3D(λ=10.0, μ=1.0)
+function mech_case(model, order, utop; λ=10.0)
+    physmodel = NeoHookean3D(λ=λ, μ=1.0)                  # λ = 10: ν = λ/(2(λ+μ)) = 0.45; λ = 1.5: ν = 0.3
     k = Kinematics(Mechano, Solid)
     Ω = Triangulation(model); dΩ = Measure(Ω, 2order)
     Du = BoundaryConditions(BoundaryCondition("fixedup", [0.0, 0.0, 0.0]), BoundaryCondition("topsuf", utop, Λ -> Λ))
@@ -169,20 +169,20 @@ order 1): `hcube_tet(h, k)` from the Gmsh tetrahedra of size `h`, `hcube_hex(n, 
 carries the hierarchy (`hier`) and the test-space builder (`space`) the h-multigrid solver needs; the Newton sees the fine
 model only.
 """
-function hcube(coarse, k::Int; utop=[0.0, 0.0, 0.1])
+function hcube(coarse, k::Int; utop=[0.0, 0.0, 0.1], λ=10.0)
     hier = MeshHierarchy(coarse, k + 1)
-    case = mech_case(fine_model(hier), 1, utop)
+    case = mech_case(fine_model(hier), 1, utop; λ)
     Du = case.D
     space(m) = TestFESpace(m, ReferenceFE(lagrangian, VectorValue{3,Float64}, 1), Du, conformity=:H1)
     (; case..., hier, space)
 end
-hcube_tet(h::Real, k::Int) = hcube(GmshDiscreteModel(cube_tet_mesh(h)), k)
-function hcube_hex(n::Int, k::Int)
+hcube_tet(h::Real, k::Int, λ::Real=10.0) = hcube(GmshDiscreteModel(cube_tet_mesh(h)), k; λ)
+function hcube_hex(n::Int, k::Int, λ::Real=10.0)
     m = CartesianDiscreteModel((0.0, 1.0, 0.0, 1.0, 0.0, 1.0), (n, n, n))
     labels = get_face_labeling(m)
     add_tag_from_tags!(labels, "fixedup", CartesianTags.face0YZ⁺)
     add_tag_from_tags!(labels, "topsuf", CartesianTags.face1YZ⁺)
-    hcube(m, k)
+    hcube(m, k; λ)
 end
 
 # Periodic unit cell of a magneto-active composite (the "periodic cell" study of 2026-09, magnetoactive_unit_cell_2D.jl,
@@ -239,8 +239,8 @@ function build_case(words)
     kind == "hmre_cell" && return hmre_cell(parse(Int, words[2]), parse(Float64, words[3]), parse(Int, get(words, 4, "1"))), "hmre_cell$(words[2])d_h$(words[3])_p$(get(words, 4, "1"))"
     kind == "mech_plate" && return mech_plate(parse(Int, words[2])), "mech_plate_n$(words[2])"
     kind == "mech_box" && return mech_box(parse.(Int, words[2:4])..., parse(Int, get(words, 5, "2"))), "mech_box_$(join(words[2:4], 'x'))" * (get(words, 5, "2") == "2" ? "" : "_p$(words[5])")
-    kind == "hcube_tet" && return hcube_tet(parse(Float64, words[2]), parse(Int, words[3])), "hcube_tet_h$(words[2])_k$(words[3])"
-    kind == "hcube_hex" && return hcube_hex(parse(Int, words[2]), parse(Int, words[3])), "hcube_hex_$(words[2])_k$(words[3])"
+    kind == "hcube_tet" && return hcube_tet(parse(Float64, words[2]), parse(Int, words[3]), parse(Float64, get(words, 4, "10"))), "hcube_tet_h$(words[2])_k$(words[3])" * (length(words) ≥ 4 ? "_lam$(words[4])" : "")
+    kind == "hcube_hex" && return hcube_hex(parse(Int, words[2]), parse(Int, words[3]), parse(Float64, get(words, 4, "10"))), "hcube_hex_$(words[2])_k$(words[3])" * (length(words) ≥ 4 ? "_lam$(words[4])" : "")
     kind == "mech_cube" && return mech_cube(parse(Int, words[2]), parse(Int, get(words, 3, "2"))), "mech_cube_$(words[2])_p$(get(words, 3, "2"))"
     kind == "em_plate" && return em_plate(parse(Int, words[2])), "em_plate_n$(words[2])"
     kind == "em_plate_c" && return em_plate_c(parse(Int, words[2])), "em_plate_c_n$(words[2])"
