@@ -199,6 +199,9 @@ function main(args)
     st = @timed solve!(m; stepping=LoadStepping(; nsteps, maxbisec=2, grow, easy))
     x, flag = st.value
     log = nls.log
+    # S5: the converged state is saved with the row's tag (comparison of the hybrid Newton with the direct solver)
+    savex = get(ENV, "HFK_SAVE_X", "")
+    isempty(savex) || (mkpath(dirname(savex)); open(f -> write(f, x), savex, "w"); @printf("  state saved: %s (%d dofs, ‖x‖ = %.10e)\n", savex, length(x), norm(x)))
     nit = log.niters; nsolves = log.nsolves
     klin = log.nlinear; kmean = klin / max(nit, 1)
     klast = collect(linear_history(nls))
