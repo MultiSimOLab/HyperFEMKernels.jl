@@ -63,12 +63,16 @@ function em_box(nx::Int, ny::Int, nz::Int)
 end
 
 "hMRE beam (Short_magnet geometry refined by r on the beam, rv elsewhere), mechanics with the magnetic load."
-function hmre(r::Real, rv::Real=2)
+function hmre(r::Real, rv::Real=2; hybrid::Bool=false, Bfactor::Real=1.0)
     model = GmshDiscreteModel(joinpath(MESHDIR, "hmre_short_r$(Float64(r))_rv$(Float64(rv)).msh"))
     params = [10.0, 12480.64495232286, 1.0, 2.0, 5195.545287237134, 0.2602717127043121, 2.0]
     modelmech = NonlinearMooneyRivlin2D(λ=(params[1] + params[2]) * 1e2, μ1=params[1] * 1e3, μ2=params[2], α1=params[3], α2=params[4]) +
                 TransverseIsotropy2D(μ=params[5], α1=params[6], α2=params[7])
-    μ0 = 4π * 1e-7; Banorm = 80.0E-9; αr = 10e-3 / μ0
+    # hybrid = true (S5): the mechanical model in HessianRegularization with a TangentSwitch (the Newton's HybridTangent);
+    # Bfactor scales the applied field (the instability sweep)
+    switch = hybrid ? TangentSwitch() : nothing
+    hybrid && (modelmech = HessianRegularization(modelmech; δ=1e-6, switch))
+    μ0 = 4π * 1e-7; Banorm = 80.0E-9 * Bfactor; αr = 10e-3 / μ0
     reffeu = ReferenceFE(lagrangian, VectorValue{2,Float64}, 1)
     Ωs = Triangulation(model, tags=["Beam"]); dΩs = Measure(Ωs, 2)
     Du = BoundaryConditions(BoundaryCondition("Fixed_Solid", [0.0, 0.0]), BoundaryCondition("Fixed_Solid_x", [0.0, 0.0]; mask=(true, false)))
@@ -91,7 +95,8 @@ function hmre(r::Real, rv::Real=2)
     ∂Ψmag∂F(Fn, N, Ba) = (-αr / μ0) * (Ba ⊗ ((invU(Fn)) * N))
     res(Λ) = (u, v) -> ∫((∇(v)' ⊙ (∂Ψs∂F ∘ (F ∘ (∇(u)'), Nh))))dΩs + Λ * ∫((∂Ψmag∂F ∘ (F ∘ (∇(uh⁻)'), Nh, Bah)) ⊙ (∇(v)'))dΩs
     jac(Λ) = (u, du, v) -> ∫(∇(v)' ⊙ ((∂Ψs∂FF ∘ (F ∘ (∇(u)'), Nh)) ⊙ (∇(du)')))dΩs
-    (; res, jac, U, V, D=Du, nls_kw=(maxiter=20, atol=1e-8, rtol=1e-2), nsteps=20, extra=(xh=uh, xh⁻=uh⁻))
+    extra = hybrid ? (xh=uh, xh⁻=uh⁻, tangent_switch=switch) : (xh=uh, xh⁻=uh⁻)
+    (; res, jac, U, V, D=Du, nls_kw=(maxiter=20, atol=1e-8, rtol=1e-2), nsteps=20, extra, switch)
 end
 
 # Mechanical block alone (the clean S1 measurement, D4 refined 2026-10-30): the EM geometries with the
@@ -285,6 +290,7 @@ function build_case(words)
     kind == "hem_plate_c" && return hem_plate_c(parse(Int, words[2]), parse(Int, words[3]), parse(Float64, get(words, 4, "0.2"))), "hem_plate_c_n$(words[2])_k$(words[3])" * (length(words) ≥ 4 ? "_phi$(words[4])" : "")
     kind == "hem_plate_ch" && return hem_plate_c(parse(Int, words[2]), parse(Int, words[3]), parse(Float64, get(words, 4, "0.2")); hybrid=true), "hem_plate_ch_n$(words[2])_k$(words[3])" * (length(words) ≥ 4 ? "_phi$(words[4])" : "")
     kind == "em_box" && return em_box(parse.(Int, words[2:4])...), "em_box_$(join(words[2:4], 'x'))"
-    kind == "hmre" && return hmre(parse(Float64, words[2]), parse(Float64, get(words, 3, "2"))), "hmre_r$(words[2])"
+    kind == "hmre" && return hmre(parse(Float64, words[2]), parse(Float64, get(words, 3, "2")); Bfactor=parse(Float64, get(words, 4, "1"))), "hmre_r$(words[2])" * (length(words) ≥ 4 ? "_B$(words[4])" : "")
+    kind == "hmre_h" && return hmre(parse(Float64, words[2]), parse(Float64, get(words, 3, "2")); hybrid=true, Bfactor=parse(Float64, get(words, 4, "1"))), "hmre_h_r$(words[2])" * (length(words) ≥ 4 ? "_B$(words[4])" : "")
     error("unknown case $kind")
 end
