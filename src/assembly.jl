@@ -288,7 +288,7 @@ quadrature or operation) are added to `fallback` with the reason and are assembl
 function compile_groups(forms::Vector{Form}, U, locs, D::Int, colors, previous=Any[];
                         linear_maps::Bool=true, fallback=Tuple{Any,String}[],
                         skel::Vector{SkeletonData}=SkeletonData[], previous_skel::Vector{SkeletonData}=SkeletonData[],
-                        fields::Vector{FieldLayout}=FieldLayout[], nrows::Int=0, ndl::Int=0)
+                        fields::Vector{FieldLayout}=FieldLayout[], nrows::Int=0, ndl::Int=0, facet_colors::Bool=true)
     groups = Any[]
     Us = field_spaces(U)
     strian = get_triangulation(Us[1])
@@ -302,7 +302,7 @@ function compile_groups(forms::Vector{Form}, U, locs, D::Int, colors, previous=A
                 k = findfirst(s -> s.trian === form.trian, skel)
                 if k === nothing
                     kp = findfirst(s -> s.trian === form.trian, previous_skel)
-                    sd = kp === nothing ? skeleton_data(form.trian, strian, fields, nrows) :
+                    sd = kp === nothing ? skeleton_data(form.trian, strian, fields, nrows; colored=facet_colors) :
                          SkeletonData(form.trian, previous_skel[kp].cells, previous_skel[kp].colors, previous_skel[kp].nzpos)
                     push!(skel, sd)
                 else

@@ -63,10 +63,15 @@ function color_facets(fields::Vector{FieldLayout}, cells::Matrix{Int32}, nrows::
     groups
 end
 
-"Data of a skeleton for the FE spaces on `space_trian`: cells per facet and facet colouring (positions come with the pattern)."
-function skeleton_data(trian::Triangulation, space_trian::Triangulation, fields::Vector{FieldLayout}, nrows::Int)
+"""
+Data of a skeleton for the FE spaces on `space_trian`: cells per facet and facet colouring (positions come
+with the pattern). `colored = false` (a reduction, `KernelFunctional`: no scatter, no races) puts every
+facet in one colour.
+"""
+function skeleton_data(trian::Triangulation, space_trian::Triangulation, fields::Vector{FieldLayout}, nrows::Int; colored::Bool=true)
     cells = skeleton_cells(trian, space_trian)
-    SkeletonData(trian, cells, color_facets(fields, cells, nrows), Matrix{Int32}(undef, 0, 0))
+    colors = colored ? color_facets(fields, cells, nrows) : [Int32.(1:size(cells, 2))]
+    SkeletonData(trian, cells, colors, Matrix{Int32}(undef, 0, 0))
 end
 
 """
@@ -222,7 +227,7 @@ function _materialize_facets!(M::Matrix, a, facets, range, np::Int)
     M
 end
 
-function aux_data(op::KernelOperator, g::SkeletonGroup{NSV,NSU,PF,TT,AUX}) where {NSV,NSU,PF,TT,AUX}
+function aux_data(op, g::SkeletonGroup{NSV,NSU,PF,TT,AUX}) where {NSV,NSU,PF,TT,AUX}   # op: KernelOperator or KernelFunctional
     if g.auxcache[] === nothing
         g.auxcache[] = materialize_aux(g, op.nthreads)
     elseif !op.cache_aux
