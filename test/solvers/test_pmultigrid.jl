@@ -127,6 +127,7 @@ end
     jacobian!(mf, op, xb); numerical_setup!(ns, mf)
     solve!(dx, ns, b)
     @test !HK.linear_converged(ns) && HK.linear_iterations(ns) == 0
+    @test !HK.linear_indefinite(ns)                 # non-finite is not the instability signal
     jacobian!(mf, op, x); numerical_setup!(ns, mf)
     solve!(dx, ns, b); @test HK.linear_converged(ns)
 end
@@ -243,4 +244,17 @@ end
     @test ns.prec.smoothers[1].λmin < 0
     dx = zeros(size(A, 1)); solve!(dx, ns, randn(size(A, 1)))
     @test !HK.linear_converged(ns) && HK.linear_iterations(ns) == 0
+    @test HK.linear_indefinite(ns)                  # the S5 signal: HyperFEM's HybridTangent switches tangent on it
+    # without a preconditioner CG itself meets the negative curvature (Krylov.jl's linesearch mode): failed, indefinite,
+    # and the iterate is finite (the last positive-curvature one)
+    ls0 = MatrixFreeSolver(; krylov=:cg, rtol=1e-8, maxiter=500)
+    ns0 = numerical_setup(symbolic_setup(ls0, mf), mf)
+    solve!(dx, ns0, randn(size(A, 1)))
+    @test !HK.linear_converged(ns0) && HK.linear_indefinite(ns0) && all(isfinite, dx)
+    # a definite tangent through the same setups: converged, not indefinite
+    op2 = KernelOperator(c.lres, c.ljac, U, V; jacobian=:matrixfree)       # linear elasticity: SPD
+    x2 = zeros(num_free_dofs(U)); mf2 = allocate_jacobian(op2, x2); jacobian!(mf2, op2, x2)
+    ns2 = numerical_setup(symbolic_setup(ls0, mf2), mf2)
+    solve!(dx, ns2, randn(size(A, 1)))
+    @test HK.linear_converged(ns2) && !HK.linear_indefinite(ns2)
 end

@@ -339,3 +339,5 @@ end
 
 preconditioner_builds(st::PMultigridState) = preconditioner_builds(st.lv)
 preconditioner_ok(st::PMultigridState) = st.ok
+"An indefinite tangent on some level (a non-positive Ritz value of a smoother with finite blocks), the S5 signal."
+preconditioner_indefinite(st::PMultigridState) = !st.ok && levels_ok(st.lv) && any(smoother_indefinite, st.smoothers)
