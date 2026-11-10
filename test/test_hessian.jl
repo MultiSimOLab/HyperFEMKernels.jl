@@ -3,7 +3,7 @@
 # defined) at 1e-13 relative, and against the push-forward of `hessian_nonaffine` (HyperFEM's
 # `push_hessian`, reproduced in common.jl) on non-affine quadrilaterals and hexahedra; exact
 # Hessians of an interpolated quadratic field; FE functions (not the unknown) with ∇∇; the
-# matrix-free Jacobian; the fallback of ∇∇ on skeletons; zero allocations.
+# matrix-free Jacobian; ∇∇ on skeleton integrals (C⁰ interior penalty, Hessian jumps); zero allocations.
 
 Random.seed!(3)
 const HTOL = 1e-13
@@ -221,17 +221,171 @@ end
     end
 end
 
-@testset "∇∇ on a skeleton: clean fallback of that triangulation only" begin
+# --- ∇∇ on skeleton integrals --------------------------------------------------------------
+# The Hessian of each side uses the Jt⁻¹ and the curvature of that side's cell map at its mapped points.
+# Reference forms: Gridap's ∇∇/Δ on affine cells, `hessian_nonaffine` (and its trace) on mapped n-cubes.
+
+sk_noalloc(op, x) = all(a -> a.bytes == 0, allocations(op, x))
+Hn_tr(a) = tr(hessian_nonaffine(a))
+
+"""
+C⁰ interior penalty (biharmonic-like) scalar problem on the skeleton of the whole mesh: jump of the
+normal derivative, consistency terms {Δ}⟦∂ₙ⟧, and a nonlinear Hessian-jump term
+(1 + {Δu}²) ⟦∇∇u⟧:⟦∇∇v⟧ (dual numbers). `H`, `L` are the Hessian and Laplacian used in the forms
+(∇∇ and Δ for the kernels; `hessian_nonaffine` and its trace for the reference on mapped cells).
+"""
+function c0ip_problem(model; order=2, degree=2order, H=∇∇, L=Δ)
+    Ω = Triangulation(model); dΩ = Measure(Ω, degree)
+    Λ = SkeletonTriangulation(model); dΛ = Measure(Λ, degree)
+    n = get_normal_vector(Λ)
+    V = TestFESpace(model, ReferenceFE(lagrangian, Float64, order), dirichlet_tags="boundary")
+    U = TrialFESpace(V, x -> x[1]^2 - 0.5 * x[2])
+    hF = CellField(get_array(∫(1)dΛ), Λ)
+    γ = 3.0
+    dn(a) = jump(∇(a) ⋅ n)
+    res(u, v) = ∫(H(v) ⊙ H(u) + v * (u * u))dΩ +
+                ∫((γ / hF) * (dn(v) * dn(u)) - mean(L(u)) * dn(v) - mean(L(v)) * dn(u) +
+                  (0.2 * hF) * ((jump(H(u)) ⊙ jump(H(v))) * (1.0 + mean(L(u)) * mean(L(u)))))dΛ
+    jac(u, du, v) = ∫(H(v) ⊙ H(du) + 2.0 * (v * (u * du)))dΩ +
+                    ∫((γ / hF) * (dn(v) * dn(du)) - mean(L(du)) * dn(v) - mean(L(v)) * dn(du) +
+                      (0.2 * hF) * ((jump(H(du)) ⊙ jump(H(v))) * (1.0 + mean(L(u)) * mean(L(u))) +
+                                    (jump(H(u)) ⊙ jump(H(v))) * (2.0 * mean(L(u)) * mean(L(du)))))dΛ
+    (; model, Ω, dΩ, Λ, dΛ, U, V, res, jac)
+end
+
+"""
+Vector problem as in the third-medium regularisation of TMC_gears (G1): SVK on the whole mesh, β ∫∇∇u⊙∇∇v on
+a subdomain Ωc and, on the skeleton of Ωc (a composite triangulation), σβ/h_F ⟦∇u⟧:⟦∇v⟧ + c₂βh_F ⟦∇∇u⟧:⟦∇∇v⟧.
+"""
+function g1_problem(model, D; order=2, H=∇∇)
+    Ω = Triangulation(model); dΩ = Measure(Ω, 2order)
+    cc = [sum(c) / length(c) for c in get_cell_coordinates(model)]
+    Ωc = Triangulation(model, [x[1] > 0.4 for x in cc]); dΩc = Measure(Ωc, 2order)
+    Λ = SkeletonTriangulation(Ωc); dΛ = Measure(Λ, 2order)
+    hF = CellField(get_array(∫(1)dΛ), Λ)
+    β = 5e-3
+    cJ, cJ2 = β / hF, (2.0 * β) * hF
+    V = TestFESpace(model, ReferenceFE(lagrangian, VectorValue{D,Float64}, order), dirichlet_tags="boundary")
+    U = TrialFESpace(V, x -> VectorValue(ntuple(i -> 0.02 * x[i] * x[mod1(i + 1, D)], D)))
+    qJ(a, b) = jump(∇(a)) ⊙ jump(∇(b))
+    qJ2(a, b) = jump(H(a)) ⊙ jump(H(b))
+    res(u, v) = ∫(∇(v)' ⊙ (P_svk ∘ (Fk ∘ (∇(u)'))))dΩ + β * ∫(H(u) ⊙ H(v))dΩc + ∫(cJ * qJ(u, v) + cJ2 * qJ2(u, v))dΛ
+    jac(u, du, v) = ∫(∇(v)' ⊙ (dP_svk ∘ (Fk ∘ (∇(u)'), ∇(du)')))dΩ + β * ∫(H(du) ⊙ H(v))dΩc + ∫(cJ * qJ(du, v) + cJ2 * qJ2(du, v))dΛ
+    (; model, Ω, dΩ, Ωc, Λ, dΛ, U, V, res, jac)
+end
+
+@testset "∇∇ on skeleton integrals: C⁰ interior penalty and G1 regularisation against Gridap (affine cells)" begin
+    # 3D: the scalar problem on tetrahedra here; the vector one (54 slots per side pair) on the hexahedra of the next testset
+    for (D, simplex, order) in ((2, true, 2), (2, true, 3), (2, false, 2), (3, true, 2))
+        model = cartesian_model(D, D == 2 ? (4, 3) : (2, 2, 2); simplex)
+        probs = D == 2 ? ((c0ip_problem(model; order), "C0-IP"), (g1_problem(model, D; order), "G1")) : ((c0ip_problem(model; order), "C0-IP"),)
+        for (prob, name) in probs
+            for linear_maps in (true, false)
+                c = compare(prob, prob.res, prob.jac; linear_maps)
+                @test c.res < HTOL && c.jac < HTOL && c.mf < 1e-11
+                @test any(g -> g isa HK.SkeletonGroup && HK.hess_use(g) isa Val{true}, c.op.jgroups)
+            end
+            op = KernelOperator(prob.res, prob.jac, prob.U, prob.V)
+            x = randx(prob.U)
+            @test sk_noalloc(op, x)
+            op1 = KernelOperator(prob.res, prob.jac, prob.U, prob.V; nthreads=1)
+            @test reldiff(Algebra.residual(op1, x), Algebra.residual(op, x)) < HTOL
+            @test reldiff(Algebra.jacobian(op1, x), Algebra.jacobian(op, x)) < HTOL
+            # simplices: no curvature stored for the matrix-free skeleton groups (the Q1 reference Hessians of
+            # quadrilaterals do not vanish, so Cartesian cells store a curvature that is zero at run time)
+            mf = MatrixFreeJacobian(op)
+            for (g, gd) in zip(op.jgroups, mf.data)
+                g isa HK.SkeletonGroup && @test (size(gd[1].Phi, 1) == 0 && size(gd[2].Phi, 1) == 0) == simplex
+            end
+        end
+    end
+end
+
+@testset "∇∇ on skeleton integrals: non-affine quadrilaterals and hexahedra against hessian_nonaffine" begin
+    for D in (2, 3)
+        model = cartesian_model(D, D == 2 ? (3, 3) : (2, 2, 2); mapped=true)
+        # 3D: Gridap takes the faces of a mapped Cartesian model as flat (normals, see test_hdiv.jl); not those of an unstructured one
+        D == 3 && (model = Gridap.Geometry.UnstructuredDiscreteModel(model))
+        # 3D: the scalar problem only (the vector one, 54 × 54 slots per facet, takes minutes to compile; its
+        # curvature path is the same, checked in 2D and by the scalar problem here)
+        probs = ((c0ip_problem(model), c0ip_problem(model; H=hessian_nonaffine, L=Hn_tr)),)
+        D == 2 && (probs = (probs..., (g1_problem(model, D), g1_problem(model, D; H=hessian_nonaffine))))
+        for (kprob, gprob) in probs
+            for linear_maps in (true, false)
+                c = compare(kprob, gprob.res, gprob.jac; linear_maps)
+                @test c.res < 1e-12 && c.jac < 1e-12 && c.mf < 1e-11
+            end
+            op = KernelOperator(kprob.res, kprob.jac, kprob.U, kprob.V)
+            @test sk_noalloc(op, randx(kprob.U))
+            sk = [g for g in op.jgroups if g isa HK.SkeletonGroup]
+            @test !isempty(sk) && all(g -> !g.geo.affine && !g.geom.affine, sk)
+            mf = MatrixFreeJacobian(op)
+            for (g, gd) in zip(op.jgroups, mf.data)
+                g isa HK.SkeletonGroup && @test size(gd[1].Phi, 1) == D^3 && size(gd[2].Phi, 1) == D^3
+            end
+        end
+    end
+end
+
+@testset "∇∇ on skeleton integrals: a field with a constant Hessian has no Hessian jump (Q2 non-affine, P2)" begin
+    # uq is quadratic: interpolated exactly, its Hessian is the same constant on both sides of every facet
+    for (mapped, simplex) in ((false, false), (true, false), (false, true))
+        model = cartesian_model(2, (4, 3); mapped, simplex)
+        Λ = SkeletonTriangulation(model); dΛ = Measure(Λ, 4)
+        V = TestFESpace(model, ReferenceFE(lagrangian, VectorValue{2,Float64}, 2))
+        res(u, v) = ∫(jump(∇∇(u)) ⊙ jump(∇∇(v)) + (mean(∇∇(u)) ⊙ mean(∇∇(u)) - Hq ⊙ Hq) * mean(tr(∇(v))))dΛ
+        jac(u, du, v) = ∫(jump(∇∇(du)) ⊙ jump(∇∇(v)) + (2.0 * (mean(∇∇(u)) ⊙ mean(∇∇(du)))) * mean(tr(∇(v))))dΛ
+        op = KernelOperator(res, jac, V, V)
+        @test isempty(op.fallback.rtrians) && isempty(op.fallback.jtrians)
+        x = get_free_dof_values(interpolate(uq, V))
+        b = Algebra.residual(op, x)
+        @test norm(b, Inf) < 1e-10
+        @test norm(Algebra.residual(op, x .+ 1e-3 .* randn(length(x))), Inf) > 1e-6
+    end
+end
+
+@testset "∇∇ on skeleton integrals: Hessian only in the Jacobian, multi-field, update, matrix-free rebind" begin
     model = cartesian_model(2, (3, 3); simplex=true)
     Ω = Triangulation(model); dΩ = Measure(Ω, 4)
     Λ = SkeletonTriangulation(model); dΛ = Measure(Λ, 4)
-    V = TestFESpace(model, ReferenceFE(lagrangian, Float64, 2), dirichlet_tags="boundary")
-    U = TrialFESpace(V, x -> x[1]^2)
-    res(u, v) = ∫(∇∇(v) ⊙ ∇∇(u) + v * (u * u))dΩ + ∫(mean(∇∇(u)) ⊙ mean(∇∇(v)) + jump(u) * jump(v))dΛ
-    jac(u, du, v) = ∫(∇∇(v) ⊙ ∇∇(du) + 2.0 * (v * (u * du)))dΩ + ∫(mean(∇∇(du)) ⊙ mean(∇∇(v)) + jump(du) * jump(v))dΛ
-    op = @test_logs (:warn, r"second derivatives \(∇∇\) on skeleton integrals are not supported yet") match_mode = :any KernelOperator(res, jac, U, V)
-    @test op.fallback.rtrians == [Λ] && op.fallback.jtrians == [Λ]
-    @test length(op.rgroups) == 1 && op.rgroups[1].trian === Ω
-    c = check(res, jac, U, V, randx(U); op)
+    n = get_normal_vector(Λ)
+    Vu = TestFESpace(model, ReferenceFE(lagrangian, VectorValue{2,Float64}, 2), dirichlet_tags="boundary")
+    Vφ = TestFESpace(model, ReferenceFE(lagrangian, Float64, 2), dirichlet_tags="boundary")
+    V = MultiFieldFESpace([Vu, Vφ])
+    U = MultiFieldFESpace([TrialFESpace(Vu, x -> VectorValue(0.01x[2], 0.0)), TrialFESpace(Vφ, x -> x[1])])
+    # coupling on the skeleton: mean(Δφ) with jump(∇v), jump(∇∇u) with mean(φ)
+    mk(γ) = (((u, φ), (v, vφ)) -> ∫(∇(v)' ⊙ (P_svk ∘ (Fk ∘ (∇(u)'))) + ∇(vφ) ⋅ ∇(φ))dΩ +
+                                  ∫(γ * (jump(∇∇(u)) ⊙ jump(∇∇(v))) * (1.0 + mean(φ) * mean(φ)) + mean(Δ(φ)) * (jump(∇(v)) ⊙ jump(∇(u))) +
+                                    jump(∇(vφ) ⋅ n) * jump(∇(φ) ⋅ n) + mean(Δ(vφ)) * mean(Δ(φ)))dΛ,
+             ((u, φ), (du, dφ), (v, vφ)) -> ∫(∇(v)' ⊙ (dP_svk ∘ (Fk ∘ (∇(u)'), ∇(du)')) + ∇(vφ) ⋅ ∇(dφ))dΩ +
+                                  ∫(γ * (jump(∇∇(du)) ⊙ jump(∇∇(v))) * (1.0 + mean(φ) * mean(φ)) +
+                                    γ * (jump(∇∇(u)) ⊙ jump(∇∇(v))) * (2.0 * mean(φ) * mean(dφ)) +
+                                    mean(Δ(dφ)) * (jump(∇(v)) ⊙ jump(∇(u))) + mean(Δ(φ)) * (jump(∇(v)) ⊙ jump(∇(du))) +
+                                    jump(∇(vφ) ⋅ n) * jump(∇(dφ) ⋅ n) + mean(Δ(vφ)) * mean(Δ(dφ)))dΛ)
+    r1, j1 = mk(0.3); r2, j2 = mk(1.7)
+    for linear_maps in (true, false)
+        c = compare((; U, V, res=r1, jac=j1), r1, j1; linear_maps)
+        @test c.res < HTOL && c.jac < HTOL && c.mf < 1e-11
+    end
+    # Hessian only in the Jacobian (a residual without skeleton Hessians)
+    r0((u, φ), (v, vφ)) = ∫(∇(v)' ⊙ (P_svk ∘ (Fk ∘ (∇(u)'))) + ∇(vφ) ⋅ ∇(φ))dΩ + ∫(jump(∇(vφ) ⋅ n) * jump(∇(φ) ⋅ n))dΛ
+    j0((u, φ), (du, dφ), (v, vφ)) = ∫(∇(v)' ⊙ (dP_svk ∘ (Fk ∘ (∇(u)'), ∇(du)')) + ∇(vφ) ⋅ ∇(dφ))dΩ +
+                                   ∫(jump(∇(vφ) ⋅ n) * jump(∇(dφ) ⋅ n) + 0.5 * (jump(∇∇(dφ)) ⊙ jump(∇∇(vφ))))dΛ
+    c0 = compare((; U, V, res=r0, jac=j0), r0, j0)
+    @test c0.res < HTOL && c0.jac < HTOL && c0.mf < 1e-11
+    @test all(g -> !(g isa HK.SkeletonGroup) || HK.hess_use(g) isa Val{false}, c0.op.rgroups)
+    @test any(g -> g isa HK.SkeletonGroup && HK.hess_use(g) isa Val{true}, c0.op.jgroups)
+    # update with another γ: same compiled kernels and tables; matrix-free rebound
+    op1 = KernelOperator(r1, j1, U, V)
+    op2 = update(op1, r2, j2)
+    for (g1, g2) in zip(vcat(op1.rgroups, op1.jgroups), vcat(op2.rgroups, op2.jgroups))
+        @test typeof(g2) === typeof(g1) && typeof(g2.pf.core) === typeof(g1.pf.core) && g2.tables === g1.tables
+    end
+    x = randx(U); dx = randn(num_free_dofs(U))
+    c = check(r2, j2, U, V, x; op=op2)
     @test c.res < HTOL && c.jac < HTOL
+    mf = MatrixFreeJacobian(op1)
+    jacobian!(mf, op2, x)
+    @test reldiff(mf * dx, Algebra.jacobian(op2, x) * dx) < 1e-11
+    @test sk_noalloc(op2, x)
 end
