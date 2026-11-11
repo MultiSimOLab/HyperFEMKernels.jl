@@ -1,6 +1,6 @@
 # Tests
 
-`julia --project -e 'using Pkg; Pkg.test()'`. `HFK_TEST_GROUP=hdiv` runs only `test_hdiv.jl`, `HFK_TEST_GROUP=core` everything else (default `all`); CI runs the two groups as separate jobs. Every test compares against Gridap or against explicit sums; the
+`julia --project -e 'using Pkg; Pkg.test()'`. `HFK_TEST_GROUP=hdiv` runs only `test_hdiv.jl`, `HFK_TEST_GROUP=hessian` only `test_hessian.jl`, `HFK_TEST_GROUP=core` everything else (default `all`); CI runs the three groups as separate jobs. Every test compares against Gridap or against explicit sums; the
 tolerance is 1e-12 relative.
 
 | File | What it checks |
