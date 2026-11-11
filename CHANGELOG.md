@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **Gridap 0.20** (breaking: Gridap 0.19 is no longer supported; `[compat] Gridap = "0.20"`). H(div)
+  (Raviart–Thomas) spaces are read from the cell basis of Gridap 0.20, where the sign flips are a diagonal
+  change of basis per cell. The rest of the engine needed no change.
+
 ## 0.2.3
 
 - Second derivatives (`∇∇`, `Δ`) on skeleton integrals: `jump(∇∇(u))`, `mean(∇∇(u))`, `mean(Δ(u))`, … of

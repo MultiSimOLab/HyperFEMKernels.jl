@@ -14,7 +14,7 @@ StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 
 [compat]
 ForwardDiff = "1.3"
-Gridap = "=0.19.9"
+Gridap = "0.20"
 Krylov = "0.10"
 LinearAlgebra = "1.12"
 RuntimeGeneratedFunctions = "0.5"

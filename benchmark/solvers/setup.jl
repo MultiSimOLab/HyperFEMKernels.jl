@@ -9,6 +9,6 @@ root = normpath(joinpath(@__DIR__, "..", ".."))
 Pkg.develop([PackageSpec(path=root), PackageSpec(path=joinpath(root, "..", "HyperFEM.jl"))])
 Pkg.add(["Gridap", "GridapGmsh", "GridapPETSc", "GridapSolvers", "SparseMatricesCSR", "SparseArrays", "LinearAlgebra",
          "Printf", "Dates", "DelimitedFiles"])
-Pkg.compat("Gridap", "=0.19.9")
+Pkg.compat("Gridap", "0.20")
 Pkg.instantiate()
 Pkg.status()
