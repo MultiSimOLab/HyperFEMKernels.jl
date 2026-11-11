@@ -10,6 +10,9 @@
 - `KernelFunctional` evaluates skeleton integrals with the facet kernels (energies of jump penalties such
   as `½ ∫ c ⟦∇u⟧:⟦∇u⟧ dΛ` and `½ ∫ c ⟦∇∇u⟧:⟦∇∇u⟧ dΛ`, used by the Armijo line search; `:min`/`:max` over the
   facet points). Before, those terms were summed by the Gridap fallback.
+- **Gridap 0.20** (breaking: Gridap 0.19 is no longer supported; `[compat] Gridap = "0.20"`). H(div)
+  (Raviart–Thomas) spaces are read from the cell basis of Gridap 0.20, where the sign flips are a diagonal
+  change of basis per cell. The rest of the engine needed no change.
 
 ## 0.2.2
 

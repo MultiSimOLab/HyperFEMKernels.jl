@@ -189,24 +189,19 @@ wcols(::FieldTable{D}) where {D} = 1 + D + nhess(D)
 # exactly, also on non-affine cells, so that kernel and Gridap agree to round-off). The reference
 # functions are the same in every cell; the signs are a dense ±1 per (dof, cell).
 #
-# The lazy array that holds this basis differs between Gridap versions:
-# - 0.19: `lazy_map(Broadcasting(Operation(ContraVariantPiolaMap())), φ̂, Jt, |det Jt|, sign_flip)`, the
-#   sign flip a Bool per cell dof;
-# - 0.20: `lazy_map(linear_combination, M, lazy_map(Broadcasting(Operation(ContraVariantPiolaMap())), φ̂, Jt))`,
-#   the change of basis `M` a `Diagonal` of ±1 per cell (`NormalSignMap`).
+# The lazy array that holds this basis (Gridap ≥ 0.20) is
+#   lazy_map(linear_combination, M, lazy_map(Broadcasting(Operation(ContraVariantPiolaMap())), φ̂, Jt))
+# with the change of basis `M` a `Diagonal` of ±1 per cell (`NormalSignMap`).
 
 "A lazy array of contravariant Piola maps of reference fields."
 is_piola_map(a) = a isa LazyArray && a.maps isa Fill && a.maps.value isa Broadcasting{<:Operation{ContraVariantPiolaMap}}
 
-"The cell basis of a div-conforming space (the lazy Piola-map array, with its signs), or `nothing`."
+"The cell basis of a div-conforming space (the signed lazy Piola-map array), or `nothing`."
 function piola_basis(space::SingleFieldFESpace)
     a = get_data(get_fe_basis(space))
-    is_piola_map(a) && return a                                                     # Gridap 0.19
     (a isa LazyArray && a.maps isa Fill && a.maps.value === linear_combination &&
-     length(a.args) == 2 && is_piola_map(a.args[2])) ? a : nothing                  # Gridap 0.20
+     length(a.args) == 2 && is_piola_map(a.args[2])) ? a : nothing
 end
-"The reference shape functions (per cell) of the basis returned by `piola_basis`."
-piola_reference(a) = is_piola_map(a) ? a.args[1] : a.args[2].args[1]
 is_piola(space::SingleFieldFESpace) = piola_basis(space) !== nothing
 
 """
@@ -227,7 +222,7 @@ function PiolaTable(space::SingleFieldFESpace, xq::AbstractVector, D::Int)
     a === nothing && error("HyperFEMKernels: not a Piola-mapped space")
     length(first(xq)) == D ||
         error("HyperFEMKernels: H(div) spaces on a manifold triangulation (cells of lower dimension than the space) are not supported")
-    ref = uniform_value(piola_reference(a), "the reference H(div) basis")
+    ref = uniform_value(a.args[2].args[1], "the reference H(div) basis")
     vals = evaluate(ref, xq)                         # np × nd, VectorValue{D}
     grads = evaluate(Broadcasting(∇)(ref), xq)       # np × nd, TensorValue{D,D}
     np, nd = size(vals)
@@ -247,29 +242,22 @@ field_table(space::SingleFieldFESpace, xq::AbstractVector, D::Int) =
     cell_signs(space, nd) -> Matrix{Int8} (nd × ncells)
 
 Sign of every cell dof of an H(div) space (−1 on the facet dofs of the slave cell, read from the
-sign flips of Gridap's cell basis); a 0 × 0 matrix for other spaces (no signs).
+sign changes of Gridap's cell basis); a 0 × 0 matrix for other spaces (no signs).
 """
 function cell_signs(space::SingleFieldFESpace, nd::Int)
     a = piola_basis(space)
     a === nothing && return Matrix{Int8}(undef, 0, 0)
-    # Gridap 0.19: Bool per cell dof (true = flipped); Gridap 0.20: Diagonal of ±1 per cell
-    old = is_piola_map(a)
-    flips = old ? a.args[4].args[1] : a.args[1]
-    nc = length(flips)
+    changes = a.args[1]                              # Diagonal of ±1 per cell (lazy)
+    nc = length(changes)
     s = Matrix{Int8}(undef, nd, nc)
-    cache = array_cache(flips)
+    cache = array_cache(changes)
     for cell in 1:nc
-        f = getindex!(cache, flips, cell)
-        old || f isa Diagonal || error("HyperFEMKernels: unexpected change of basis $(typeof(f)) in an H(div) space")
-        v = old ? f : f.diag
-        length(v) == nd || error("HyperFEMKernels: cells with different numbers of dofs are not supported yet")
+        M = getindex!(cache, changes, cell)
+        M isa Diagonal || error("HyperFEMKernels: unexpected change of basis $(typeof(M)) in an H(div) space")
+        length(M.diag) == nd || error("HyperFEMKernels: cells with different numbers of dofs are not supported yet")
         for j in 1:nd
-            if old
-                s[j, cell] = v[j] ? Int8(-1) : Int8(1)
-            else
-                abs(v[j]) == 1 || error("HyperFEMKernels: H(div) spaces with scaled dofs (`scale_dof`) are not supported")
-                s[j, cell] = Int8(v[j])
-            end
+            abs(M.diag[j]) == 1 || error("HyperFEMKernels: H(div) spaces with scaled dofs (`scale_dof`) are not supported")
+            s[j, cell] = Int8(M.diag[j])
         end
     end
     s

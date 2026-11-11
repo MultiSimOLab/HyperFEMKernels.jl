@@ -18,4 +18,4 @@ HyperFEM = {path = "../../../HyperFEM.jl"}
 HyperFEMKernels = {path = "../.."}
 
 [compat]
-Gridap = "=0.19.9"
+Gridap = "0.20"

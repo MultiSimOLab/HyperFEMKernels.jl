@@ -20,5 +20,5 @@ with [Registrator](https://github.com/JuliaRegistries/Registrator.jl); GitHub re
 Requirements on the repository: the JuliaRegistrator and TagBot GitHub apps installed
 (organisation settings → GitHub Apps), the repository public, `LICENSE` in the root.
 `CompatHelper.yml` opens pull requests when dependencies release versions outside `[compat]`;
-Gridap is pinned on purpose (`=0.19.9`, HyperFEM's version), so its pull requests are closed until
-HyperFEM upgrades.
+Gridap is restricted to one minor series on purpose (`0.20`: the engine reads Gridap's internals), so a pull
+request for a new Gridap series needs the full test suite before it is merged.

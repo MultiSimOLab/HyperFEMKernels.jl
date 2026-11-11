@@ -90,7 +90,7 @@ Until the package appears in the General registry, add it from the repository in
 pkg> add https://github.com/MultiSimOLab/HyperFEMKernels.jl
 ```
 
-It requires Julia ≥ 1.12 and Gridap 0.19.9 (the same version as HyperFEM).
+It requires Julia ≥ 1.12 and Gridap 0.20.
 
 ## Usage
 
@@ -326,7 +326,7 @@ run with both backends as part of the test suite.
   are not covered yet (use `LaggedAssembled` with HyperFEM's block preconditioners).
 - Shared-memory parallelism (threads). Distributed runs with GridapDistributed and GPU execution
   are design targets: kernels are allocation-free and states use a GPU-friendly layout.
-- Gridap is pinned to 0.19.9, because the engine reads Gridap's internal expression tree.
+- Gridap is restricted to the 0.20 series, because the engine reads Gridap's internal expression tree.
 
 ## Testing
 
