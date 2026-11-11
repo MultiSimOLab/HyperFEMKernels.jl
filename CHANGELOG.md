@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Second derivatives (`∇∇`, `Δ`) on skeleton integrals: `jump(∇∇(u))`, `mean(∇∇(u))`, `mean(Δ(u))`, … of
+  the unknown, test and trial functions are compiled by the facet kernels (C⁰ interior-penalty terms,
+  Hessian-jump regularisations ⟦∇∇u⟧:⟦∇∇v⟧), with the Hessian push-forward of each side (its Jt⁻¹ and the
+  curvature of its cell map: exact on non-affine quadrilaterals and hexahedra); residual, assembled and
+  matrix-free Jacobian. They no longer send the skeleton to the Gridap fallback.
+- `KernelFunctional` evaluates skeleton integrals with the facet kernels (energies of jump penalties such
+  as `½ ∫ c ⟦∇u⟧:⟦∇u⟧ dΛ` and `½ ∫ c ⟦∇∇u⟧:⟦∇∇u⟧ dΛ`, used by the Armijo line search; `:min`/`:max` over the
+  facet points). Before, those terms were summed by the Gridap fallback.
+
 ## 0.2.2
 
 - p-multigrid preconditioner `PMultigrid` for `MatrixFreeSolver`: nested Lagrangian levels on the same mesh

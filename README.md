@@ -31,7 +31,8 @@ backend for its drivers (`backend = :compiled`).
   (Hessian regularisations `β ∫ ∇∇u ⊙ ∇∇v`, biharmonic and C⁰-interior-penalty terms) with Gridap's
   layout (`TensorValue{D,D}`, `ThirdOrderTensorValue{D,D,N}` with `H[a,b,k] = ∂²u_k/∂x_a∂x_b`),
   on simplices and Cartesian cells as Gridap's `∇∇` and, unlike it, also on non-affine
-  quadrilaterals and hexahedra (the curvature of the cell map is included).
+  quadrilaterals and hexahedra (the curvature of the cell map is included). Also on skeleton
+  integrals: `jump(∇∇(u))`, `mean(Δ(u))`, … with the Hessian of each side.
 - **Spaces:** Lagrangian spaces of any order and H(div)-conforming Raviart–Thomas spaces (contravariant
   Piola map, per-cell dof signs) on hexahedra, quadrilaterals, tetrahedra and triangles; single- and
   multi-field (e.g. Biot u–W, mixed Darcy); Dirichlet masks; subdomains. Lagrangian spaces also on
@@ -318,9 +319,9 @@ run with both backends as part of the test suite.
 - On manifold triangulations (cells of lower dimension than the space): Lagrangian spaces in cell
   integrals. Boundary and skeleton integrals of those spaces and Raviart–Thomas fields on them go to
   the Gridap fallback; internal variables on them are not supported yet.
-- Second derivatives of Lagrangian fields in cell and boundary integrals and in the matrix-free
-  Jacobian (dense weights; sum factorisation is used for the fields without Hessian terms). `∇∇` on
-  skeleton integrals and of Raviart–Thomas fields goes to the Gridap fallback; third derivatives too.
+- Second derivatives of Lagrangian fields in cell, boundary and skeleton integrals and in the matrix-free
+  Jacobian (dense weights; sum factorisation is used for the fields without Hessian terms). `∇∇` of
+  Raviart–Thomas fields goes to the Gridap fallback; third derivatives too.
 - p-multigrid for single-field problems; multi-field (u, φ) saddle points need a block smoother and
   are not covered yet (use `LaggedAssembled` with HyperFEM's block preconditioners).
 - Shared-memory parallelism (threads). Distributed runs with GridapDistributed and GPU execution

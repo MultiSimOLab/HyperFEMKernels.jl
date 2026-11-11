@@ -263,9 +263,14 @@ node loops of every field are compiled in the caller's loop. `Φ` is the curvatu
     :(($(ex...),))
 end
 
-"Same with one `iJt` per field (skeleton: the inverse Jacobian of each side)."
-@inline @generated function field_values_sides(tables::NTuple{NF,Any}, locs, use, xl, q, iJs) where {NF}
-    ex = [:(field_point_values(tables[$i], xl, locs[$i], q, iJs[$i], use[$i])) for i in 1:NF]
+"""
+Same with one `iJt` and one curvature `Φ` per field (skeleton: the inverse Jacobian and the curvature of
+the cell map of each side; `Φs` a tuple of `nothing` when no field uses Hessians).
+"""
+@inline field_values_sides(tables::NTuple{NF,Any}, locs, use, xl, q, iJs) where {NF} =
+    field_values_sides(tables, locs, use, xl, q, iJs, ntuple(_ -> nothing, Val(NF)))
+@inline @generated function field_values_sides(tables::NTuple{NF,Any}, locs, use, xl, q, iJs, Φs) where {NF}
+    ex = [:(field_point_values(tables[$i], xl, locs[$i], q, iJs[$i], nothing, Φs[$i], use[$i])) for i in 1:NF]
     :(($(ex...),))
 end
 

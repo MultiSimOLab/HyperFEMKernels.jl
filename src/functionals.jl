@@ -3,7 +3,9 @@
 # a line search, `min_q α(∇u, ∇du)`). The functional is captured like a residual without test
 # function: its terms are compiled into a pointwise function of the field values and the auxiliary
 # data (FE functions in the form read their nodal values at every evaluation, so an increment
-# stored in an FE function can change between calls without recompiling).
+# stored in an FE function can change between calls without recompiling). Skeleton integrals
+# (`jump`, `mean`, `plus`/`minus`, with gradients and Hessians of both sides) are evaluated per facet
+# with the facet kernels of the operators.
 
 """
     KernelFunctional(f, U; reduce = :sum, nthreads = Threads.nthreads())
@@ -17,6 +19,9 @@ quantity of the state and an increment). The functional is called on the free va
 - `reduce = :sum`: the integral, `Σ_cells Σ_q f(x_q) dV_q` (the energy of a Newton line search).
 - `reduce = :min` / `:max`: the extremum of the integrand over the quadrature points of the
   measure, without weights (the injectivity step `min_q α(∇u_q, ∇du_q)` of `InjectivityLS`).
+
+Cell, boundary and skeleton integrals (e.g. the energy `½ ∫ c ⟦∇u⟧:⟦∇u⟧ dΛ` of a jump penalty) are
+evaluated by the kernels.
 
 Contributions the kernels cannot read are summed by Gridap (`:sum` only; `:min`/`:max` need every
 contribution in the kernels). [`update`](@ref) gives a functional with another `f` on the same
@@ -32,6 +37,7 @@ struct KernelFunctional{F,US}
     nthreads::Int
     cache_aux::Bool
     fallback::Vector{Any}     # triangulations whose contributions Gridap sums (`:sum`)
+    skel::Vector{SkeletonData} # skeletons of the form (cells per facet, one colour), reused by `update`
     signed::Bool
     sig::Any                  # structural signature of the capture (`signature`; cheap `update`)
 end
@@ -57,15 +63,16 @@ function KernelFunctional(f, U::FESpace; reduce::Symbol=:sum, nthreads::Int=Thre
     end
     forms, fb = capture(f, probes(U, :unknown))
     sig = signature(forms, fb)
-    colors = [Int32.(1:ncells)]                     # a reduction has no races: one colour
-    groups = compile_groups(forms, U, Tuple(fl.loc for fl in fields), D, colors; linear_maps=false, fallback=fb, fields, ndl=loc)
+    colors = [Int32.(1:ncells)]                     # a reduction has no races: one colour (cells and facets)
+    skel = SkeletonData[]
+    groups = compile_groups(forms, U, Tuple(fl.loc for fl in fields), D, colors; linear_maps=false, fallback=fb, skel, fields, ndl=loc,
+                            facet_colors=false)
     _check_functional(groups, fb, reduce)
-    KernelFunctional(f, U, fields, loc, groups, reduce, nthreads, false, Any[t for (t, _) in fb], any(has_signs, fields), sig)
+    KernelFunctional(f, U, fields, loc, groups, reduce, nthreads, false, Any[t for (t, _) in fb], skel, any(has_signs, fields), sig)
 end
 
 function _check_functional(groups, fb, reduce)
     for g in groups
-        g isa Group || error("HyperFEMKernels: KernelFunctional does not support skeleton integrals yet")
         nslots(g) == (0, 0) || error("HyperFEMKernels: a KernelFunctional has no test or trial functions (got a form with them)")
     end
     if !isempty(fb)
@@ -93,12 +100,15 @@ function update(fun::KernelFunctional, f)
     if sig == fun.sig
         groups = rebind_groups(fun.groups, forms)
         check_rebind() && verify_rebind(groups, compile_groups(forms, U, locs, D, colors, fun.groups; linear_maps=false, fallback=copy(fb),
-                                                               fields=fun.fields, ndl=fun.ndl), "functional")
-        return KernelFunctional(f, U, fun.fields, fun.ndl, groups, fun.reduce, fun.nthreads, fun.cache_aux, fun.fallback, fun.signed, sig)
+                                                               skel=SkeletonData[], previous_skel=fun.skel, fields=fun.fields, ndl=fun.ndl,
+                                                               facet_colors=false), "functional")
+        return KernelFunctional(f, U, fun.fields, fun.ndl, groups, fun.reduce, fun.nthreads, fun.cache_aux, fun.fallback, fun.skel, fun.signed, sig)
     end
-    groups = compile_groups(forms, U, locs, D, colors, fun.groups; linear_maps=false, fallback=fb, fields=fun.fields, ndl=fun.ndl)
+    skel = SkeletonData[]
+    groups = compile_groups(forms, U, locs, D, colors, fun.groups; linear_maps=false, fallback=fb, skel, previous_skel=fun.skel,
+                            fields=fun.fields, ndl=fun.ndl, facet_colors=false)
     _check_functional(groups, fb, fun.reduce)
-    KernelFunctional(f, U, fun.fields, fun.ndl, groups, fun.reduce, fun.nthreads, fun.cache_aux, Any[t for (t, _) in fb], fun.signed, sig)
+    KernelFunctional(f, U, fun.fields, fun.ndl, groups, fun.reduce, fun.nthreads, fun.cache_aux, Any[t for (t, _) in fb], skel, fun.signed, sig)
 end
 
 _init(::Val{:sum}) = 0.0
@@ -163,6 +173,30 @@ function functional_cells(R::Val, fun::KernelFunctional, g::Group{NSV,NSU,PF,TT,
             Aq = map(a -> @inbounds(a[q, cell]), auxd)
             v = pf.core(pf.ops, pf.coefs, FV, Aq, EMPTY_SLOTS, EMPTY_SLOTS)::Float64
             acc = _combine(R, acc, R isa Val{:sum} ? v * dV : v)
+        end
+    end
+    acc
+end
+
+"Facets `lfacets` (local indices of the class) of a skeleton class: both cells gathered, the integrand at the facet points."
+function functional_cells(R::Val, fun::KernelFunctional, g::SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D}, x, dvals, auxd,
+                          lfacets) where {NSV,NSU,PF,TT,AUX,SV,SU,D}
+    ndl = fun.ndl
+    xl = zeros(2ndl)
+    tables, locs, pf = g.tables, g.locs, g.pf
+    skel, facets = g.skel, g.facets
+    hu = hess_use(g)
+    acc = _init(R)
+    for lf in lfacets
+        f = facets[lf]
+        gather_cell!(xl, fun.fields, x, dvals, skel.cells[1, f])
+        gather_cell!(xl, fun.fields, x, dvals, skel.cells[2, f], ndl)
+        for q in 1:g.geo.np
+            dS, iJs, Φs = side_geometry(g, q, lf, hu)
+            FV = field_values_sides(tables, locs, g.use, xl, q, iJs, Φs)
+            Aq = map(a -> @inbounds(a[q, lf]), auxd)
+            v = pf.core(pf.ops, pf.coefs, FV, Aq, EMPTY_SLOTS, EMPTY_SLOTS)::Float64
+            acc = _combine(R, acc, R isa Val{:sum} ? v * dS : v)
         end
     end
     acc

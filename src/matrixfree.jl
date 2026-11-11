@@ -8,7 +8,8 @@
 # H(div) fields use the dense path with the stored Piola geometry (Jt and Jt⁻¹) and the dof signs
 # at gather/scatter.
 # Skeleton groups do the same per facet with the increments of both cells (dense weights, the
-# Jt⁻¹ of each side; the T and dS arrays are shared by the two `GroupData` of a class).
+# Jt⁻¹ of each side and, with Hessians on non-affine cells, its curvature; the T and dS arrays are
+# shared by the two `GroupData` of a class).
 
 struct GroupData{D}
     T::Array{Float64,3}          # nsv*nsu × np × ncells (column-major: T[sv + (su-1)*nsv, q, cell])
@@ -52,10 +53,12 @@ function MatrixFreeJacobian(op::KernelOperator)
         D = group_dim(g)
         nsv, nsu = nslots(g)
         if g isa SkeletonGroup
-            # one tangent and measure per facet of the class; Jt⁻¹ of the plus and of the minus cell
+            # one tangent and measure per facet of the class; Jt⁻¹ (and the curvature) of the plus and of the minus cell
             n = length(g.facets)
             T, dV = zeros(nsv * nsu, np, n), zeros(np, n)
-            (GroupData{D}(T, zeros(D * D, np, n), dV), GroupData{D}(T, zeros(D * D, np, n), dV))
+            curved = hess_use(g) isa Val{true} && !(g.geo.affine && g.geom.affine)
+            side() = GroupData{D}(T, zeros(D * D, np, n), zeros(D * D, np, n), dV, zeros(curved ? D * D * D : 0, np, n))
+            (side(), side())
         else
             nc = length(g.cellmap)
             curved = hess_use(g) isa Val{true} && !g.geo.affine
@@ -162,15 +165,16 @@ function prepare_cells!(gds::Tuple{GroupData{D},GroupData{D}}, g::SkeletonGroup{
     ndl = op.ndl
     xl = zeros(2ndl)
     zsv = zero(SVector{NSV,Float64}); zsu = zero(SVector{NSU,Float64})
+    hu = hess_use(g)
+    curved = size(gp.Phi, 1) > 0
     for lf in lfacets
         f = g.facets[lf]
         gather_cell!(xl, op.fields, x, dvals, g.skel.cells[1, f])
         gather_cell!(xl, op.fields, x, dvals, g.skel.cells[2, f], ndl)
         for q in 1:g.geo.np
-            dS, iJp, Jp = point_geometry(g.geo, q, lf)
-            _, iJm, Jm = point_geometry(g.geom, q, lf)
-            iJs = side_tuple(iJp, iJm, Val(NF2))
-            FV = field_values_sides(tables, locs, g.use, xl, q, iJs)
+            dS, iJs, Φs, (Jp, Jm), (Φp, Φm) = side_geometry(g, q, lf, hu)
+            iJp, iJm = iJs[1], iJs[end]
+            FV = field_values_sides(tables, locs, g.use, xl, q, iJs, Φs)
             Aq = map(a -> @inbounds(a[q, lf]), auxd)
             T = if LF === Nothing
                 ForwardDiff.jacobian(r -> ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsv), zsu)
@@ -185,6 +189,10 @@ function prepare_cells!(gds::Tuple{GroupData{D},GroupData{D}}, g::SkeletonGroup{
                 gm.iJt[i, q, lf] = iJm[i]
                 gp.Jt[i, q, lf] = Jp[i]
                 gm.Jt[i, q, lf] = Jm[i]
+            end
+            if curved
+                store_curvature!(gp, Φp, q, lf)
+                store_curvature!(gm, Φm, q, lf)
             end
             gp.dV[q, lf] = dS
         end
@@ -275,7 +283,7 @@ function apply_buffers(g::SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D}, tps, ndl::In
     np = g.geo.np
     (xl=zeros(2ndl), re=zeros(2ndl),
      su=zeros(NSU, np), sv=zeros(NSV, np),
-     Wb=map(t -> zeros(t.nn, D + 1), g.tables),
+     Wb=map(t -> zeros(t.nn, wcols(t)), g.tables),
      uc=map(t -> zeros(t.nn), g.tables), rc=map(t -> zeros(t.nn), g.tables),
      pts=map(t -> zeros(np, D + 1), g.tables), coef=map(t -> zeros(np, D + 1), g.tables),
      tmp=map(_ -> zeros(0, 0), g.tables))

@@ -11,6 +11,9 @@
 # facet (`SkeletonData.nzpos`, the cross blocks are added to the sparsity pattern). The pointwise
 # integrand sees the unknown of both sides (`FV = (plus fields..., minus fields...)`) and test/trial
 # slots per side (`Leaf.side`); the measure is that of the plus face (`w · meas(Jf⁺ ⋅ Jt⁺)`).
+# Second derivatives (∇∇, Δ) use the Hessian push-forward of the volume kernels on each side, with the
+# Jt⁻¹ and the curvature Φ of that side's cell map at its mapped points (`point_curvature` of `geo` and
+# `geom`; zero on affine cells), e.g. the C⁰ interior-penalty terms ⟦∇∇u⟧:⟦∇∇v⟧ or {Δu}⟦∇v⋅n⟧.
 
 "FE-space cell of the plus and minus side of each facet (2 × nfacets)."
 function skeleton_cells(trian::Triangulation, space_trian::Triangulation)
@@ -60,10 +63,15 @@ function color_facets(fields::Vector{FieldLayout}, cells::Matrix{Int32}, nrows::
     groups
 end
 
-"Data of a skeleton for the FE spaces on `space_trian`: cells per facet and facet colouring (positions come with the pattern)."
-function skeleton_data(trian::Triangulation, space_trian::Triangulation, fields::Vector{FieldLayout}, nrows::Int)
+"""
+Data of a skeleton for the FE spaces on `space_trian`: cells per facet and facet colouring (positions come
+with the pattern). `colored = false` (a reduction, `KernelFunctional`: no scatter, no races) puts every
+facet in one colour.
+"""
+function skeleton_data(trian::Triangulation, space_trian::Triangulation, fields::Vector{FieldLayout}, nrows::Int; colored::Bool=true)
     cells = skeleton_cells(trian, space_trian)
-    SkeletonData(trian, cells, color_facets(fields, cells, nrows), Matrix{Int32}(undef, 0, 0))
+    colors = colored ? color_facets(fields, cells, nrows) : [Int32.(1:size(cells, 2))]
+    SkeletonData(trian, cells, colors, Matrix{Int32}(undef, 0, 0))
 end
 
 """
@@ -122,7 +130,6 @@ function SkeletonGroup(terms::Vector{Term}, trian::Triangulation, Uspaces, locs,
     ls = vcat(pf.test.leaves, pf.trial.leaves, leaves(terms, :unknown))
     isempty(ls) && error("HyperFEMKernels: integral without unknown, test or trial functions")
     any(l -> l.side === :cell, ls) && error("HyperFEMKernels: a function is used on the skeleton without a side (use plus/minus, jump or mean)")
-    any(l -> l.deriv == 2, ls) && error("HyperFEMKernels: second derivatives (∇∇) on skeleton integrals are not supported yet")
     w = uniform_value(terms[1].weights, "the quadrature weights")
     k = findfirst(g -> g isa SkeletonGroup && g.trian === trian && g.key == cls.key && g.geo.w == w && g.facets == cls.facets, previous)
     if k === nothing
@@ -154,6 +161,32 @@ function SkeletonGroup(terms::Vector{Term}, trian::Triangulation, Uspaces, locs,
     SkeletonGroup{pf.test.nslots,pf.trial.nslots,typeof(pf),typeof(tables),AUX,typeof(smv),typeof(smu),D,NF2,typeof(lin),typeof(geo.Jf),typeof(use)}(
         pf, lin, NTuple{NF2,Int}(locs2), tables, use, geo, geom, aux, smv, smu, trian, cls.key, Ref{Any}(nothing), cls.facets, skel, colors,
         objectid(terms[1].weights))
+end
+
+"""
+    hess_use(g::SkeletonGroup) -> Val{true/false}
+
+Whether any (side, field) of the class uses Hessians: the curvature of both cell maps is then
+evaluated per point (see `hess_use(::Group)`).
+"""
+@generated function hess_use(::SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D,NF2,LF,JF,UU}) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF2,LF,JF,UU}
+    hs(T) = any(t -> t.parameters[5] === true, T.parameters)   # SlotSpec{NC,LV,HV,HG,HH,...}
+    hu(T) = any(t -> t.parameters[3] === true, T.parameters)   # FieldUse{HV,HG,HH}
+    :(Val{$(hs(SV) || hs(SU) || hu(UU))}())
+end
+
+"""
+    side_geometry(g, q, lf, hu) -> (dS, iJs, Φs)
+
+Geometry of point `q` of facet `lf` of a class: the facet measure (plus face), and per (side, field)
+the inverse Jacobian and the curvature (`nothing` without Hessians) of that side's cell map.
+"""
+@inline function side_geometry(g::SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D,NF2}, q::Int, lf::Integer, hu) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF2}
+    dS, iJp, Jp = point_geometry(g.geo, q, lf)
+    _, iJm, Jm = point_geometry(g.geom, q, lf)
+    Φp = point_curvature(g.geo, q, lf, hu)
+    Φm = point_curvature(g.geom, q, lf, hu)
+    (dS, side_tuple(iJp, iJm, Val(NF2)), side_tuple(Φp, Φm, Val(NF2)), (Jp, Jm), (Φp, Φm))
 end
 
 "The skeleton class `g` with its values read from `terms` (see `rebind(::Group, terms)`)."
@@ -194,7 +227,7 @@ function _materialize_facets!(M::Matrix, a, facets, range, np::Int)
     M
 end
 
-function aux_data(op::KernelOperator, g::SkeletonGroup{NSV,NSU,PF,TT,AUX}) where {NSV,NSU,PF,TT,AUX}
+function aux_data(op, g::SkeletonGroup{NSV,NSU,PF,TT,AUX}) where {NSV,NSU,PF,TT,AUX}   # op: KernelOperator or KernelFunctional
     if g.auxcache[] === nothing
         g.auxcache[] = materialize_aux(g, op.nthreads)
     elseif !op.cache_aux
@@ -214,18 +247,17 @@ function element_residual!(re, g::SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D,NF2,LF
     fill!(re, 0.0)
     tables, locs, pf = g.tables, g.locs, g.pf
     zsv = zero(SVector{NSV,Float64})
+    hu = hess_use(g)
     for q in 1:g.geo.np
-        dS, iJp = point_geometry(g.geo, q, lf)
-        _, iJm = point_geometry(g.geom, q, lf)
-        iJs = side_tuple(iJp, iJm, Val(NF2))
-        FV = field_values_sides(tables, locs, g.use, xl, q, iJs)
+        dS, iJs, Φs = side_geometry(g, q, lf, hu)
+        FV = field_values_sides(tables, locs, g.use, xl, q, iJs, Φs)
         Aq = map(a -> @inbounds(a[q, lf]), auxd)
         R = if LF === Nothing
             ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, EMPTY_SLOTS), zsv)
         else
             apply_maps(g.lin, g.lin.state(g.lin.ops, FV, Aq), Val(NSV))
         end
-        map((t, l, sm, iJ) -> contract_residual!(re, t, l, sm, R, q, iJ, dS), tables, locs, g.smv, iJs)
+        map((t, l, sm, iJ, Φ) -> contract_residual!(re, t, l, sm, R, q, iJ, nothing, Φ, dS), tables, locs, g.smv, iJs, Φs)
     end
     re
 end
@@ -236,12 +268,11 @@ function element_jacobian!(KeT, g::SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D,NF2,L
     tables, locs, pf = g.tables, g.locs, g.pf
     zsv = zero(SVector{NSV,Float64})
     zsu = zero(SVector{NSU,Float64})
+    hu = hess_use(g)
     for q in 1:g.geo.np
-        dS, iJp = point_geometry(g.geo, q, lf)
-        _, iJm = point_geometry(g.geom, q, lf)
-        iJs = side_tuple(iJp, iJm, Val(NF2))
-        map((t, W, iJ) -> point_weights!(W, t, q, iJ), tables, Wb, iJs)
-        FV = field_values_sides(tables, locs, g.use, xl, q, iJs)
+        dS, iJs, Φs = side_geometry(g, q, lf, hu)
+        map((t, W, iJ, Φ, sv, su) -> point_weights!(W, t, q, iJ, nothing, Φ, hess_weights(sv, su)), tables, Wb, iJs, Φs, g.smv, g.smu)
+        FV = field_values_sides(tables, locs, g.use, xl, q, iJs, Φs)
         Aq = map(a -> @inbounds(a[q, lf]), auxd)
         T = if LF === Nothing
             ForwardDiff.jacobian(r -> ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsv), zsu)   # T[test slot, trial slot]
@@ -262,7 +293,7 @@ function cells!(::Val{K}, b, A, op::KernelOperator, g::SkeletonGroup{NSV,NSU,PF,
     ndl = op.ndl
     n2 = 2ndl
     xl = zeros(n2)
-    Wb = map(t -> zeros(t.nn, D + 1), g.tables)
+    Wb = map(t -> zeros(t.nn, wcols(t)), g.tables)
     skel, facets = g.skel, g.facets
     if K === :res
         re = zeros(n2)
@@ -344,7 +375,7 @@ function _element_allocations(kind::Symbol, op::KernelOperator, g::SkeletonGroup
     f = g.facets[1]
     gather_cell!(xl, op.fields, x, dvals, g.skel.cells[1, f])
     gather_cell!(xl, op.fields, x, dvals, g.skel.cells[2, f], ndl)
-    Wb = map(t -> zeros(t.nn, D + 1), g.tables)
+    Wb = map(t -> zeros(t.nn, wcols(t)), g.tables)
     if kind === :residual
         re = zeros(2ndl)
         element_residual!(re, g, xl, auxd, 1)

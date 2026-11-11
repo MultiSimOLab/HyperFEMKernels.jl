@@ -86,6 +86,69 @@ end
     @test fc(xc) ≈ lazy_extremum(g ∘ (∇(uh[1])', ∇(duc[1])') + uh[2] * uh[2], dΩc, min) rtol = 1e-13
 end
 
+# Skeleton integrals: the energy of the third-medium regularisation (jump penalties of ∇u and ∇∇u on the skeleton of a
+# subdomain, facet size as data) and a mean term on the whole skeleton; non-affine quadrilaterals against hessian_nonaffine.
+function skeleton_energy_problem(; simplex=true, mapped=false)
+    model = cartesian_model(2, (4, 3); simplex, mapped)
+    Ω = Triangulation(model); dΩ = Measure(Ω, 4)
+    cc = [sum(c) / length(c) for c in get_cell_coordinates(model)]
+    Ωc = Triangulation(model, [x[1] > 0.4 for x in cc]); dΩc = Measure(Ωc, 4)
+    Λ = SkeletonTriangulation(Ωc); dΛ = Measure(Λ, 4)
+    Λa = SkeletonTriangulation(model); dΛa = Measure(Λa, 4)
+    hF = CellField(get_array(∫(1)dΛ), Λ)
+    V = TestFESpace(model, ReferenceFE(lagrangian, VectorValue{2,Float64}, 2), dirichlet_tags="boundary")
+    U = TrialFESpace(V, x -> VectorValue(0.01x[2], -0.02x[1] * x[2]))
+    mk(H) = β -> u -> ∫(Ψ_svk ∘ (Fk ∘ (∇(u)')))dΩ + (0.5β) * ∫(H(u) ⊙ H(u))dΩc +
+                      ∫((0.5β / hF) * (jump(∇(u)) ⊙ jump(∇(u))) + (β * hF) * (jump(H(u)) ⊙ jump(H(u))))dΛ + ∫(0.1 * (mean(u) ⋅ mean(u)))dΛa
+    # the residual of the energy (gradient), for the finite-difference check
+    res(β) = (u, v) -> ∫(∇(v)' ⊙ (P_svk ∘ (Fk ∘ (∇(u)'))))dΩ + β * ∫(∇∇(u) ⊙ ∇∇(v))dΩc +
+                       ∫((β / hF) * (jump(∇(u)) ⊙ jump(∇(v))) + (2β * hF) * (jump(∇∇(u)) ⊙ jump(∇∇(v))))dΛ + ∫(0.2 * (mean(u) ⋅ mean(v)))dΛa
+    jac(β) = (u, du, v) -> ∫(∇(v)' ⊙ (dP_svk ∘ (Fk ∘ (∇(u)'), ∇(du)')))dΩ + β * ∫(∇∇(du) ⊙ ∇∇(v))dΩc +
+                           ∫((β / hF) * (jump(∇(du)) ⊙ jump(∇(v))) + (2β * hF) * (jump(∇∇(du)) ⊙ jump(∇∇(v))))dΛ + ∫(0.2 * (mean(du) ⋅ mean(v)))dΛa
+    (; model, Λ, dΛ, U, V, en=mk(∇∇), enref=mk(mapped ? hessian_nonaffine : ∇∇), res, jac)
+end
+
+@testset "skeleton integrals (jumps of ∇u and ∇∇u, mean): energy, update, threads, gradient, extrema" begin
+    for (simplex, mapped) in ((true, false), (false, false), (false, true))
+        s = skeleton_energy_problem(; simplex, mapped)
+        fun = KernelFunctional(s.en(0.05), s.U)
+        @test isempty(fun.fallback) && count(g -> g isa HK.SkeletonGroup, fun.groups) >= 2
+        @test length(fun.skel) == 2 && all(sd -> length(sd.colors) == 1, fun.skel)   # a reduction: one colour per skeleton
+        x = randx(s.U; scale=0.1)
+        @test fun(x) ≈ lazy_sum(s.enref(0.05), s.U, x) rtol = 1e-12
+        # update with another β: groups rebound, tables and skeleton data reused
+        fun2 = update(fun, s.en(0.3))
+        @test fun2(x) ≈ lazy_sum(s.enref(0.3), s.U, x) rtol = 1e-12
+        @test fun2.skel === fun.skel && all(((g1, g2),) -> g1.tables === g2.tables, zip(fun.groups, fun2.groups))
+        @test KernelFunctional(s.en(0.05), s.U; nthreads=1)(x) ≈ fun(x) rtol = 1e-13
+        if !mapped
+            # the gradient of the energy is the residual (finite differences along a random direction)
+            op = KernelOperator(s.res(0.05), s.jac(0.05), s.U, s.V)
+            dx = randn(num_free_dofs(s.U)); h = 1e-6
+            @test (fun(x + h * dx) - fun(x - h * dx)) / 2h ≈ dot(residual(op, x), dx) rtol = 1e-6
+        end
+    end
+    # pointwise extrema over the facet points
+    s = skeleton_energy_problem()
+    g(a, b) = a / (1.0 + b * b)
+    f(u) = ∫(g ∘ (jump(∇(u)) ⊙ jump(∇(u)), mean(tr ∘ ∇(u))))s.dΛ
+    x = randx(s.U; scale=0.1); uh = FEFunction(s.U, x)
+    cf = g ∘ (jump(∇(uh)) ⊙ jump(∇(uh)), mean(tr ∘ ∇(uh)))
+    @test KernelFunctional(f, s.U; reduce=:min)(x) ≈ lazy_extremum(cf, s.dΛ, min) rtol = 1e-13
+    @test KernelFunctional(f, s.U; reduce=:max)(x) ≈ lazy_extremum(cf, s.dΛ, max) rtol = 1e-13
+    # the facet loop does not allocate (same bytes for one facet and for all of them)
+    fun = KernelFunctional(s.en(0.05), s.U)
+    fun(x)
+    gs = first(gg for gg in fun.groups if gg isa HK.SkeletonGroup)
+    dvals = [get_dirichlet_dof_values(sp) for sp in HK.field_spaces(s.U)]
+    auxd = HK.aux_data(fun, gs)
+    one_facet, all_facets = Int32[1], gs.colors[1]
+    HK.functional_cells(Val(:sum), fun, gs, x, dvals, auxd, one_facet)
+    a1 = @allocated HK.functional_cells(Val(:sum), fun, gs, x, dvals, auxd, one_facet)
+    a2 = @allocated HK.functional_cells(Val(:sum), fun, gs, x, dvals, auxd, all_facets)
+    @test a1 == a2
+end
+
 @testset "errors and allocations" begin
     p = poisson_2d(; order=2); dΩp = p.dΩ
     @test_throws ArgumentError KernelFunctional(u -> ∫(u * u)dΩp, p.U; reduce=:mean)
