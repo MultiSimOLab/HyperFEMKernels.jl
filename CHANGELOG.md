@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.3
 
 - Second derivatives (`∇∇`, `Δ`) on skeleton integrals: `jump(∇∇(u))`, `mean(∇∇(u))`, `mean(Δ(u))`, … of
   the unknown, test and trial functions are compiled by the facet kernels (C⁰ interior-penalty terms,
