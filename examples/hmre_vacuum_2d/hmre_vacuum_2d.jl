@@ -10,9 +10,9 @@
 # results/), the setup wrapped in a function so that it can be built for each backend, and the drivers
 # built with `backend` (HyperFEM branch kernel-backend). The Dirichlet conditions are written through
 # BoundaryConditions, and the solid–vacuum coupling prescribes the state of the solid on the interface,
-# BoundaryCondition("Interface", Coupling(uhair_int_)), a function of the stage parameter of the solver
-# (HyperFEM PR #249 fixed the regression of the former DirichletCoupling; the Coupling prescription
-# comes with the next PR).
+# BoundaryCondition("Interface", Coupling(StageBlend(uh_solid⁻, uh_solid⁺))), a function of the stage parameter
+# of the solver whose nodes are located in the mesh of the solid once (HyperFEM branch mesh-transfer; before it,
+# the chain of interface spaces and Interpolables of the original script).
 #
 # Usage (from the repository root, benchmark environment):
 #   julia -t auto --project=benchmark examples/hmre_vacuum_2d/hmre_vacuum_2d.jl [mode=compare|gridap|kernel]
