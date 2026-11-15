@@ -177,18 +177,22 @@ evaluated per point (see `hess_use(::Group)`).
 end
 
 """
-    side_geometry(g, q, lf, hu) -> (dS, iJs, Φs)
+    side_geometry(g, cgs, q, lf, hu) -> (dS, iJs, Φs)
 
 Geometry of point `q` of facet `lf` of a class: the facet measure (plus face), and per (side, field)
 the inverse Jacobian and the curvature (`nothing` without Hessians) of that side's cell map.
 """
-@inline function side_geometry(g::SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D,NF2}, q::Int, lf::Integer, hu) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF2}
-    dS, iJp, Jp = point_geometry(g.geo, q, lf)
-    _, iJm, Jm = point_geometry(g.geom, q, lf)
-    Φp = point_curvature(g.geo, q, lf, hu)
-    Φm = point_curvature(g.geom, q, lf, hu)
+@inline function side_geometry(g::SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D,NF2}, cgs, q::Int, lf::Integer, hu) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF2}
+    cgp, cgm = cgs
+    dS, iJp, Jp = point_geometry(g.geo, cgp, q, lf)
+    _, iJm, Jm = point_geometry(g.geom, cgm, q, lf)
+    Φp = point_curvature(g.geo, cgp, q, lf, hu)
+    Φm = point_curvature(g.geom, cgm, q, lf, hu)
     (dS, side_tuple(iJp, iJm, Val(NF2)), side_tuple(Φp, Φm, Val(NF2)), (Jp, Jm), (Φp, Φm))
 end
+
+"Cell geometries (`cell_geometry`) of the plus and the minus cell of facet `lf` of a class (`cgs` of `side_geometry`)."
+@inline cell_geometries(g::SkeletonGroup, lf::Integer) = (cell_geometry(g.geo, lf), cell_geometry(g.geom, lf))
 
 "The skeleton class `g` with its values read from `terms` (see `rebind(::Group, terms)`)."
 function rebind(g::SkeletonGroup, terms::Vector{Term})
@@ -255,8 +259,9 @@ function element_residual!(re, g::SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D,NF2,LF
     tables, locs, pf = g.tables, g.locs, g.pf
     zsv = zero(SVector{NSV,Float64})
     hu = hess_use(g)
+    cgs = cell_geometries(g, lf)
     for q in 1:g.geo.np
-        dS, iJs, Φs = side_geometry(g, q, lf, hu)
+        dS, iJs, Φs = side_geometry(g, cgs, q, lf, hu)
         FV = field_values_sides(tables, locs, g.use, xl, q, iJs, Φs)
         Aq = map(a -> @inbounds(a[q, lf]), auxd)
         R = if LF === Nothing
@@ -276,8 +281,9 @@ function element_jacobian!(KeT, g::SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D,NF2,L
     zsv = zero(SVector{NSV,Float64})
     zsu = zero(SVector{NSU,Float64})
     hu = hess_use(g)
+    cgs = cell_geometries(g, lf)
     for q in 1:g.geo.np
-        dS, iJs, Φs = side_geometry(g, q, lf, hu)
+        dS, iJs, Φs = side_geometry(g, cgs, q, lf, hu)
         map((t, W, iJ, Φ, sv, su) -> point_weights!(W, t, q, iJ, nothing, Φ, hess_weights(sv, su)), tables, Wb, iJs, Φs, g.smv, g.smu)
         FV = field_values_sides(tables, locs, g.use, xl, q, iJs, Φs)
         Aq = map(a -> @inbounds(a[q, lf]), auxd)

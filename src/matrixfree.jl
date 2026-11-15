@@ -171,8 +171,9 @@ function prepare_cells!(gds::Tuple{GroupData{D},GroupData{D}}, g::SkeletonGroup{
         f = g.facets[lf]
         gather_cell!(xl, op.fields, x, dvals, g.skel.cells[1, f])
         gather_cell!(xl, op.fields, x, dvals, g.skel.cells[2, f], ndl)
+        cgs = cell_geometries(g, lf)
         for q in 1:g.geo.np
-            dS, iJs, Φs, (Jp, Jm), (Φp, Φm) = side_geometry(g, q, lf, hu)
+            dS, iJs, Φs, (Jp, Jm), (Φp, Φm) = side_geometry(g, cgs, q, lf, hu)
             iJp, iJm = iJs[1], iJs[end]
             FV = field_values_sides(tables, locs, g.use, xl, q, iJs, Φs)
             Aq = map(a -> @inbounds(a[q, lf]), auxd)
@@ -211,9 +212,10 @@ function prepare_cells!(gd::GroupData{D}, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,
         sc = g.cellmap[cell]
         gather_cell!(xl, op.fields, x, dvals, sc)
         op.signed && apply_signs!(xl, cell_signs!(sg, op.fields, sc), op.ndl)   # state of H(div) fields with the dof signs
+        cg = cell_geometry(g.geo, cell)
         for q in 1:g.geo.np
-            dV, iJt, Jt = point_geometry(g.geo, q, cell)
-            Φ = point_curvature(g.geo, q, cell, hu)
+            dV, iJt, Jt = point_geometry(g.geo, cg, q, cell)
+            Φ = point_curvature(g.geo, cg, q, cell, hu)
             FV = field_values(tables, locs, g.use, xl, q, iJt, Jt, Φ)
             Aq = map(a -> @inbounds(a[q, cell]), auxd)
             T = if LF === Nothing

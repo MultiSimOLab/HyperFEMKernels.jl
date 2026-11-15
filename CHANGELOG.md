@@ -15,6 +15,13 @@
 - `update`: the type of a function of the coordinates is part of the structure; the same function, or a
   closure of the same type with other captured values, is rebound (the new values are used), another
   type compiles again (documented in `update` and the README).
+- **Geometry once per cell on affine cells.** At construction each cell is checked for an affine map (every
+  node on the affine map through the Jacobian at one point: simplices of order 1, rectangles,
+  parallelograms and parallelepipeds — also in unstructured meshes —, straight-sided higher-order cells);
+  on those cells the kernels compute `Jt`, `inv(Jt)` and the measure once and reuse them at every
+  quadrature point (residual, Jacobian, matrix-free `prepare!`, skeletons, functionals, FE functions in
+  the form). Curved or deformed cells keep the per-point computation; results change only by round-off.
+  `HFK_AFFINE_GEOMETRY=0` disables it.
 
 ## 0.2.4
 

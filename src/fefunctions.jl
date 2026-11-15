@@ -165,8 +165,9 @@ function materialize_fe!(M::Matrix, a::FEArray{T,FE}, cells, np::Int, geo) where
     else
         @inbounds for cell in cells
             gather_fe!(xl, fe, cell)
+            cg = cell_geometry(geo, cell)
             for q in 1:np
-                iJt = point_geometry(geo, q, cell)[2]
+                iJt = point_geometry(geo, cg, q, cell)[2]
                 M[q, cell] = fe_point_value(fe, xl, q, iJt)
             end
         end

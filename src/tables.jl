@@ -52,8 +52,9 @@ struct GeoTable{D,JF}
     affine::Bool                             # the reference Hessians vanish (simplices): the cell maps are affine
     Mv::Matrix{Float64}                      # np × ng, values of the geometric shape functions at the points (`point_coordinate`)
     points::Base.RefValue{Union{Nothing,Tuple{Vector{Int32},Vector{Matrix{VectorValue{D,Float64}}}}}}
-                                             # nothing, or (columns integrated, point sets: Gridap's physical points
-                                             # np × length(columns)), for the functions of x of the groups (`coord_points!`)
+                                             # nothing, or (columns integrated, point sets) for the functions of x (`coord_points!`)
+    cellaff::Vector{Bool}                    # per column: the cell map is affine (Jt constant in the cell, `affine_cells`), so
+                                             # the kernels compute Jt, inv(Jt) and the measure once per cell (`cell_geometry`)
 end
 
 """
@@ -97,9 +98,43 @@ function GeoTable(trian::Triangulation, xq::AbstractVector, w::AbstractVector; c
         end
     end
     affine = all(iszero, ddMp)
+    cellaff = affine_cells(coords, dMp, reffes[1], D)
     Mv = Matrix{Float64}(evaluate(M, xq))
     GeoTable{D,typeof(Jf)}(length(xq), ng, dMp, collect(Float64, w), coords, Jf, dc, ddMp, affine, Mv,
-        Ref{Union{Nothing,Tuple{Vector{Int32},Vector{Matrix{VectorValue{D,Float64}}}}}}(nothing))
+        Ref{Union{Nothing,Tuple{Vector{Int32},Vector{Matrix{VectorValue{D,Float64}}}}}}(nothing), cellaff)
+end
+
+"Whether the kernels use one geometry per affine cell (`HFK_AFFINE_GEOMETRY=0` disables it: per point everywhere)."
+const AFFINE_GEOMETRY = Ref(get(ENV, "HFK_AFFINE_GEOMETRY", "1") == "1")
+
+"""
+    affine_cells(coords, dM, reffe, D) -> Vector{Bool}
+
+Per column of `coords` (the nodes of a cell), whether the cell map is affine: with `Jt` the
+Jacobian at the first point (`dM`: reference gradients of the geometric shape functions, zero-padded
+to `D`), every node satisfies `x_n - x_1 = (ξ_n - ξ_1) ⋅ Jt` (ξ the reference node coordinates).
+Lagrangian shape functions reproduce affine maps, so this holds exactly when the cell map is affine
+(simplices of order 1, parallelograms and parallelepipeds, straight-sided higher-order cells with
+evenly placed nodes) and fails on curved or deformed cells. The tolerance is round-off of the
+coordinates (`1e-13` of the cell size plus a few ulps of the coordinates), so a cell taken as
+affine changes the results only by round-off. All `false` with `HFK_AFFINE_GEOMETRY=0`.
+"""
+function affine_cells(coords::Matrix{VectorValue{D,Float64}}, dM::Matrix{VectorValue{D,Float64}}, reffe, ::Int) where {D}
+    ng, nc = size(coords)
+    out = fill(false, nc)
+    AFFINE_GEOMETRY[] || return out
+    ξ = [pad_vector(VectorValue(Float64.(p.data)), Val(D)) for p in get_node_coordinates(reffe)]
+    length(ξ) == ng || return out
+    for i in 1:nc
+        Jt = zero(TensorValue{D,D,Float64,D * D})
+        for n in 1:ng
+            Jt += outer(dM[1, n], coords[n, i])
+        end
+        x1 = coords[1, i]
+        h = maximum(norm(coords[n, i] - x1) for n in 1:ng)
+        out[i] = all(n -> norm(coords[n, i] - x1 - (ξ[n] - ξ[1]) ⋅ Jt) <= 1e-13 * h + 8eps() * norm(coords[n, i]), 1:ng)
+    end
+    out
 end
 
 "A reference gradient (`VectorValue{dc}`) zero-padded to `D` components (manifold cells, `dc < D`)."
