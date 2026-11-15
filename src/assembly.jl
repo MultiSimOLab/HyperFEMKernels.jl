@@ -105,7 +105,7 @@ function Group(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int,
     any(((t, u),) -> t isa PiolaTable && has_hess(u), zip(tables, use)) &&
         error("HyperFEMKernels: second derivatives (∇∇) of H(div) fields are not supported")
     rb = Tuple(residual_weights(t, sp, geo.np) for (t, sp) in zip(tables, smv))
-    aux = Tuple(a.array for a in pf.aux)
+    aux = Tuple(engine_aux(a.array, geo, group_columns(colors), eachindex(cellmap)) for a in pf.aux)
     AUX = Tuple{(Matrix{eltype(eltype(a))} for a in aux)...}
     NF = length(tables)
     lin = linear_maps ? LinearForm(terms, pf, tables, aux, pf.trial.nslots == 0 ? :res : :jac) : nothing
@@ -134,7 +134,7 @@ end
 "The group `g` with its values (operations, coefficients, parameters, auxiliary arrays, linear maps) read from `terms`."
 function rebind(g::Group, terms::Vector{Term})
     pf = PointForm(terms, g.pf)
-    aux = Tuple(a.array for a in pf.aux)
+    aux = Tuple(engine_aux(a.array, g.geo, group_columns(g.colors), eachindex(g.cellmap)) for a in pf.aux)
     lin = g.lin === nothing ? nothing : LinearForm(terms, pf, g.tables, aux, g.lin)
     typeof(g)(pf, lin, g.locs, g.tables, g.use, g.rb, g.geo, aux, g.smv, g.smu, g.trian, g.xq, g.auxcache, g.cellmap, g.colors, g.wkey)
 end
@@ -494,6 +494,12 @@ dense auxiliary buffers are reused and only the values change. Otherwise the gro
 again, reusing tables, geometry, colouring and, when the fallback and skeleton sets do not change, the
 sparsity pattern and positions. `HFK_CHECK_REBIND=1` compiles the fast path again from scratch and
 compares (debugging).
+
+Structure and values: the types of the operations of the form and of the functions of the coordinates
+(`CellField(f, Ω)`, or `f` used directly) are structure; what they capture is a value. A closure created
+again with other captured values (`make(a) = x -> a * x[1]`, then `make(2.0)`, `make(3.0)`) has the same
+type and is rebound, and the new values are used at the next assembly; a function of another type
+(another anonymous function, another named function) is a new structure and is compiled again.
 """
 function update(op::KernelOperator, res, jac)
     D = num_point_dims(get_triangulation(field_spaces(op.U)[1]))
@@ -671,8 +677,8 @@ end
 # Auxiliary data: dense values at the quadrature points
 #
 # Auxiliary data (fields that do not depend on the unknown/test/trial functions: previous states,
-# interpolated fields, functions of x, constants) is evaluated by Gridap into dense `np × ncells`
-# arrays, so the element kernels only read plain arrays (requirement for GPU execution). The arrays
+# interpolated fields, functions of x, constants) is evaluated (by the engine for FE functions and
+# functions of x, by Gridap otherwise) into dense `np × ncells` arrays, so the element kernels only read plain arrays (requirement for GPU execution). The arrays
 # are allocated once per group (first assembly) and refilled in place at every assembly, so that a
 # field that changes between assemblies (a previous state updated per load step) is always current
 # and the assembly allocates nothing for them; with `cache_aux = true` they are filled only once.
@@ -690,8 +696,9 @@ end
 
 """
 Refills the dense auxiliary values `vals` of a group in place: FE functions by the engine
-(`materialize_fe!`, from their current nodal values), other arrays by Gridap; KernelStates are
-read directly, not copied.
+(`materialize_fe!`, from their current nodal values), functions of the coordinates by the engine
+(`materialize_coord!`, at the points of the group's geometry), other arrays by Gridap; KernelStates
+are read directly, not copied.
 """
 function materialize_aux!(vals::AUX, g::Group{NSV,NSU,PF,TT,AUX}, nthreads::Int) where {NSV,NSU,PF,TT,AUX}
     np, ncells = g.geo.np, size(g.geo.coords, 2)
@@ -700,7 +707,12 @@ function materialize_aux!(vals::AUX, g::Group{NSV,NSU,PF,TT,AUX}, nthreads::Int)
         a = g.aux[k]
         a isa StateColumns && continue
         M = vals[k]
-        if a isa FEArray && g.geo.Jf === nothing && length(a) == ncells && size(a.fe.N, 1) == np
+        if a isa CoordArray
+            # a function of the coordinates kept by `engine_aux`: f at the points of the group's geometry
+            @sync for ch in chunks
+                Threads.@spawn materialize_coord!(M, a, ch, np, g.geo)
+            end
+        elseif a isa FEArray && g.geo.Jf === nothing && length(a) == ncells && size(a.fe.N, 1) == np
             # cell integrals at the points of the FE leaf's basis table; anything else (boundary
             # integrals, other points) takes Gridap's lazy array, which gives the same values
             @sync for ch in chunks

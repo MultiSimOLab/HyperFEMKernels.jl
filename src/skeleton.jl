@@ -147,7 +147,7 @@ function SkeletonGroup(terms::Vector{Term}, trian::Triangulation, Uspaces, locs,
     smv = Tuple(SlotSpec(slot_map(pf.test, fieldof[i], tables[i].nc, D; side=sides[i]), D) for i in 1:NF2)
     smu = Tuple(SlotSpec(slot_map(pf.trial, fieldof[i], tables[i].nc, D; side=sides[i]), D) for i in 1:NF2)
     use = Tuple(field_use(terms, fieldof[i]; side=sides[i]) for i in 1:NF2)
-    aux = Tuple(a.array for a in pf.aux)
+    aux = Tuple(engine_aux(a.array, geo, eachindex(cls.facets), cls.facets) for a in pf.aux)
     any(a -> a isa StateColumns, aux) && error("HyperFEMKernels: internal variables (KernelState) on a skeleton are not supported yet")
     AUX = Tuple{(Matrix{eltype(eltype(a))} for a in aux)...}
     lin = linear_maps ? LinearForm(terms, pf, tables, aux, pf.trial.nslots == 0 ? :res : :jac) : nothing
@@ -192,7 +192,7 @@ end
 "The skeleton class `g` with its values read from `terms` (see `rebind(::Group, terms)`)."
 function rebind(g::SkeletonGroup, terms::Vector{Term})
     pf = PointForm(terms, g.pf)
-    aux = Tuple(a.array for a in pf.aux)
+    aux = Tuple(engine_aux(a.array, g.geo, eachindex(g.facets), g.facets) for a in pf.aux)
     lin = g.lin === nothing ? nothing : LinearForm(terms, pf, g.tables, aux, g.lin)
     typeof(g)(pf, lin, g.locs, g.tables, g.use, g.geo, g.geom, aux, g.smv, g.smu, g.trian, g.key, g.auxcache, g.facets, g.skel, g.colors, g.wkey)
 end
@@ -210,8 +210,14 @@ function materialize_aux!(vals::AUX, g::SkeletonGroup{NSV,NSU,PF,TT,AUX}, nthrea
     chunks = collect(Iterators.partition(1:n, cld(n, max(1, nthreads))))
     for k in 1:length(g.aux)
         a = g.aux[k]; M = vals[k]
-        @sync for ch in chunks
-            Threads.@spawn _materialize_facets!(M, a, g.facets, ch, np)
+        if a isa CoordArray       # f at the points of the plus side's geometry (`engine_aux`)
+            @sync for ch in chunks
+                Threads.@spawn materialize_coord!(M, a, ch, np, g.geo)
+            end
+        else
+            @sync for ch in chunks
+                Threads.@spawn _materialize_facets!(M, a, g.facets, ch, np)
+            end
         end
     end
     vals

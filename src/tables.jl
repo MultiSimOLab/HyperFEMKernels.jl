@@ -25,7 +25,7 @@ function uniform_value(a::AbstractArray, what::String)
 end
 
 """
-Geometry: gradients of the geometric shape functions at the quadrature points, weights,
+Geometry: values and gradients of the geometric shape functions at the quadrature points, weights,
 coordinates. For a boundary group `Jf` is the (constant) Jacobian of the map from the reference
 face to the reference cell, so that the surface measure is `w * meas(Jf ⋅ Jt)`; `nothing` for
 volume groups.
@@ -50,6 +50,7 @@ struct GeoTable{D,JF}
     ddM::Array{Float64,3}                    # D² × np × ng, reference Hessians of the geometric shape functions (column-major
                                              # entries of each D × D Hessian, zero-padded on manifold cells); concrete eltype
     affine::Bool                             # the reference Hessians vanish (simplices): the cell maps are affine
+    Mv::Matrix{Float64}                      # np × ng, values of the geometric shape functions at the points (`point_coordinate`)
 end
 
 """
@@ -93,7 +94,8 @@ function GeoTable(trian::Triangulation, xq::AbstractVector, w::AbstractVector; c
         end
     end
     affine = all(iszero, ddMp)
-    GeoTable{D,typeof(Jf)}(length(xq), ng, dMp, collect(Float64, w), coords, Jf, dc, ddMp, affine)
+    Mv = Matrix{Float64}(evaluate(M, xq))
+    GeoTable{D,typeof(Jf)}(length(xq), ng, dMp, collect(Float64, w), coords, Jf, dc, ddMp, affine, Mv)
 end
 
 "A reference gradient (`VectorValue{dc}`) zero-padded to `D` components (manifold cells, `dc < D`)."

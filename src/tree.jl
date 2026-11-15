@@ -135,11 +135,15 @@ function to_node(a::AbstractArray)
     end
     if !contains_probe(a)
         # data that does not depend on the unknown/test/trial functions. An FE function (or its
-        # gradient) is read as a leaf the engine evaluates from its nodal values (`fe_array`), and
-        # the operations above such leaves are compiled with the integrand; any other data, or a
-        # subtree the reader cannot translate, is one auxiliary array evaluated by Gridap.
+        # gradient) is read as a leaf the engine evaluates from its nodal values (`fe_array`), a
+        # function of the coordinates as a leaf the engine evaluates at the physical points
+        # (`coord_array`), and the operations above such leaves are compiled with the integrand;
+        # any other data, or a subtree the reader cannot translate, is one auxiliary array
+        # evaluated by Gridap.
         fe = fe_array(a)
         fe === nothing || return Aux(fe)
+        ca = coord_array(a)
+        ca === nothing || return Aux(ca)
         contains_fe(a) || return Aux(a)
         return try
             to_ops(a)
@@ -163,11 +167,14 @@ function to_ops(a)
     error("HyperFEMKernels: unsupported array in the integrand: $(typeof(a))")
 end
 
-"Whether an FE-function leaf (`fe_array`) appears below `a` through pointwise operations only."
+"""
+Whether a leaf the engine evaluates (an FE function, `fe_array`, or a function of the coordinates,
+`coord_array`) appears below `a` through pointwise operations only.
+"""
 function contains_fe(a)
     a isa LazyArray || return false
     first(a.maps) isa BroadcastingFieldOpMap || return false
-    any(b -> fe_array(b) !== nothing || contains_fe(b), a.args)
+    any(b -> fe_array(b) !== nothing || coord_array(b) !== nothing || contains_fe(b), a.args)
 end
 
 "Leaves of each role appearing in a set of forms, in a stable order."
@@ -211,7 +218,8 @@ function show_tree(io::IO, n::Node, depth=0)
     if n isa Leaf
         println(io, pad, n.role, "[", n.field, "]", n.deriv == 1 ? " ∇" : n.deriv == 2 ? " ∇∇" : "", n.side === :cell ? "" : " $(n.side)", " :: ", n.T)
     elseif n isa Aux
-        println(io, pad, n.array isa FEArray ? "fe function" : "aux", " :: ", eltype(eltype(n.array)))
+        kind = n.array isa FEArray ? "fe function" : n.array isa CoordArray ? "function of x" : "aux"
+        println(io, pad, kind, " :: ", eltype(eltype(n.array)))
     elseif n isa Const
         println(io, pad, "const ", n.value)
     else
@@ -250,7 +258,9 @@ node_sig(n::Node) = (:other, typeof(n))
 Identity of an auxiliary array across captures: Gridap builds a new lazy array per capture, so only
 the data behind it can be compared — the cell dof values of an FE function (`FEArray`) and the matrix
 of a `KernelState` (`StateColumns`); other arrays are compared by type only (their values are read
-through the new array at every assembly).
+through the new array at every assembly). For a function of the coordinates (`CoordArray{T,F}`) the
+type holds the type `F` of the function: another closure type is another structure, the same type
+with other captured values is the same structure (as for operations, `node_sig(::Op)`).
 """
 aux_identity(a) = nothing          # methods for FEArray (fefunctions.jl) and StateColumns (states.jl)
 
