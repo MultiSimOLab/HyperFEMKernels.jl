@@ -54,7 +54,16 @@ backend for its drivers (`backend = :compiled`).
   package is loaded, disables the shortcut).
 - **Threads, no allocations.** Cells are coloured so that the assembly loop is threaded without
   locks; element kernels allocate nothing (`allocations` reports it), which is also the
-  requirement for GPU execution.
+  requirement for GPU execution. The element buffers are kept in the operator, so a repeated
+  `residual!`/`jacobian!` with one thread allocates nothing (with threads, only the tasks: a fixed
+  amount per call); auxiliary data left to Gridap (other `CellField`s) still allocates in Gridap. An
+  operator is not reentrant: do not assemble it, or operators `update` derived from it, from two tasks at
+  once (each assembly is threaded internally).
+- **Tuning switches** (read when the package is loaded; `HyperFEMKernels.read_env_settings!()` reads them
+  again, for operators built afterwards): `HFK_MATRIX_PRODUCTS` (`1`/`0`, element residual and Jacobian as
+  matrix products on node-contiguous fields), `HFK_WORK_PER_TASK` (minimum work per task, default 20000),
+  `HFK_POINT_BLOCK` (points per block of the matrix-product Jacobian, default 12, 0 = all),
+  `HFK_AFFINE_GEOMETRY` (`1`/`0`, geometry once per affine cell).
 - **Cheap updates.** Numbers in the weak form (load factors, time steps, material parameters) are
   run-time parameters: `update(op, res, jac)` with forms of the same structure (same measures,
   operations and constants up to their values, same FE functions, functions of the coordinates of
@@ -342,6 +351,13 @@ run with both backends as part of the test suite.
 - Shared-memory parallelism (threads). Distributed runs with GridapDistributed and GPU execution
   are design targets: kernels are allocation-free and states use a GPU-friendly layout.
 - Gridap is restricted to the 0.20 series, because the engine reads Gridap's internal expression tree.
+- Boundary integrals on a `CartesianDiscreteModel` with a nonlinear `map` in 3D: Gridap builds the faces of
+  that model with affine face maps while its cells are trilinear, so on curved hexahedra Gridap's boundary
+  integrals differ from the kernel's (about 1 % in our tests), which integrate on the faces of the cells.
+  The kernel agrees with Gridap on `UnstructuredDiscreteModel(model)`, whose faces are consistent with the
+  cells; use that model there. On the Cartesian model itself, functions of x on those faces are evaluated by
+  Gridap at its (affine-face) points while the measure is that of the faces of the cells, so the result
+  matches neither. 2D (straight edges) and affine models are not affected.
 
 ## Testing
 

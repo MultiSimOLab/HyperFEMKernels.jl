@@ -1,8 +1,12 @@
 # Operator and assembly.
 
 const EMPTY_SLOTS = SVector{0,Float64}()
-const MATRIX_PRODUCTS = get(ENV, "HFK_MATRIX_PRODUCTS", "1") == "1"
-const WORK_PER_TASK = parse(Int, get(ENV, "HFK_WORK_PER_TASK", "20000"))
+# Tuning switches, read from the environment when the package is loaded (`__init__`, `read_env_settings!`),
+# not frozen at precompilation.
+"Element residual/Jacobian as matrix products on node-contiguous fields (`HFK_MATRIX_PRODUCTS`, default 1)."
+const MATRIX_PRODUCTS = Ref(true)
+"Minimum work per task of the threaded assembly, in points × element-matrix entries (`HFK_WORK_PER_TASK`, default 20000)."
+const WORK_PER_TASK = Ref(20000)
 
 "Global numbering of one field: cell dof ids of test and trial spaces and offsets."
 struct FieldLayout
@@ -38,27 +42,43 @@ end
 "A compiled group of terms (volume or boundary cells: `Group`; skeleton facets: `SkeletonGroup`)."
 abstract type AbstractGroup end
 
+"""
+Work buffers of a group, created with the group (one set) and reused by every assembly (shared by the
+groups `update` rebinds): element buffers of the residual (`BR`) and of the Jacobian (`BJ`) per task
+(`task_buffers`; a set per task, copied from the first one when more tasks are used) and the local dof
+vector of each auxiliary FE function per task (`fe_buffer`). Their types are parameters of the group, so
+the element loops are called without dynamic dispatch. An operator is therefore not reentrant: two
+assemblies of the same operator must not run at the same time.
+"""
+struct GroupWork{BR,BJ}
+    res::Vector{BR}
+    jac::Vector{BJ}
+    fe::Dict{Int,Vector{Any}}
+end
+GroupWork(r, j) = GroupWork{typeof(r),typeof(j)}([r], [j], Dict{Int,Vector{Any}}())
+
 "A compiled group of terms: same triangulation and quadrature."
-struct Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF,UU,RB} <: AbstractGroup
-    pf::PF
-    lin::LF               # LinearForm (no dual numbers) or nothing
-    locs::NTuple{NF,Int}  # offset of each field in the element vector
-    tables::TT          # FieldTable per field
-    use::UU             # FieldUse per field: derivatives of the unknown evaluated at the points
-    rb::RB              # reference weights of the test slots per field (`residual_weights`), for the matrix-product residual
-    geo::GeoTable{D,JF}
-    aux::Tuple          # auxiliary arrays: Gridap arrays (evaluated per cell, lazily), FE functions (`FEArray`) and
+mutable struct Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF,UU,RB,GW} <: AbstractGroup   # mutable: passed by reference
+    const pf::PF
+    const lin::LF               # LinearForm (no dual numbers) or nothing
+    const locs::NTuple{NF,Int}  # offset of each field in the element vector
+    const tables::TT          # FieldTable per field
+    const use::UU             # FieldUse per field: derivatives of the unknown evaluated at the points
+    const rb::RB              # reference weights of the test slots per field (`residual_weights`), for the matrix-product residual
+    const geo::GeoTable{D,JF}
+    const aux::Tuple          # auxiliary arrays: Gridap arrays (evaluated per cell, lazily), FE functions (`FEArray`) and
                         # functions of x (`CoordArray`) evaluated by the engine; their types are not part of the group's type,
                         # so that a changed auxiliary expression does not recompile the kernels)
                         # AUX: type of the dense values of `aux` at the points (NTuple of Matrix{T}, see materialize_aux)
-    smv::SV             # slot specs (test) per field
-    smu::SU             # slot specs (trial) per field
-    trian::Triangulation
-    xq::Vector          # reference quadrature points
-    auxcache::Base.RefValue{Any}   # dense auxiliary values (buffers reused across assemblies; see aux_data)
-    cellmap::Vector{Int32}         # integration cell → cell of the FE spaces
-    colors::Vector{Vector{Int32}}  # integration cells per colour
-    wkey::UInt                     # identity of the quadrature weights of its terms (`rebind`)
+    const smv::SV             # slot specs (test) per field
+    const smu::SU             # slot specs (trial) per field
+    const trian::Triangulation
+    const xq::Vector          # reference quadrature points
+    const auxcache::Base.RefValue{Any}   # dense auxiliary values (buffers reused across assemblies; see aux_data)
+    const cellmap::Vector{Int32}         # integration cell → cell of the FE spaces
+    const colors::Vector{Vector{Int32}}  # integration cells per colour
+    const wkey::UInt                     # identity of the quadrature weights of its terms (`rebind`)
+    const work::GW                       # element buffers per task (`GroupWork`, `task_buffers`), reused across assemblies
 end
 
 "Derivatives of the unknown of field `f` (on `side`) that the terms evaluate at the points."
@@ -110,9 +130,11 @@ function Group(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int,
     AUX = Tuple{(Matrix{eltype(eltype(a))} for a in aux)...}
     NF = length(tables)
     lin = linear_maps ? LinearForm(terms, pf, tables, aux, pf.trial.nslots == 0 ? :res : :jac) : nothing
-    Group{pf.test.nslots,pf.trial.nslots,typeof(pf),typeof(tables),AUX,typeof(smv),typeof(smu),D,NF,typeof(lin),typeof(geo.Jf),typeof(use),typeof(rb)}(
+    ndl = locs[end] + ndofs(tables[end])
+    work = group_work(tables, smv, smu, geo.np, ndl)
+    Group{pf.test.nslots,pf.trial.nslots,typeof(pf),typeof(tables),AUX,typeof(smv),typeof(smu),D,NF,typeof(lin),typeof(geo.Jf),typeof(use),typeof(rb),typeof(work)}(
         pf, lin, NTuple{NF,Int}(locs), tables, use, rb, geo, aux, smv, smu, trian, collect(xq), Ref{Any}(nothing), cellmap, colors,
-        objectid(terms[1].weights))
+        objectid(terms[1].weights), work)
 end
 
 # ---------------------------------------------------------------------------------------------
@@ -137,7 +159,7 @@ function rebind(g::Group, terms::Vector{Term})
     pf = PointForm(terms, g.pf)
     aux = Tuple(engine_aux(a.array, g.geo, () -> group_columns(g.colors), eachindex(g.cellmap)) for a in pf.aux)
     lin = g.lin === nothing ? nothing : LinearForm(terms, pf, g.tables, aux, g.lin)
-    typeof(g)(pf, lin, g.locs, g.tables, g.use, g.rb, g.geo, aux, g.smv, g.smu, g.trian, g.xq, g.auxcache, g.cellmap, g.colors, g.wkey)
+    typeof(g)(pf, lin, g.locs, g.tables, g.use, g.rb, g.geo, aux, g.smv, g.smu, g.trian, g.xq, g.auxcache, g.cellmap, g.colors, g.wkey, g.work)
 end
 
 rebind_groups(groups::Vector{Any}, forms::Vector{Form}) = Any[rebind(g, terms_of(g, forms)) for g in groups]
@@ -206,28 +228,55 @@ Newton iterate).
 assembles it. `jacobian = :matrixfree`: `allocate_jacobian` returns a [`MatrixFreeJacobian`](@ref)
 and `jacobian!` prepares it at the state (`prepare!`), so a Newton solver applies the tangent
 without forming it; the sparsity pattern is then only built if an assembled matrix is requested.
+
+Not reentrant: the element buffers live in the compiled groups (`GroupWork`) and are shared by the
+operators that `update` derives through its fast path, so the same operator, or two operators derived
+from the same one, must not be assembled from two tasks at the same time (each assembly is threaded
+internally). A repeated `residual!`/`jacobian!` with one thread allocates nothing when the auxiliary data
+is evaluated by the engine.
 """
-struct KernelOperator{R,J,US,VS} <: NonlinearOperator
-    res::R
-    jac::J
-    U::US
-    V::VS
-    fields::Vector{FieldLayout}
-    ndl::Int
-    rgroups::Vector{Any}
-    jgroups::Vector{Any}
-    pattern::Sparsity                # sparsity pattern and nonzero positions (see `Sparsity`)
-    colors::Vector{Vector{Int32}}
-    nthreads::Int
-    cache_aux::Bool
-    linear_maps::Bool
-    fallback::Fallback
-    skel::Vector{SkeletonData}       # skeleton triangulations with groups (facet cells, colours, positions)
-    signed::Bool                     # some field has dof signs (H(div)): applied at gather/scatter
-    jacobian::Symbol                 # :assembled (allocate_jacobian gives the sparse matrix) or :matrixfree (a MatrixFreeJacobian)
-    rsig::Any                        # structural signatures of the captured residual and Jacobian (`signature`; cheap `update`)
-    jsig::Any
+mutable struct KernelOperator{R,J,US,VS} <: NonlinearOperator   # mutable: passed by reference (no boxing per group)
+    const res::R
+    const jac::J
+    const U::US
+    const V::VS
+    const fields::Vector{FieldLayout}
+    const ndl::Int
+    const rgroups::Vector{Any}
+    const jgroups::Vector{Any}
+    const pattern::Sparsity                # sparsity pattern and nonzero positions (see `Sparsity`)
+    const colors::Vector{Vector{Int32}}
+    const nthreads::Int
+    const cache_aux::Bool
+    const linear_maps::Bool
+    const fallback::Fallback
+    const skel::Vector{SkeletonData}       # skeleton triangulations with groups (facet cells, colours, positions)
+    const signed::Bool                     # some field has dof signs (H(div)): applied at gather/scatter
+    const jacobian::Symbol                 # :assembled (allocate_jacobian gives the sparse matrix) or :matrixfree (a MatrixFreeJacobian)
+    const rsig::Any                        # structural signatures of the captured residual and Jacobian (`signature`; cheap `update`)
+    const jsig::Any
+    const dvals::AbstractVector            # Dirichlet values of each field, refilled at every assembly (`refresh_dirichlet_values!`)
 end
+
+"The Dirichlet values of each field of the trial space, refilled in the operator's vector (no allocation)."
+function refresh_dirichlet_values!(op::KernelOperator)
+    dv = op.dvals
+    U = op.U
+    if U isa MultiFieldFESpace
+        spaces = U.spaces
+        for i in eachindex(spaces)                     # not `enumerate`: its iterator would be boxed (abstract eltype)
+            s = spaces[i]
+            refresh_dirichlet(s) && (dv[i] = get_dirichlet_dof_values(s))
+        end
+    else
+        refresh_dirichlet(U) && (dv[1] = get_dirichlet_dof_values(U))
+    end
+    dv
+end
+# a space without Dirichlet dofs, or an unconstrained (test) space, has fixed (zero) Dirichlet values, and
+# Gridap builds a new zero vector at every call: keep the one read at construction
+refresh_dirichlet(s) = !(s isa UnconstrainedFESpace) && num_dirichlet_dofs(s) > 0
+initial_dirichlet_values(U) = [get_dirichlet_dof_values(s) for s in field_spaces(U)]
 
 "A skeleton (interior facets with a plus and a minus cell): its glue to the cells is a `SkeletonPair`."
 is_skeleton(trian::Triangulation, D::Int) = num_cell_dims(trian) == D - 1 && Geometry.get_glue(trian, Val(D)) isa Geometry.SkeletonPair
@@ -477,7 +526,7 @@ function KernelOperator(res, jac, U::FESpace, V::FESpace; nthreads::Int=Threads.
     warn_fallback("residual", rfb); warn_fallback("Jacobian", jfb)
     fb = Fallback(Any[t for (t, _) in rfb], Any[t for (t, _) in jfb], SparseMatrixAssembler(U, V))
     op = KernelOperator(res, jac, U, V, fields, loc, rgroups, jgroups, Sparsity(), colors, nthreads, cache_aux, linear_maps, fb, skel,
-                        any(has_signs, fields), jacobian, rsig, jsig)
+                        any(has_signs, fields), jacobian, rsig, jsig, initial_dirichlet_values(U))
     jacobian === :assembled && build_pattern!(op)
     op
 end
@@ -529,7 +578,7 @@ function update(op::KernelOperator, res, jac)
                                                   previous_skel=op.skel, fields=op.fields, nrows, ndl=op.ndl), "Jacobian")
         end
         return KernelOperator(res, jac, op.U, op.V, op.fields, op.ndl, rgroups, jgroups, op.pattern, op.colors, op.nthreads, op.cache_aux,
-                              op.linear_maps, op.fallback, op.skel, op.signed, op.jacobian, rsig, jsig)
+                              op.linear_maps, op.fallback, op.skel, op.signed, op.jacobian, rsig, jsig, op.dvals)
     end
     nrows = sum(num_free_dofs, field_spaces(op.V))
     skel = SkeletonData[]
@@ -544,7 +593,7 @@ function update(op::KernelOperator, res, jac)
            length(jskel) == length(jskel0) && all(s -> any(t -> t.trian === s.trian, jskel0), jskel)
     pattern = same ? op.pattern : Sparsity()
     newop = KernelOperator(res, jac, op.U, op.V, op.fields, op.ndl, rgroups, jgroups, pattern, op.colors, op.nthreads, op.cache_aux,
-                           op.linear_maps, fb, skel, op.signed, op.jacobian, rsig, jsig)
+                           op.linear_maps, fb, skel, op.signed, op.jacobian, rsig, jsig, op.dvals)
     op.jacobian === :assembled && build_pattern!(newop)
     if debug_update()
         why = rsig != op.rsig ? "residual: $(signature_diff(rsig, op.rsig))" : "Jacobian: $(signature_diff(jsig, op.jsig))"
@@ -652,7 +701,7 @@ Algebra.zero_initial_guess(op::KernelOperator) = zeros(sum(num_free_dofs, field_
 
 function Algebra.residual!(b::AbstractVector, op::KernelOperator, x::AbstractVector)
     fill!(b, 0.0)
-    dvals = [get_dirichlet_dof_values(s) for s in field_spaces(op.U)]
+    dvals = refresh_dirichlet_values!(op)
     for g in op.rgroups
         run_cells!(Val(:res), b, nothing, op, g, x, dvals)
     end
@@ -664,9 +713,9 @@ function Algebra.jacobian!(A::SparseMatrixCSC, op::KernelOperator, x::AbstractVe
     size(A) == size(A0) && nnz(A) == nnz(A0) ||
         error("HyperFEMKernels: the matrix ($(size(A)), $(nnz(A)) nonzeros) does not have the sparsity pattern of the operator ($(size(A0)), $(nnz(A0)))")
     fill!(nonzeros(A), 0.0)
-    dvals = [get_dirichlet_dof_values(s) for s in field_spaces(op.U)]
+    dvals = refresh_dirichlet_values!(op)
     for g in op.jgroups
-        run_cells!(Val(:jac), nothing, A, op, g, x, dvals)
+        run_cells!(Val(:jac), nothing, nonzeros(A), op, g, x, dvals)   # the nonzeros (a heap vector: no boxing per group)
     end
     fallback_jacobian!(A, op, x)
 end
@@ -705,32 +754,71 @@ Refills the dense auxiliary values `vals` of a group in place: FE functions by t
 are read directly, not copied.
 """
 function materialize_aux!(vals::AUX, g::Group{NSV,NSU,PF,TT,AUX}, nthreads::Int) where {NSV,NSU,PF,TT,AUX}
-    np, ncells = g.geo.np, size(g.geo.coords, 2)
-    chunks = collect(Iterators.partition(1:ncells, cld(ncells, max(1, nthreads))))
     for k in 1:length(g.aux)
-        a = g.aux[k]
-        a isa StateColumns && continue
-        M = vals[k]
-        if a isa CoordArray
-            # a function of the coordinates kept by `engine_aux`: f at Gridap's points stored with the
-            # geometry, only on the columns the group integrates (a boundary group: the faces of its class)
-            ncols = length(g.geo.points[][1])
-            @sync for ch in Iterators.partition(1:ncols, cld(ncols, max(1, nthreads)))
-                Threads.@spawn materialize_coord!(M, a, ch, np, g.geo)
-            end
-        elseif a isa FEArray && g.geo.Jf === nothing && length(a) == ncells && size(a.fe.N, 1) == np
-            # cell integrals at the points of the FE leaf's basis table; anything else (boundary
-            # integrals, other points) takes Gridap's lazy array, which gives the same values
-            @sync for ch in chunks
-                Threads.@spawn materialize_fe!(M, a, ch, np, g.geo)
-            end
-        else
-            @sync for ch in chunks
-                Threads.@spawn _materialize!(M, a, ch, np)
-            end
-        end
+        materialize_one!(vals[k], g.aux[k], g, max(1, nthreads), k)    # one dynamic call per array (heap arguments only)
     end
     vals
+end
+
+# One auxiliary array of a group: one task (no spawn, no allocation) or one per chunk of cells.
+function materialize_one!(M::Matrix, a::CoordArray, g::Group, nt::Int, k::Int)
+    # a function of the coordinates kept by `engine_aux`: f at Gridap's points stored with the geometry,
+    # only on the columns the group integrates (a boundary group: the faces of its class)
+    np = g.geo.np
+    ncols = length(g.geo.points[][1])
+    if nt == 1 || ncols <= 1
+        materialize_coord!(M, a, 1:ncols, np, g.geo)
+    else
+        @sync for ch in Iterators.partition(1:ncols, cld(ncols, nt))
+            Threads.@spawn materialize_coord!(M, a, ch, np, g.geo)
+        end
+    end
+    M
+end
+function materialize_one!(M::Matrix, a::FEArray, g::Group, nt::Int, k::Int)
+    np, ncells = g.geo.np, size(g.geo.coords, 2)
+    # cell integrals at the points of the FE leaf's basis table; anything else (boundary integrals,
+    # other points) takes Gridap's lazy array, which gives the same values
+    (g.geo.Jf === nothing && length(a) == ncells && size(a.fe.N, 1) == np) || return materialize_gridap!(M, a, g, nt)
+    if nt == 1 || ncells <= 1
+        materialize_fe!(M, a, 1:ncells, np, g.geo, fe_buffer(g, k, 1, a))
+    else
+        chunks = Iterators.partition(1:ncells, cld(ncells, nt))
+        for t in 1:length(chunks)
+            fe_buffer(g, k, t, a)                    # allocated serially, before the tasks
+        end
+        @sync for (t, ch) in enumerate(chunks)
+            Threads.@spawn materialize_fe!(M, a, ch, np, g.geo, fe_buffer(g, k, t, a))
+        end
+    end
+    M
+end
+materialize_one!(M::Matrix, a, g::Group, nt::Int, k::Int) = materialize_gridap!(M, a, g, nt)
+function materialize_gridap!(M::Matrix, a, g::Group, nt::Int)
+    a isa StateColumns && return M               # a KernelState (states.jl): its matrix is the dense value
+    np, ncells = g.geo.np, size(g.geo.coords, 2)
+    if nt == 1 || ncells <= 1
+        _materialize!(M, a, 1:ncells, np)
+    else
+        @sync for ch in Iterators.partition(1:ncells, cld(ncells, nt))
+            Threads.@spawn _materialize!(M, a, ch, np)
+        end
+    end
+    M
+end
+
+"Local dof vector of the auxiliary FE function `a` (slot `k` of the group) for task `t`, allocated once."
+function fe_buffer(g::AbstractGroup, k::Int, t::Int, a::FEArray)
+    T = eltype(a.fe.free)
+    nd = a.fe.nd
+    v = get(g.work.fe, k, nothing)
+    v === nothing && (v = g.work.fe[k] = Any[])
+    while length(v) < t
+        push!(v, zeros(T, nd))
+    end
+    b = v[t]
+    (b isa Vector{T} && length(b) == nd) || (b = v[t] = zeros(T, nd))
+    b::Vector{T}
 end
 function _materialize!(M::Matrix, a, cells, np::Int)
     cache = array_cache(a)
@@ -980,9 +1068,10 @@ end
 end
 
 "Buffers of the matrix-product residual: coefficients (np·LR × nc, `lvref`) and work matrix (nn × nc) per field."
-function rm_buffers(g::Group)
-    Cb = map((t, sm) -> zeros(g.geo.np * lvref(t, sm), t.nc), g.tables, g.smv)
-    Mb = map(t -> zeros(t.nn, t.nc), g.tables)
+rm_buffers(g::Group) = rm_buffers(g.tables, g.smv, g.geo.np)
+function rm_buffers(tables, smv, np::Int)
+    Cb = map((t, sm) -> zeros(np * lvref(t, sm), t.nc), tables, smv)
+    Mb = map(t -> zeros(t.nn, t.nc), tables)
     Cb, Mb
 end
 
@@ -1020,11 +1109,11 @@ Element Jacobian of `cell` as matrix products (requires node-contiguous dofs); b
 the G and B buffers of a block stay in L1 cache during the products (0 = all points at once).
 """
 function element_jacobian_mm!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}, xl, auxd, cell::Integer,
-                              Wb, Bb, Gb) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}
+                              Wb, Bb, Gb, qb::Int=point_block(g.geo.np)) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}
+    # `qb`: points per block, the one the buffers `Bb`, `Gb` were sized for (`mm_buffers`)
     fill!(KeT, 0.0)
     tables, locs, pf = g.tables, g.locs, g.pf
     np = g.geo.np
-    qb = point_block(np)
     zsv = zero(SVector{NSV,Float64})
     zsu = zero(SVector{NSU,Float64})
     hu = hess_use(g)
@@ -1054,16 +1143,42 @@ function element_jacobian_mm!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF},
 end
 
 "Points per block of the matrix-product path (`HFK_POINT_BLOCK`, 0 = all points of the cell)."
-const POINT_BLOCK = Ref(parse(Int, get(ENV, "HFK_POINT_BLOCK", "12")))
+const POINT_BLOCK = Ref(12)
+
+function env_flag(name, default::Bool)
+    v = lowercase(strip(get(ENV, name, "")))
+    isempty(v) && return default
+    v in ("1", "true", "yes", "on") && return true
+    v in ("0", "false", "no", "off") && return false
+    @warn "HyperFEMKernels: $name=$(ENV[name]) is not a boolean; using $default"
+    default
+end
+function env_int(name, default::Int)
+    v = strip(get(ENV, name, ""))
+    isempty(v) && return default
+    n = tryparse(Int, v)
+    n === nothing && @warn "HyperFEMKernels: $name=$v is not an integer; using $default"
+    something(n, default)
+end
+
+"Read the tuning switches from the environment (called by `__init__`; call again after changing `ENV`)."
+function read_env_settings!()
+    MATRIX_PRODUCTS[] = env_flag("HFK_MATRIX_PRODUCTS", true)
+    WORK_PER_TASK[] = max(1, env_int("HFK_WORK_PER_TASK", 20000))
+    POINT_BLOCK[] = env_int("HFK_POINT_BLOCK", 12)
+    AFFINE_GEOMETRY[] = affine_geometry_from_env()
+    nothing
+end
 point_block(np::Int) = (qb = POINT_BLOCK[]; qb <= 0 ? np : min(qb, np))
 
 "Buffers for the matrix-product path: weights per field, B per field, G per block (f, g)."
-function mm_buffers(g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D}) where {NSV,NSU,PF,TT,AUX,SV,SU,D}
-    np = point_block(g.geo.np)
+mm_buffers(g::Group) = mm_buffers(g.tables, g.smv, g.smu, g.geo.np)
+function mm_buffers(tables, smv, smu, npts::Int)
+    np = point_block(npts)
     lv(sp::SlotSpec{NC,LV}) where {NC,LV} = LV
-    Wb = map(t -> zeros(t.nn, wcols(t)), g.tables)
-    Bb = map((t, sm) -> zeros(np * lv(sm), t.nn), g.tables, g.smv)
-    Gb = map((tf, smf) -> map((tg, smg) -> zeros(tg.nn, np * lv(smf), tg.nc, tf.nc), g.tables, g.smu), g.tables, g.smv)
+    Wb = map(t -> zeros(t.nn, wcols(t)), tables)
+    Bb = map((t, sm) -> zeros(np * lv(sm), t.nn), tables, smv)
+    Gb = map((tf, smf) -> map((tg, smg) -> zeros(tg.nn, np * lv(smf), tg.nc, tf.nc), tables, smu), tables, smv)
     (Wb, Bb, Gb)
 end
 
@@ -1099,28 +1214,55 @@ function run_cells!(kind::Val, b, A, op::KernelOperator, g::AbstractGroup, x, dv
     for color in g.colors
         # tasks of at least WORK_PER_TASK "units" (points × element-matrix entries per cell)
         work = length(color) * g.geo.np * op.ndl^2
-        nchunks = clamp(work ÷ WORK_PER_TASK, 1, min(op.nthreads, length(color)))
+        nchunks = clamp(work ÷ WORK_PER_TASK[], 1, min(op.nthreads, length(color)))
         if nchunks == 1
-            cells!(kind, b, A, op, g, x, dvals, auxd, color)
+            cells!(kind, b, A, op, g, x, dvals, auxd, color, task_buffers(g, kind, op, 1))   # no task: no allocation
         else
-            @sync for ch in Iterators.partition(color, cld(length(color), nchunks))
-                Threads.@spawn cells!(kind, b, A, op, g, x, dvals, auxd, ch)
+            chunks = Iterators.partition(color, cld(length(color), nchunks))
+            for t in 1:length(chunks)
+                task_buffers(g, kind, op, t)                 # allocated serially (first assembly), before the tasks
+            end
+            @sync for (t, ch) in enumerate(chunks)
+                Threads.@spawn cells!(kind, b, A, op, g, x, dvals, auxd, ch, task_buffers(g, kind, op, t))
             end
         end
     end
     nothing
 end
 
+"""
+Element buffers of group `g` for the assembly `kind` (`:res`, or `:jac`/`:blocks`) and task `t`,
+allocated at their first use and kept in the group (`GroupWork`).
+"""
+@inline function task_buffers(g::AbstractGroup, ::Val{K}, op, t::Int) where {K}
+    v = K === :res ? g.work.res : g.work.jac
+    while length(v) < t
+        push!(v, deepcopy(v[1]))                 # one more task: the same shapes
+    end
+    @inbounds v[t]
+end
+
+"Work buffers of a group with `tables`: one set for the residual and one for the Jacobian (`GroupWork`)."
+function group_work(tables, smv, smu, np::Int, ndl::Int)
+    contig = all(t -> t isa AbstractFieldTable{<:Any,<:Any,<:Any,<:Any,true}, tables)
+    Cb, Mb = contig ? rm_buffers(tables, smv, np) : (nothing, nothing)
+    Wb, Bb, Gb = contig ? mm_buffers(tables, smv, smu, np) : (nothing, nothing, nothing)
+    r = (xl=zeros(ndl), sg=zeros(ndl), re=zeros(ndl), Cb=Cb, Mb=Mb)
+    # the block size is fixed with the buffers: changing `POINT_BLOCK` later does not resize them
+    j = (xl=zeros(ndl), sg=zeros(ndl), dNb=map(t -> zeros(t.nn, wcols(t)), tables), KeT=zeros(ndl, ndl), Wb=Wb, Bb=Bb, Gb=Gb,
+         qb=point_block(np))
+    GroupWork(r, j)
+end
+
 function cells!(::Val{K}, b, A, op::KernelOperator, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D},
-                x, dvals, auxd, cells) where {K,NSV,NSU,PF,TT,AUX,SV,SU,D}
+                x, dvals, auxd, cells, buf) where {K,NSV,NSU,PF,TT,AUX,SV,SU,D}
     ndl = op.ndl
-    xl = zeros(ndl)
+    xl, sg = buf.xl, buf.sg
     signed = op.signed
-    sg = zeros(ndl)
     if K === :res
-        re = zeros(ndl)
-        mm = MATRIX_PRODUCTS && contiguous(g)
-        Cb, Mb = mm ? rm_buffers(g) : (nothing, nothing)
+        re = buf.re
+        Cb, Mb = buf.Cb, buf.Mb
+        mm = MATRIX_PRODUCTS[] && Cb !== nothing
         for cell in cells
             sc = g.cellmap[cell]
             gather_cell!(xl, op.fields, x, dvals, sc)
@@ -1134,20 +1276,19 @@ function cells!(::Val{K}, b, A, op::KernelOperator, g::Group{NSV,NSU,PF,TT,AUX,S
             scatter_residual!(b, op.fields, re, sc)
         end
     else
-        dNb = map(t -> zeros(t.nn, wcols(t)), g.tables)
-        KeT = zeros(ndl, ndl)
+        dNb, KeT = buf.dNb, buf.KeT
         if K === :jac
-            nzv = nonzeros(A)
+            nzv = A                                # the nonzeros of the matrix (`jacobian!`)
             nzpos = op.pattern.nzpos
         end
-        mm = MATRIX_PRODUCTS && contiguous(g)
-        Wb, Bb, Gb = mm ? mm_buffers(g) : (nothing, nothing, nothing)
+        Wb, Bb, Gb = buf.Wb, buf.Bb, buf.Gb
+        mm = MATRIX_PRODUCTS[] && Wb !== nothing
         for cell in cells
             sc = g.cellmap[cell]
             gather_cell!(xl, op.fields, x, dvals, sc)
             signed && apply_signs!(xl, cell_signs!(sg, op.fields, sc), ndl)
             if mm
-                element_jacobian_mm!(KeT, g, xl, auxd, cell, Wb, Bb, Gb)
+                element_jacobian_mm!(KeT, g, xl, auxd, cell, Wb, Bb, Gb, buf.qb)
             else
                 element_jacobian!(KeT, g, xl, auxd, cell, dNb)
             end

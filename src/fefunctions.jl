@@ -125,12 +125,13 @@ interpolated field, their gradients). It behaves as Gridap's array (`getindex`),
 assembly materialises it with the engine (`materialize_fe!`): the current free and Dirichlet
 values are read at every assembly, without evaluating Gridap's lazy tree.
 """
-struct FEArray{T,FE} <: AbstractVector{Vector{T}}
-    lazy::AbstractArray      # Gridap's array (the same values, evaluated lazily)
-    fe::FE                   # FEData
+mutable struct FEArray{T,FE} <: AbstractVector{Vector{T}}   # mutable: read from the untyped tuple of a group without a copy
+    const lazy::AbstractArray      # Gridap's array (the same values, evaluated lazily)
+    const fe::FE                   # FEData
+    const n::Int                   # length (cells), stored: `size` without calling the untyped lazy array
 end
-FEArray(a, fe::FEData) = FEArray{eltype(fe),typeof(fe)}(a, fe)
-Base.size(f::FEArray) = size(f.lazy)
+FEArray(a, fe::FEData) = FEArray{eltype(fe),typeof(fe)}(a, fe, length(a))
+Base.size(f::FEArray) = (f.n,)
 Base.IndexStyle(::Type{<:FEArray}) = IndexLinear()
 Base.getindex(f::FEArray, i::Int) = f.lazy[i]
 Arrays.array_cache(f::FEArray) = array_cache(f.lazy)
@@ -150,11 +151,10 @@ _same_data(::Nothing, ::Nothing) = true
 """
 Dense values `M[q, cell]` of an FE function at the points of `cells`, by the engine: local dof
 values gathered from the current free/Dirichlet vectors and combined with the basis table (and
-`inv(Jt)` from `geo` for a gradient). No allocation beyond the local vector `xl`.
+`inv(Jt)` from `geo` for a gradient), with `xl` as the local dof vector (`fe_buffer`). No allocation.
 """
-function materialize_fe!(M::Matrix, a::FEArray{T,FE}, cells, np::Int, geo) where {T,FE}
+function materialize_fe!(M::Matrix, a::FEArray{T,FE}, cells, np::Int, geo, xl::AbstractVector=zeros(eltype(a.fe.free), a.fe.nd)) where {T,FE}
     fe = a.fe
-    xl = zeros(eltype(fe.free), fe.nd)
     if fe_deriv(FE) == 0
         @inbounds for cell in cells
             gather_fe!(xl, fe, cell)

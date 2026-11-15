@@ -74,7 +74,7 @@ include("states.jl")
 include("verify.jl")
 
 function __init__()
-    AFFINE_GEOMETRY[] = affine_geometry_from_env()   # at load time, not frozen at precompilation
+    read_env_settings!()          # HFK_* switches at load time, not frozen at precompilation
 end
 
 end # module

@@ -25,7 +25,7 @@ not allocate (requirement for GPU execution); a nonzero value points to the poin
 of the weak form (e.g. a constitutive law that builds dense matrices).
 """
 function allocations(op::KernelOperator, x::AbstractVector)
-    dvals = [get_dirichlet_dof_values(s) for s in field_spaces(op.U)]
+    dvals = refresh_dirichlet_values!(op)
     out = NamedTuple{(:kind, :group, :bytes),Tuple{Symbol,Int,Int}}[]
     for (kind, groups) in ((:residual, op.rgroups), (:jacobian, op.jgroups)), (i, g) in enumerate(groups)
         push!(out, (kind=kind, group=i, bytes=_element_allocations(kind, op, g, x, dvals)))
@@ -40,7 +40,7 @@ function _element_allocations(kind::Symbol, op::KernelOperator, g::Group{NSV,NSU
     dNb = map(t -> zeros(t.nn, wcols(t)), g.tables)
     if kind === :residual
         re = zeros(op.ndl)
-        if MATRIX_PRODUCTS && contiguous(g)
+        if MATRIX_PRODUCTS[] && contiguous(g)
             Cb, Mb = rm_buffers(g)
             element_residual_mm!(re, g, xl, auxd, 1, Cb, Mb)
             return @allocated element_residual_mm!(re, g, xl, auxd, 1, Cb, Mb)

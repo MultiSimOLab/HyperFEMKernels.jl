@@ -114,3 +114,27 @@ end
     @test c.res < TOL && c.jac < TOL
     @test all(a -> a.bytes == 0, allocations(op, x))
 end
+
+@testset "curved hexahedra: the kernel integrates on the faces of the cells (Gridap's mapped Cartesian faces are affine)" begin
+    # Gridap builds the faces of a `CartesianDiscreteModel` with a nonlinear `map` with affine face maps, while
+    # the cells are trilinear; the kernel integrates on the faces of the cells. Its result on the Cartesian model
+    # equals Gridap's on the unstructured copy of the same model (bilinear faces, consistent with the cells).
+    f(x) = VectorValue(x[1] + 0.1 * x[1] * x[2], x[2] + 0.05 * x[3]^2, x[3] - 0.07 * x[1] * x[2])
+    mc = CartesianDiscreteModel((0, 1, 0, 1, 0, 1), (2, 2, 2); map=f)
+    mu = Gridap.Geometry.UnstructuredDiscreteModel(mc)
+    function problem(model)
+        Γ = BoundaryTriangulation(model); dΓ = Measure(Γ, 4)
+        V = TestFESpace(model, ReferenceFE(lagrangian, Float64, 1)); U = TrialFESpace(V)
+        res(u, v) = ∫(u * v + v)dΓ
+        jac(u, du, v) = ∫(du * v)dΓ
+        (; U, V, res, jac)
+    end
+    pc, pu = problem(mc), problem(mu)
+    @test get_cell_dof_ids(pc.V) == get_cell_dof_ids(pu.V)           # the same numbering on both models
+    x = randx(pc.U)
+    opc = KernelOperator(pc.res, pc.jac, pc.U, pc.V)
+    @test nofallback(opc)
+    gu = get_algebraic_operator(FEOperator(pu.res, pu.jac, pu.U, pu.V))
+    @test reldiff(Algebra.residual(opc, x), Algebra.residual(gu, x)) < TOL
+    @test reldiff(Algebra.jacobian(opc, x), Algebra.jacobian(gu, x)) < TOL
+end

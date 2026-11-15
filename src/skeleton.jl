@@ -103,25 +103,26 @@ function skeleton_classes(trian::Triangulation, terms::Vector{Term}, D::Int)
 end
 
 "A compiled class of facets of a skeleton: same points on both sides."
-struct SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D,NF2,LF,JF,UU} <: AbstractGroup
-    pf::PF
-    lin::LF                        # LinearForm or nothing
-    locs::NTuple{NF2,Int}          # offset of each (side, field) in the facet element vector: plus fields, then minus (+ ndl)
-    tables::TT                     # FieldTable per (side, field): plus fields at xqp, then minus fields at xqm
-    use::UU                        # FieldUse per (side, field)
-    geo::GeoTable{D,JF}            # plus cells at xqp, with Jf (facet measure)
-    geom::GeoTable{D,Nothing}      # minus cells at xqm (only Jt⁻¹ is used)
-    aux::Tuple                     # auxiliary arrays on the skeleton (Gridap arrays, functions of x: `CoordArray`), materialised
+mutable struct SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D,NF2,LF,JF,UU,GW} <: AbstractGroup   # mutable: passed by reference
+    const pf::PF
+    const lin::LF                        # LinearForm or nothing
+    const locs::NTuple{NF2,Int}          # offset of each (side, field) in the facet element vector: plus fields, then minus (+ ndl)
+    const tables::TT                     # FieldTable per (side, field): plus fields at xqp, then minus fields at xqm
+    const use::UU                        # FieldUse per (side, field)
+    const geo::GeoTable{D,JF}            # plus cells at xqp, with Jf (facet measure)
+    const geom::GeoTable{D,Nothing}      # minus cells at xqm (only Jt⁻¹ is used)
+    const aux::Tuple                     # auxiliary arrays on the skeleton (Gridap arrays, functions of x: `CoordArray`), materialised
                                    # per facet of the class (AUX: dense types)
-    smv::SV
-    smu::SU
-    trian::Triangulation
-    key::Vector{Float64}           # class key (points of both sides), for reuse in `update`
-    auxcache::Base.RefValue{Any}
-    facets::Vector{Int32}          # facets of the class (indices in the skeleton)
-    skel::SkeletonData
-    colors::Vector{Vector{Int32}}  # facets of the class per colour (local indices, 1:length(facets))
-    wkey::UInt                     # identity of the quadrature weights of its terms (`rebind`)
+    const smv::SV
+    const smu::SU
+    const trian::Triangulation
+    const key::Vector{Float64}           # class key (points of both sides), for reuse in `update`
+    const auxcache::Base.RefValue{Any}
+    const facets::Vector{Int32}          # facets of the class (indices in the skeleton)
+    const skel::SkeletonData
+    const colors::Vector{Vector{Int32}}  # facets of the class per colour (local indices, 1:length(facets))
+    const wkey::UInt                     # identity of the quadrature weights of its terms (`rebind`)
+    const work::GW                       # element buffers per task (`GroupWork`, `task_buffers`), reused across assemblies
 end
 
 function SkeletonGroup(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int, ndl::Int, skel::SkeletonData, cls,
@@ -159,9 +160,11 @@ function SkeletonGroup(terms::Vector{Term}, trian::Triangulation, Uspaces, locs,
     end
     colors = [Int32[pos[f] for f in col if pos[f] > 0] for col in skel.colors]
     filter!(!isempty, colors)
-    SkeletonGroup{pf.test.nslots,pf.trial.nslots,typeof(pf),typeof(tables),AUX,typeof(smv),typeof(smu),D,NF2,typeof(lin),typeof(geo.Jf),typeof(use)}(
+    work = GroupWork((xl=zeros(2ndl), re=zeros(2ndl), Wb=map(t -> zeros(t.nn, wcols(t)), tables)),
+                     (xl=zeros(2ndl), KeT=zeros(2ndl, 2ndl), Wb=map(t -> zeros(t.nn, wcols(t)), tables)))
+    SkeletonGroup{pf.test.nslots,pf.trial.nslots,typeof(pf),typeof(tables),AUX,typeof(smv),typeof(smu),D,NF2,typeof(lin),typeof(geo.Jf),typeof(use),typeof(work)}(
         pf, lin, NTuple{NF2,Int}(locs2), tables, use, geo, geom, aux, smv, smu, trian, cls.key, Ref{Any}(nothing), cls.facets, skel, colors,
-        objectid(terms[1].weights))
+        objectid(terms[1].weights), work)
 end
 
 """
@@ -199,7 +202,7 @@ function rebind(g::SkeletonGroup, terms::Vector{Term})
     pf = PointForm(terms, g.pf)
     aux = Tuple(engine_aux(a.array, g.geo, () -> eachindex(g.facets), g.facets) for a in pf.aux)
     lin = g.lin === nothing ? nothing : LinearForm(terms, pf, g.tables, aux, g.lin)
-    typeof(g)(pf, lin, g.locs, g.tables, g.use, g.geo, g.geom, aux, g.smv, g.smu, g.trian, g.key, g.auxcache, g.facets, g.skel, g.colors, g.wkey)
+    typeof(g)(pf, lin, g.locs, g.tables, g.use, g.geo, g.geom, aux, g.smv, g.smu, g.trian, g.key, g.auxcache, g.facets, g.skel, g.colors, g.wkey, g.work)
 end
 
 # ---------------------------------------------------------------------------------------------
@@ -211,21 +214,33 @@ function materialize_aux(g::SkeletonGroup{NSV,NSU,PF,TT,AUX}, nthreads::Int) whe
     materialize_aux!(AUX(vals)::AUX, g, nthreads)
 end
 function materialize_aux!(vals::AUX, g::SkeletonGroup{NSV,NSU,PF,TT,AUX}, nthreads::Int) where {NSV,NSU,PF,TT,AUX}
-    np, n = g.geo.np, length(g.facets)
-    chunks = collect(Iterators.partition(1:n, cld(n, max(1, nthreads))))
     for k in 1:length(g.aux)
-        a = g.aux[k]; M = vals[k]
-        if a isa CoordArray       # f at Gridap's points of the facets of the class, stored with the plus side's geometry (`engine_aux`)
-            @sync for ch in chunks
-                Threads.@spawn materialize_coord!(M, a, ch, np, g.geo)
-            end
-        else
-            @sync for ch in chunks
-                Threads.@spawn _materialize_facets!(M, a, g.facets, ch, np)
-            end
-        end
+        materialize_one!(vals[k], g.aux[k], g, max(1, nthreads), k)    # one dynamic call per array (heap arguments only)
     end
     vals
+end
+# one auxiliary array of a class: one task (no spawn, no allocation) or one per chunk of facets
+function materialize_one!(M::Matrix, a::CoordArray, g::SkeletonGroup, nt::Int, k::Int)
+    np, n = g.geo.np, length(g.facets)       # f at Gridap's points of the facets, stored with the plus side's geometry (`engine_aux`)
+    if nt == 1 || n <= 1
+        materialize_coord!(M, a, 1:n, np, g.geo)
+    else
+        @sync for ch in Iterators.partition(1:n, cld(n, nt))
+            Threads.@spawn materialize_coord!(M, a, ch, np, g.geo)
+        end
+    end
+    M
+end
+function materialize_one!(M::Matrix, a, g::SkeletonGroup, nt::Int, k::Int)
+    np, n = g.geo.np, length(g.facets)
+    if nt == 1 || n <= 1
+        _materialize_facets!(M, a, g.facets, 1:n, np)
+    else
+        @sync for ch in Iterators.partition(1:n, cld(n, nt))
+            Threads.@spawn _materialize_facets!(M, a, g.facets, ch, np)
+        end
+    end
+    M
 end
 function _materialize_facets!(M::Matrix, a, facets, range, np::Int)
     cache = array_cache(a)
@@ -302,14 +317,14 @@ end
 
 "Threaded driver of a class: gather both cells, facet element residual/Jacobian, scatter."
 function cells!(::Val{K}, b, A, op::KernelOperator, g::SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D},
-                x, dvals, auxd, lfacets) where {K,NSV,NSU,PF,TT,AUX,SV,SU,D}
+                x, dvals, auxd, lfacets, buf) where {K,NSV,NSU,PF,TT,AUX,SV,SU,D}
     ndl = op.ndl
     n2 = 2ndl
-    xl = zeros(n2)
-    Wb = map(t -> zeros(t.nn, wcols(t)), g.tables)
+    xl = buf.xl
+    Wb = buf.Wb
     skel, facets = g.skel, g.facets
     if K === :res
-        re = zeros(n2)
+        re = buf.re
         for lf in lfacets
             f = facets[lf]
             cp, cm = skel.cells[1, f], skel.cells[2, f]
@@ -320,8 +335,9 @@ function cells!(::Val{K}, b, A, op::KernelOperator, g::SkeletonGroup{NSV,NSU,PF,
             scatter_residual!(b, op.fields, re, cm, ndl)
         end
     else
-        KeT = zeros(n2, n2)
-        nzv = nonzeros(A)
+        K === :blocks && error("HyperFEMKernels: nodal block diagonals (`BlockJacobi`) of skeleton integrals are not supported")
+        KeT = buf.KeT
+        nzv = A                                    # the nonzeros of the matrix (`jacobian!`)
         size(skel.nzpos, 2) == size(skel.cells, 2) || error("HyperFEMKernels: the facet positions of the skeleton were not computed")
         for lf in lfacets
             f = facets[lf]

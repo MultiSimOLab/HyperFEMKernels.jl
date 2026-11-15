@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- **No allocation in repeated assemblies with one thread.** The element buffers of each task (and the local
+  dof vectors of FE functions in the form) are kept in the compiled groups (`GroupWork`) and reused, shared by
+  the groups `update` rebinds; the Dirichlet values are gathered into a vector of the operator; with one thread
+  (or one chunk) no task is spawned. `residual!` and `jacobian!` then allocate nothing when the auxiliary data
+  is evaluated by the engine (FE functions, functions of x); with threads only the tasks allocate, a fixed amount
+  per call. An operator is not reentrant: the same operator, or operators `update` derived from it (they share
+  the buffers), must not be assembled from two tasks at the same time.
+- `HFK_MATRIX_PRODUCTS`, `HFK_WORK_PER_TASK` and `HFK_POINT_BLOCK` are read when the package is loaded
+  (`__init__`), not frozen at precompilation; `HyperFEMKernels.read_env_settings!()` reads them again (for
+  operators built afterwards: the block size of an operator's buffers is fixed when it is built). A value
+  that is not a boolean or an integer gives a warning and the default.
+- `update`: the structural signature records which auxiliary data share a slot. Gridap arrays that are equal
+  in one capture and different in the next (e.g. gradients of two functions of x built from closures of the
+  same type, `∇(CellField(make(Λ), Ω))`, with equal captured values at `Λ = 0`) no longer make `update` fail
+  with "the weak form changed its structure": the form is compiled again. The same for operations: two
+  closures of the same type with equal captures share one slot; the signature records it.
+- Documented: on a `CartesianDiscreteModel` with a nonlinear `map` in 3D, Gridap's boundary faces are affine
+  while the cells are trilinear; the kernel integrates on the faces of the cells and agrees with Gridap on
+  the unstructured copy of the model (test added).
 - **Functions of the coordinates compiled.** `CellField(f, Ω)`, a Julia function `f` used directly in the
   weak form (`f * v`, `Operation(g)(f, uh)`), on volume, boundary, skeleton and subdomain triangulations,
   are read as a new auxiliary leaf (`CoordArray`) and evaluated by the engine: `f(x)` at Gridap's physical

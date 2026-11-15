@@ -141,7 +141,7 @@ function prepare!(mf::MatrixFreeJacobian, x::AbstractVector)
     op = mf.op
     length(mf.x) == length(x) || (mf.x = zeros(length(x)))
     copyto!(mf.x, x)
-    dvals = [get_dirichlet_dof_values(s) for s in field_spaces(op.U)]
+    dvals = refresh_dirichlet_values!(op)
     for (gi, g) in enumerate(op.jgroups)
         auxd = aux_data(op, g)
         gd = mf.data[gi]

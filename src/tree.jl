@@ -280,7 +280,36 @@ Structural signature of a capture: per form its triangulation (by identity) and 
 terms in order, plus the triangulations whose contributions could not be read.
 """
 signature(forms::Vector{Form}, fallback) =
-    (Any[(objectid(f.trian), Any[term_sig(t) for t in f.terms]) for f in forms], UInt[objectid(t) for (t, _) in fallback])
+    (Any[(objectid(f.trian), Any[term_sig(t) for t in f.terms], aux_patterns(f)) for f in forms], UInt[objectid(t) for (t, _) in fallback])
+
+"""
+    aux_patterns(form) -> Vector{Tuple{Vector{Int},Vector{Int}}}
+
+Which auxiliary leaves and which operations share a slot, per group of terms with the same quadrature
+weights (the terms a compiled group is built from): for each auxiliary leaf (operation) in walk order,
+the position of the first one equal to it (`same_aux`; `===` for the functions of the operations, as in
+`emit!`). Part of the signature because whether two of them are equal can depend on values (two closures
+of the same type with equal captures are `===`, and so are the lazy arrays Gridap builds from them): the
+same tree shape with another sharing is another slot layout, compiled again instead of rebound.
+"""
+function aux_patterns(f::Form)
+    keys = unique(objectid(t.weights) for t in f.terms)
+    map(keys) do k
+        list = Aux[]
+        fs = Any[]
+        for t in f.terms
+            objectid(t.weights) == k || continue
+            _walk_all_aux!(list, t.expr)
+            _walk_all_ops!(fs, t.expr)
+        end
+        (Int[findfirst(b -> same_aux(b.array, a.array), list) for a in list], Int[findfirst(g -> g === h, fs) for h in fs])
+    end
+end
+_walk_all_ops!(fs, n::Op) = (foreach(c -> _walk_all_ops!(fs, c), n.args); push!(fs, n.f))
+_walk_all_ops!(fs, n::Node) = nothing
+_walk_all_aux!(list, n::Aux) = push!(list, n)
+_walk_all_aux!(list, n::Op) = foreach(c -> _walk_all_aux!(list, c), n.args)
+_walk_all_aux!(list, n::Node) = nothing
 
 "First difference between two signatures, as a string (debugging `update`); `nothing` if equal."
 function signature_diff(a, b)
@@ -295,6 +324,7 @@ function signature_diff(a, b)
             tx[2] == ty[2] || return "form $i, term $j: other quadrature points"
             tx[3] == ty[3] || return "form $i, term $j: other tree: $(_tree_diff(tx[3], ty[3]))"
         end
+        x[3] == y[3] || return "form $i: other sharing of auxiliary data or operations between terms ($(x[3]) vs $(y[3]))"
     end
     a[2] == b[2] ? "no difference found" : "fallback triangulations"
 end

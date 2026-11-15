@@ -131,7 +131,7 @@ function _evaluate(R::Val, fun::KernelFunctional, x::AbstractVector)
         for cells in g.colors                 # a reduction has no races: the colours are only a partition
             isempty(cells) && continue
             work = length(cells) * g.geo.np * fun.ndl
-            nchunks = clamp(work ÷ WORK_PER_TASK, 1, min(fun.nthreads, length(cells)))
+            nchunks = clamp(work ÷ WORK_PER_TASK[], 1, min(fun.nthreads, length(cells)))
             if nchunks == 1
                 acc = _combine(R, acc, functional_cells(R, fun, g, x, dvals, auxd, cells))
             else
