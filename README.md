@@ -342,6 +342,11 @@ run with both backends as part of the test suite.
 - Shared-memory parallelism (threads). Distributed runs with GridapDistributed and GPU execution
   are design targets: kernels are allocation-free and states use a GPU-friendly layout.
 - Gridap is restricted to the 0.20 series, because the engine reads Gridap's internal expression tree.
+- Boundary integrals on a `CartesianDiscreteModel` with a nonlinear `map` in 3D: Gridap builds the faces of
+  that model with affine face maps while its cells are trilinear, so on curved hexahedra Gridap's boundary
+  integrals differ from the kernel's (about 1 % in our tests), which integrate on the faces of the cells.
+  The kernel agrees with Gridap on `UnstructuredDiscreteModel(model)`, whose faces are consistent with the
+  cells. 2D (straight edges) and affine models are not affected.
 
 ## Testing
 
