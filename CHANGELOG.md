@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `update`: the structural signature records which auxiliary data share a slot. Gridap arrays that are equal
+  in one capture and different in the next (e.g. gradients of two functions of x built from closures of the
+  same type, `∇(CellField(make(Λ), Ω))`, with equal captured values at `Λ = 0`) no longer make `update` fail
+  with "the weak form changed its structure": the form is compiled again.
+- Documented: on a `CartesianDiscreteModel` with a nonlinear `map` in 3D, Gridap's boundary faces are affine
+  while the cells are trilinear; the kernel integrates on the faces of the cells and agrees with Gridap on
+  the unstructured copy of the model (test added).
 - **Functions of the coordinates compiled.** `CellField(f, Ω)`, a Julia function `f` used directly in the
   weak form (`f * v`, `Operation(g)(f, uh)`), on volume, boundary, skeleton and subdomain triangulations,
   are read as a new auxiliary leaf (`CoordArray`) and evaluated by the engine: `f(x)` at Gridap's physical
