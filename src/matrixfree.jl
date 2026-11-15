@@ -56,12 +56,12 @@ function MatrixFreeJacobian(op::KernelOperator)
             # one tangent and measure per facet of the class; Jt⁻¹ (and the curvature) of the plus and of the minus cell
             n = length(g.facets)
             T, dV = zeros(nsv * nsu, np, n), zeros(np, n)
-            curved = hess_use(g) isa Val{true} && !(g.geo.affine && g.geom.affine)
+            curved = hess_use(g) isa Val{true} && !(all_affine(g.geo) && all_affine(g.geom))
             side() = GroupData{D}(T, zeros(D * D, np, n), zeros(D * D, np, n), dV, zeros(curved ? D * D * D : 0, np, n))
             (side(), side())
         else
             nc = length(g.cellmap)
-            curved = hess_use(g) isa Val{true} && !g.geo.affine
+            curved = hess_use(g) isa Val{true} && !all_affine(g.geo)
             GroupData{D}(zeros(nsv * nsu, np, nc), zeros(D * D, np, nc), zeros(D * D, np, nc), zeros(np, nc),
                          zeros(curved ? D * D * D : 0, np, nc))
         end
@@ -171,8 +171,9 @@ function prepare_cells!(gds::Tuple{GroupData{D},GroupData{D}}, g::SkeletonGroup{
         f = g.facets[lf]
         gather_cell!(xl, op.fields, x, dvals, g.skel.cells[1, f])
         gather_cell!(xl, op.fields, x, dvals, g.skel.cells[2, f], ndl)
+        cgs = cell_geometries(g, lf)
         for q in 1:g.geo.np
-            dS, iJs, Φs, (Jp, Jm), (Φp, Φm) = side_geometry(g, q, lf, hu)
+            dS, iJs, Φs, (Jp, Jm), (Φp, Φm) = side_geometry(g, cgs, q, lf, hu)
             iJp, iJm = iJs[1], iJs[end]
             FV = field_values_sides(tables, locs, g.use, xl, q, iJs, Φs)
             Aq = map(a -> @inbounds(a[q, lf]), auxd)
@@ -211,9 +212,10 @@ function prepare_cells!(gd::GroupData{D}, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,
         sc = g.cellmap[cell]
         gather_cell!(xl, op.fields, x, dvals, sc)
         op.signed && apply_signs!(xl, cell_signs!(sg, op.fields, sc), op.ndl)   # state of H(div) fields with the dof signs
+        cg = cell_geometry(g.geo, cell)
         for q in 1:g.geo.np
-            dV, iJt, Jt = point_geometry(g.geo, q, cell)
-            Φ = point_curvature(g.geo, q, cell, hu)
+            dV, iJt, Jt = point_geometry(g.geo, cg, q, cell)
+            Φ = point_curvature(g.geo, cg, q, cell, hu)
             FV = field_values(tables, locs, g.use, xl, q, iJt, Jt, Φ)
             Aq = map(a -> @inbounds(a[q, cell]), auxd)
             T = if LF === Nothing

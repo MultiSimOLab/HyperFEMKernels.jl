@@ -46,6 +46,12 @@ backend for its drivers (`backend = :compiled`).
   quadrature points (Gridap's own points, read once), without allocations. Other `CellField`s (and, for
   now, gradients of functions of x and functions of x passed to `update_states!`) are evaluated by Gridap
   once per assembly into dense buffers that are reused.
+- **Affine cells.** Cells whose map is affine (simplices of order 1, rectangles, parallelograms,
+  parallelepipeds, straight-sided higher-order cells, also in unstructured meshes) are detected at
+  construction and their Jacobian, inverse and measure are computed once per cell instead of at every
+  quadrature point (assembly, matrix-free, skeletons, functionals, FE functions in the form, internal
+  variables); curved or deformed cells keep the per-point geometry (`HFK_AFFINE_GEOMETRY=0`, read when the
+  package is loaded, disables the shortcut).
 - **Threads, no allocations.** Cells are coloured so that the assembly loop is threaded without
   locks; element kernels allocate nothing (`allocations` reports it), which is also the
   requirement for GPU execution.

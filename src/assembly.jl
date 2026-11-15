@@ -770,15 +770,51 @@ end
     xl
 end
 
-"Geometry at point `q` of `cell`: (dV, inverse of Jt, Jt)."
-@inline function point_geometry(geo::GeoTable{D}, q::Int, cell::Integer) where {D}
+"Jacobian (transposed, `Jt[K, i] = ∂x_i/∂ξ_K`) of the cell map at point `q` of `cell`, completed on manifold cells."
+@inline function point_jacobian(geo::GeoTable{D}, q::Int, cell::Integer) where {D}
     Jt = zero(TensorValue{D,D,Float64,D * D})
     @inbounds for n in 1:geo.ng
         Jt += outer(geo.dM[q, n], geo.coords[n, cell])
     end
     geo.dc < D && (Jt = complete_frame(Jt, geo.dc))
+    Jt
+end
+
+"Geometry at point `q` of `cell`: (dV, inverse of Jt, Jt)."
+@inline function point_geometry(geo::GeoTable{D}, q::Int, cell::Integer) where {D}
+    Jt = point_jacobian(geo, q, cell)
     (geo.w[q] * measure(Jt, geo.Jf), inv(Jt), Jt)
 end
+
+"""
+Geometry of a cell computed once when its map is affine (`GeoTable.cellaff`): `Jt`, its inverse and the
+measure factor (`dV = w_q ⋅ m`), the same at every point. `affine = false`: computed per point.
+"""
+struct CellGeometry{D,N}
+    affine::Bool
+    m::Float64
+    iJt::TensorValue{D,D,Float64,N}
+    Jt::TensorValue{D,D,Float64,N}
+end
+
+"`CellGeometry` of `cell` (one Jacobian, its inverse and determinant for an affine cell; nothing computed otherwise)."
+@inline function cell_geometry(geo::GeoTable{D}, cell::Integer) where {D}
+    if @inbounds geo.cellaff[cell]
+        Jt = point_jacobian(geo, 1, cell)
+        return CellGeometry{D,D * D}(true, measure(Jt, geo.Jf), inv(Jt), Jt)
+    end
+    z = zero(TensorValue{D,D,Float64,D * D})
+    CellGeometry{D,D * D}(false, 0.0, z, z)
+end
+
+"Geometry at point `q` of `cell` with the cell's `CellGeometry`: reused on affine cells, per point otherwise."
+@inline point_geometry(geo::GeoTable, cg::CellGeometry, q::Int, cell::Integer) =
+    cg.affine ? (@inbounds(geo.w[q]) * cg.m, cg.iJt, cg.Jt) : point_geometry(geo, q, cell)
+
+"Curvature of the cell map at point `q` (`point_curvature`): zero on an affine cell."
+@inline point_curvature(geo::GeoTable{D}, cg::CellGeometry, q::Int, cell::Integer, hu::Val{false}) where {D} = nothing
+@inline point_curvature(geo::GeoTable{D}, cg::CellGeometry, q::Int, cell::Integer, hu::Val{true}) where {D} =
+    cg.affine ? ntuple(_ -> zero(SMatrix{D,D,Float64,D * D}), Val(D)) : point_curvature(geo, q, cell, hu)
 
 """
     complete_frame(Jt, dc)
@@ -859,9 +895,10 @@ function element_residual!(re, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}, xl,
     tables, locs, pf = g.tables, g.locs, g.pf
     zsv = zero(SVector{NSV,Float64})
     hu = hess_use(g)
+    cg = cell_geometry(g.geo, cell)          # Jt, inv(Jt) and the measure once if the cell is affine
     for q in 1:g.geo.np
-        dV, iJt, Jt = point_geometry(g.geo, q, cell)
-        Φ = point_curvature(g.geo, q, cell, hu)
+        dV, iJt, Jt = point_geometry(g.geo, cg, q, cell)
+        Φ = point_curvature(g.geo, cg, q, cell, hu)
         FV = field_values(tables, locs, g.use, xl, q, iJt, Jt, Φ)
         Aq = map(a -> @inbounds(a[q, cell]), auxd)
         R = if LF === Nothing
@@ -887,9 +924,10 @@ function element_residual_mm!(re, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}, 
     np = g.geo.np
     zsv = zero(SVector{NSV,Float64})
     hu = hess_use(g)
+    cg = cell_geometry(g.geo, cell)          # Jt, inv(Jt) and the measure once if the cell is affine
     for q in 1:np
-        dV, iJt, Jt = point_geometry(g.geo, q, cell)
-        Φ = point_curvature(g.geo, q, cell, hu)
+        dV, iJt, Jt = point_geometry(g.geo, cg, q, cell)
+        Φ = point_curvature(g.geo, cg, q, cell, hu)
         FV = field_values(tables, locs, g.use, xl, q, iJt, Jt, Φ)
         Aq = map(a -> @inbounds(a[q, cell]), auxd)
         R = if LF === Nothing
@@ -956,9 +994,10 @@ function element_jacobian!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}, xl
     zsv = zero(SVector{NSV,Float64})
     zsu = zero(SVector{NSU,Float64})
     hu = hess_use(g)
+    cg = cell_geometry(g.geo, cell)          # Jt, inv(Jt) and the measure once if the cell is affine
     for q in 1:g.geo.np
-        dV, iJt, Jt = point_geometry(g.geo, q, cell)
-        Φ = point_curvature(g.geo, q, cell, hu)
+        dV, iJt, Jt = point_geometry(g.geo, cg, q, cell)
+        Φ = point_curvature(g.geo, cg, q, cell, hu)
         map((t, W, sv, su) -> point_weights!(W, t, q, iJt, Jt, Φ, hess_weights(sv, su)), tables, dNb, g.smv, g.smu)
         FV = field_values(tables, locs, g.use, xl, q, iJt, Jt, Φ)
         Aq = map(a -> @inbounds(a[q, cell]), auxd)
@@ -989,12 +1028,13 @@ function element_jacobian_mm!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF},
     zsv = zero(SVector{NSV,Float64})
     zsu = zero(SVector{NSU,Float64})
     hu = hess_use(g)
+    cg = cell_geometry(g.geo, cell)          # Jt, inv(Jt) and the measure once if the cell is affine
     for q0 in 1:qb:np
         nq = min(qb, np - q0 + 1)
         for ql in 1:nq
             q = q0 + ql - 1
-            dV, iJt, Jt = point_geometry(g.geo, q, cell)
-            Φ = point_curvature(g.geo, q, cell, hu)
+            dV, iJt, Jt = point_geometry(g.geo, cg, q, cell)
+            Φ = point_curvature(g.geo, cg, q, cell, hu)
             map((t, W, sv, su) -> point_weights!(W, t, q, iJt, Jt, Φ, hess_weights(sv, su)), tables, Wb, g.smv, g.smu)
             FV = field_values(tables, locs, g.use, xl, q, iJt, Jt, Φ)
             Aq = map(a -> @inbounds(a[q, cell]), auxd)

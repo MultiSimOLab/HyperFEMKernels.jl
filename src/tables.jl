@@ -54,6 +54,8 @@ struct GeoTable{D,JF}
     points::Base.RefValue{Union{Nothing,Tuple{Vector{Int32},Vector{Matrix{VectorValue{D,Float64}}}}}}
                                              # nothing, or (columns integrated, point sets: Gridap's physical points
                                              # np × length(columns)), for the functions of x of the groups (`coord_points!`)
+    cellaff::Vector{Bool}                    # per column: the cell map is affine (Jt constant in the cell, `affine_cells`), so
+                                             # the kernels compute Jt, inv(Jt) and the measure once per cell (`cell_geometry`)
 end
 
 """
@@ -97,10 +99,64 @@ function GeoTable(trian::Triangulation, xq::AbstractVector, w::AbstractVector; c
         end
     end
     affine = all(iszero, ddMp)
+    cellaff = affine_cells(coords, dMp, reffes[1], D)
     Mv = Matrix{Float64}(evaluate(M, xq))
     GeoTable{D,typeof(Jf)}(length(xq), ng, dMp, collect(Float64, w), coords, Jf, dc, ddMp, affine, Mv,
-        Ref{Union{Nothing,Tuple{Vector{Int32},Vector{Matrix{VectorValue{D,Float64}}}}}}(nothing))
+        Ref{Union{Nothing,Tuple{Vector{Int32},Vector{Matrix{VectorValue{D,Float64}}}}}}(nothing), cellaff)
 end
+
+"""
+Whether the kernels use one geometry per affine cell. Read from `HFK_AFFINE_GEOMETRY` when the package is
+loaded (`__init__`): `0` or `false` disables it (per point everywhere). Applies to geometry tables built
+afterwards.
+"""
+const AFFINE_GEOMETRY = Ref(true)
+affine_geometry_from_env() = lowercase(strip(get(ENV, "HFK_AFFINE_GEOMETRY", "1"))) ∉ ("0", "false", "no", "off")
+
+"""
+    affine_cells(coords, dM, reffe, D) -> Vector{Bool}
+
+Per column of `coords` (the nodes of a cell), whether the cell map is affine: with `Jt` the
+Jacobian at the first point (`dM`: reference gradients of the geometric shape functions, zero-padded
+to `D`), every node satisfies `x_n - x_1 = (ξ_n - ξ_1) ⋅ Jt` (ξ the reference node coordinates).
+Lagrangian shape functions reproduce affine maps, so this holds exactly when the cell map is affine
+(simplices of order 1, parallelograms and parallelepipeds, straight-sided higher-order cells with
+evenly placed nodes) and fails on curved or deformed cells. The tolerance is round-off of the
+coordinates (`1e-13` of the cell size plus a few ulps of the coordinates), so a cell taken as
+affine changes the results only by round-off. All `false` with `HFK_AFFINE_GEOMETRY=0`.
+"""
+function affine_cells(coords::Matrix{VectorValue{D,Float64}}, dM::Matrix{VectorValue{D,Float64}}, reffe, ::Int) where {D}
+    ng, nc = size(coords)
+    out = fill(false, nc)
+    AFFINE_GEOMETRY[] || return out
+    ξ = VectorValue{D,Float64}[pad_vector(VectorValue(Float64.(p.data)), Val(D)) for p in get_node_coordinates(reffe)]
+    length(ξ) == ng || return out
+    _affine_cells!(out, coords, dM, ξ)
+end
+function _affine_cells!(out::Vector{Bool}, coords::Matrix{VectorValue{D,Float64}}, dM::Matrix{VectorValue{D,Float64}},
+                        ξ::Vector{VectorValue{D,Float64}}) where {D}
+    ng = size(coords, 1)
+    @inbounds for i in eachindex(out)
+        Jt = zero(TensorValue{D,D,Float64,D * D})
+        for n in 1:ng
+            Jt += outer(dM[1, n], coords[n, i])
+        end
+        x1 = coords[1, i]
+        h = 0.0
+        for n in 2:ng
+            h = max(h, norm(coords[n, i] - x1))
+        end
+        ok = true
+        for n in 2:ng
+            ok &= norm(coords[n, i] - x1 - (ξ[n] - ξ[1]) ⋅ Jt) <= 1e-13 * h + 8eps() * norm(coords[n, i])
+        end
+        out[i] = ok
+    end
+    out
+end
+
+"Whether every cell of a geometry table is affine (`affine` table or all `cellaff`): the curvature is zero everywhere."
+all_affine(geo::GeoTable) = geo.affine || all(geo.cellaff)
 
 "A reference gradient (`VectorValue{dc}`) zero-padded to `D` components (manifold cells, `dc < D`)."
 @inline pad_vector(v::VectorValue{D}, ::Val{D}) where {D} = VectorValue{D,Float64}(v.data)

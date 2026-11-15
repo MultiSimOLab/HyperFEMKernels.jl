@@ -166,9 +166,10 @@ function functional_cells(R::Val, fun::KernelFunctional, g::Group{NSV,NSU,PF,TT,
         gather_cell!(xl, fun.fields, x, dvals, sc)
         signed && apply_signs!(xl, cell_signs!(sg, fun.fields, sc), ndl)
         hu = hess_use(g)
+        cg = cell_geometry(g.geo, cell)
         for q in 1:g.geo.np
-            dV, iJt, Jt = point_geometry(g.geo, q, cell)
-            Φ = point_curvature(g.geo, q, cell, hu)
+            dV, iJt, Jt = point_geometry(g.geo, cg, q, cell)
+            Φ = point_curvature(g.geo, cg, q, cell, hu)
             FV = field_values(tables, locs, g.use, xl, q, iJt, Jt, Φ)
             Aq = map(a -> @inbounds(a[q, cell]), auxd)
             v = pf.core(pf.ops, pf.coefs, FV, Aq, EMPTY_SLOTS, EMPTY_SLOTS)::Float64
@@ -191,8 +192,9 @@ function functional_cells(R::Val, fun::KernelFunctional, g::SkeletonGroup{NSV,NS
         f = facets[lf]
         gather_cell!(xl, fun.fields, x, dvals, skel.cells[1, f])
         gather_cell!(xl, fun.fields, x, dvals, skel.cells[2, f], ndl)
+        cgs = cell_geometries(g, lf)
         for q in 1:g.geo.np
-            dS, iJs, Φs = side_geometry(g, q, lf, hu)
+            dS, iJs, Φs = side_geometry(g, cgs, q, lf, hu)
             FV = field_values_sides(tables, locs, g.use, xl, q, iJs, Φs)
             Aq = map(a -> @inbounds(a[q, lf]), auxd)
             v = pf.core(pf.ops, pf.coefs, FV, Aq, EMPTY_SLOTS, EMPTY_SLOTS)::Float64
