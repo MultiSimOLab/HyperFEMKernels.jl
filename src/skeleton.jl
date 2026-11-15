@@ -111,7 +111,8 @@ struct SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D,NF2,LF,JF,UU} <: AbstractGroup
     use::UU                        # FieldUse per (side, field)
     geo::GeoTable{D,JF}            # plus cells at xqp, with Jf (facet measure)
     geom::GeoTable{D,Nothing}      # minus cells at xqm (only Jt⁻¹ is used)
-    aux::Tuple                     # Gridap arrays on the skeleton, materialised per facet of the class (AUX: dense types)
+    aux::Tuple                     # auxiliary arrays on the skeleton (Gridap arrays, functions of x: `CoordArray`), materialised
+                                   # per facet of the class (AUX: dense types)
     smv::SV
     smu::SU
     trian::Triangulation

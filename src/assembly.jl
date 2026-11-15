@@ -701,7 +701,7 @@ end
 """
 Refills the dense auxiliary values `vals` of a group in place: FE functions by the engine
 (`materialize_fe!`, from their current nodal values), functions of the coordinates by the engine
-(`materialize_coord!`, at the points of the group's geometry), other arrays by Gridap; KernelStates
+(`materialize_coord!`, at Gridap's physical points stored with the group's geometry), other arrays by Gridap; KernelStates
 are read directly, not copied.
 """
 function materialize_aux!(vals::AUX, g::Group{NSV,NSU,PF,TT,AUX}, nthreads::Int) where {NSV,NSU,PF,TT,AUX}
@@ -714,8 +714,8 @@ function materialize_aux!(vals::AUX, g::Group{NSV,NSU,PF,TT,AUX}, nthreads::Int)
         if a isa CoordArray
             # a function of the coordinates kept by `engine_aux`: f at Gridap's points stored with the
             # geometry, only on the columns the group integrates (a boundary group: the faces of its class)
-            cols = g.geo.points[][1]::Vector{Int32}
-            @sync for ch in Iterators.partition(cols, cld(length(cols), max(1, nthreads)))
+            ncols = length(g.geo.points[][1])
+            @sync for ch in Iterators.partition(1:ncols, cld(ncols, max(1, nthreads)))
                 Threads.@spawn materialize_coord!(M, a, ch, np, g.geo)
             end
         elseif a isa FEArray && g.geo.Jf === nothing && length(a) == ncells && size(a.fe.N, 1) == np

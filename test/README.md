@@ -27,7 +27,7 @@ tolerance is 1e-12 relative.
 | `test_errors.jl` | clear errors for unsupported inputs; `check` |
 | `test_gridap_equality.jl` | end-to-end equality with Gridap on all problem types |
 
-Set `HFK_DEBUG_LINEAR=1` to print why the linear-map shortcut is not used for a weak form.
+Set `HFK_DEBUG_LINEAR=1` to print why the linear-map shortcut is not used for a weak form. Set `HFK_DEBUG_COORD=1` to print why a function of the coordinates is left to Gridap.
 
 ## Tests on HyperFEM's weak forms
 

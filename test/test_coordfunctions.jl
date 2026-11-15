@@ -1,6 +1,6 @@
 # Functions of the coordinates in the weak form (`CellField(f, Ω)`, or `f` used directly in an
-# operation): read as `CoordArray` leaves and evaluated by the engine at the physical points
-# recomputed from the cell nodes (`coordfunctions.jl`), not by Gridap's lazy tree. Checked against
+# operation): read as `CoordArray` leaves and evaluated by the engine at Gridap's physical points,
+# read once and stored with the geometry (`coordfunctions.jl`), not by Gridap's lazy tree. Checked against
 # Gridap's lazy assembly on volume, boundary and skeleton integrals, on affine and non-affine cells,
 # with assembled and matrix-free Jacobians, through `update`, and for the fallback to Gridap.
 
@@ -108,7 +108,8 @@ end
     g = op.rgroups[1]
     a = only(coord_aux(op))
     cols = HK.group_columns(g.colors)
-    @test HK.engine_aux(a, g.geo, () -> cols, eachindex(g.cellmap)) === a
+    a2 = HK.engine_aux(a, g.geo, () -> cols, eachindex(g.cellmap))      # a copy for the group, with the same point set
+    @test a2 isa HK.CoordArray && a2.f === a.f && a2.set == a.set
     # the geometry of other points (another quadrature): not recognised, Gridap's array is used
     geo2 = HK.GeoTable(get_triangulation(p.V), quad_points(Measure(p.Ω, 4)), quad_weights(Measure(p.Ω, 4)))
     @test HK.engine_aux(a, geo2, () -> cols, eachindex(g.cellmap)) === a.lazy
@@ -124,7 +125,7 @@ end
     V = TestFESpace(model, ReferenceFE(lagrangian, Float64, 1); conformity=:L2)
     ops = KernelOperator((u, v) -> ∫(CellField(gx, Λ) * jump(u) * jump(v))dΛ, (u, du, v) -> ∫(CellField(gx, Λ) * jump(du) * jump(v))dΛ,
                          TrialFESpace(V), V)
-    gs = first(g for g in ops.rgroups if g isa HK.SkeletonGroup && !isempty(coord_aux(ops)))
+    gs = first(g for g in ops.rgroups if g isa HK.SkeletonGroup && any(x -> x isa HK.CoordArray, g.aux))
     as = first(x for x in gs.aux if x isa HK.CoordArray)
     @test HK.coord_points_match(as, gs.geo, eachindex(gs.facets), gs.facets)
     @test !HK.coord_points_match(as, gs.geo, eachindex(gs.facets), circshift(gs.facets, 1))
@@ -137,7 +138,7 @@ end
     Λ = SkeletonTriangulation(model); dΛ = Measure(Λ, 2)
     V = TestFESpace(model, ReferenceFE(lagrangian, Float64, 1); conformity=:L2); U = TrialFESpace(V)
     ftr(x) = x[1] >= 1.0 ? 1.0 : 0.0                                   # a load on the side x = 1, without tags
-    xm = 3 / n                                                          # a mesh line
+    xm = (n ÷ 2) / n                                                    # an interior mesh line
     fmat(x) = x[1] <= xm ? 1.0 : 10.0                                   # a material indicator with a jump on it
     mΛ = CellField(fmat, Λ)
     res(u, v) = ∫(ftr * u * v)dΓ + ∫(mΛ * jump(u) * jump(v))dΛ
@@ -148,16 +149,17 @@ end
     @test c.res < TOL && c.jac < TOL
 end
 
-@testset "a boundary of several face classes: f only at the quadrature points of its faces" begin
-    model = cartesian_model(2, (6, 6))
+@testset "a boundary of several face classes: f only at the quadrature points of its faces ($(D)D, simplex = $simplex)" for
+        (D, simplex, n) in ((2, false, (6, 6)), (3, true, (3, 3, 3)))
+    model = cartesian_model(D, n; simplex)
     Γ = BoundaryTriangulation(model); dΓ = Measure(Γ, 2)
     V = TestFESpace(model, ReferenceFE(lagrangian, Float64, 1)); U = TrialFESpace(V)
-    calls = Ref(0)
+    calls = Threads.Atomic{Int}(0)
     onΓ(x) = any(c -> abs(c) < 1e-12 || abs(c - 1) < 1e-12, x)
-    fb(x) = (calls[] += 1; onΓ(x) || error("f called off the boundary at $x"); 1 + x[1] * x[2])
+    fb(x) = (Threads.atomic_add!(calls, 1); onΓ(x) || error("f called off the boundary at $x"); 1 + x[1] * x[2])
     res(u, v) = ∫(fb * u * v)dΓ
     jac(u, du, v) = ∫(fb * du * v)dΓ
-    op = KernelOperator(res, jac, U, V; nthreads=1)
+    op = KernelOperator(res, jac, U, V; nthreads=4)
     @test length(op.rgroups) > 1 && length(coord_aux(op)) == length(op.rgroups) + length(op.jgroups)
     x = randx(U)
     b = Algebra.residual(op, x)
@@ -166,6 +168,39 @@ end
     @test calls[] == num_cells(Γ) * op.rgroups[1].geo.np                  # each face once, at its own points
     c = check(res, jac, U, V, x; op)
     @test c.res < TOL && c.jac < TOL
+end
+
+@testset "two point arrays of Gridap for the same faces (face map and cell map) with a discontinuous f" begin
+    model = cartesian_model(2, (7, 7))
+    Ω = Triangulation(model)
+    Γ = BoundaryTriangulation(model); dΓ = Measure(Γ, 2)
+    V = TestFESpace(model, ReferenceFE(lagrangian, Float64, 1); conformity=:L2); U = TrialFESpace(V)
+    ftr(x) = x[1] >= 1.0 ? 1.0 : 0.0
+    forms = (
+        ((u, v) -> ∫(CellField(gx, Γ) * u * v + ftr * u * v)dΓ, (u, du, v) -> ∫(CellField(gx, Γ) * du * v + ftr * du * v)dΓ),
+        ((u, v) -> ∫(ftr * u * v + CellField(gx, Γ) * u * v)dΓ, (u, du, v) -> ∫(ftr * du * v + CellField(gx, Γ) * du * v)dΓ),
+        ((u, v) -> ∫(CellField(ftr, Γ) * u * v + CellField(fx, Ω) * u * v)dΓ, (u, du, v) -> ∫(ftr * du * v + CellField(ftr, Ω) * du * v)dΓ),
+    )
+    for (res, jac) in forms
+        op = KernelOperator(res, jac, U, V; nthreads=4)
+        @test !isempty(coord_aux(op)) && isempty(other_aux(op))
+        c = check(res, jac, U, V, randx(U); op)
+        @test c.res < TOL && c.jac < TOL
+    end
+end
+
+@testset "a function used several times: one slot if it captures nothing" begin
+    p = poisson_2d(; order=1)
+    a = 2.0
+    fc = x -> a * x[1]                                                  # a closure with a capture
+    res1(u, v) = ∫(∇(v) ⋅ ∇(u) + fx * u * v + fx * v + fx * (∇(u) ⋅ ∇(v)))p.dΩ
+    res2(u, v) = ∫(∇(v) ⋅ ∇(u) + fc * u * v + fc * v)p.dΩ
+    for (res, nslots) in ((res1, 1), (res2, 2))
+        op = KernelOperator(res, p.jac, p.U, p.V)
+        @test length(op.rgroups[1].aux) == nslots
+        c = check(res, p.jac, p.U, p.V, randx(p.U); op)
+        @test c.res < TOL
+    end
 end
 
 @testset "no allocation: the engine fill allocates nothing and the assembly as much as without a function of x" begin
