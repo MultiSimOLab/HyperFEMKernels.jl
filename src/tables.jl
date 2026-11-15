@@ -52,7 +52,8 @@ struct GeoTable{D,JF}
     affine::Bool                             # the reference Hessians vanish (simplices): the cell maps are affine
     Mv::Matrix{Float64}                      # np × ng, values of the geometric shape functions at the points (`point_coordinate`)
     points::Base.RefValue{Union{Nothing,Tuple{Vector{Int32},Vector{Matrix{VectorValue{D,Float64}}}}}}
-                                             # nothing, or (columns integrated, point sets) for the functions of x (`coord_points!`)
+                                             # nothing, or (columns integrated, point sets: Gridap's physical points
+                                             # np × length(columns)), for the functions of x of the groups (`coord_points!`)
     cellaff::Vector{Bool}                    # per column: the cell map is affine (Jt constant in the cell, `affine_cells`), so
                                              # the kernels compute Jt, inv(Jt) and the measure once per cell (`cell_geometry`)
 end
@@ -104,8 +105,13 @@ function GeoTable(trian::Triangulation, xq::AbstractVector, w::AbstractVector; c
         Ref{Union{Nothing,Tuple{Vector{Int32},Vector{Matrix{VectorValue{D,Float64}}}}}}(nothing), cellaff)
 end
 
-"Whether the kernels use one geometry per affine cell (`HFK_AFFINE_GEOMETRY=0` disables it: per point everywhere)."
-const AFFINE_GEOMETRY = Ref(get(ENV, "HFK_AFFINE_GEOMETRY", "1") == "1")
+"""
+Whether the kernels use one geometry per affine cell. Read from `HFK_AFFINE_GEOMETRY` when the package is
+loaded (`__init__`): `0` or `false` disables it (per point everywhere). Applies to geometry tables built
+afterwards.
+"""
+const AFFINE_GEOMETRY = Ref(true)
+affine_geometry_from_env() = lowercase(strip(get(ENV, "HFK_AFFINE_GEOMETRY", "1"))) ∉ ("0", "false", "no", "off")
 
 """
     affine_cells(coords, dM, reffe, D) -> Vector{Bool}
@@ -123,19 +129,34 @@ function affine_cells(coords::Matrix{VectorValue{D,Float64}}, dM::Matrix{VectorV
     ng, nc = size(coords)
     out = fill(false, nc)
     AFFINE_GEOMETRY[] || return out
-    ξ = [pad_vector(VectorValue(Float64.(p.data)), Val(D)) for p in get_node_coordinates(reffe)]
+    ξ = VectorValue{D,Float64}[pad_vector(VectorValue(Float64.(p.data)), Val(D)) for p in get_node_coordinates(reffe)]
     length(ξ) == ng || return out
-    for i in 1:nc
+    _affine_cells!(out, coords, dM, ξ)
+end
+function _affine_cells!(out::Vector{Bool}, coords::Matrix{VectorValue{D,Float64}}, dM::Matrix{VectorValue{D,Float64}},
+                        ξ::Vector{VectorValue{D,Float64}}) where {D}
+    ng = size(coords, 1)
+    @inbounds for i in eachindex(out)
         Jt = zero(TensorValue{D,D,Float64,D * D})
         for n in 1:ng
             Jt += outer(dM[1, n], coords[n, i])
         end
         x1 = coords[1, i]
-        h = maximum(norm(coords[n, i] - x1) for n in 1:ng)
-        out[i] = all(n -> norm(coords[n, i] - x1 - (ξ[n] - ξ[1]) ⋅ Jt) <= 1e-13 * h + 8eps() * norm(coords[n, i]), 1:ng)
+        h = 0.0
+        for n in 2:ng
+            h = max(h, norm(coords[n, i] - x1))
+        end
+        ok = true
+        for n in 2:ng
+            ok &= norm(coords[n, i] - x1 - (ξ[n] - ξ[1]) ⋅ Jt) <= 1e-13 * h + 8eps() * norm(coords[n, i])
+        end
+        out[i] = ok
     end
     out
 end
+
+"Whether every cell of a geometry table is affine (`affine` table or all `cellaff`): the curvature is zero everywhere."
+all_affine(geo::GeoTable) = geo.affine || all(geo.cellaff)
 
 "A reference gradient (`VectorValue{dc}`) zero-padded to `D` components (manifold cells, `dc < D`)."
 @inline pad_vector(v::VectorValue{D}, ::Val{D}) where {D} = VectorValue{D,Float64}(v.data)

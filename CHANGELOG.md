@@ -20,8 +20,8 @@
   parallelograms and parallelepipeds — also in unstructured meshes —, straight-sided higher-order cells);
   on those cells the kernels compute `Jt`, `inv(Jt)` and the measure once and reuse them at every
   quadrature point (residual, Jacobian, matrix-free `prepare!`, skeletons, functionals, FE functions in
-  the form). Curved or deformed cells keep the per-point computation; results change only by round-off.
-  `HFK_AFFINE_GEOMETRY=0` disables it.
+  the form, `update_states!`). Curved or deformed cells keep the per-point computation; results change only
+  by round-off. `HFK_AFFINE_GEOMETRY=0` (read when the package is loaded) disables it.
 
 ## 0.2.4
 

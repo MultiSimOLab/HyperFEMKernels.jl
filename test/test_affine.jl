@@ -65,7 +65,7 @@ function check_affine(res, jac, U, V; nthreads=1)
             gop = get_algebraic_operator(FEOperator(res, jac, U, V))
             mf = MatrixFreeJacobian(op); prepare!(mf, x)
             dx = randn(num_free_dofs(U))
-            @test reldiff(mf * dx, Algebra.jacobian(gop, x) * dx) < 1e-11
+            @test reldiff(mf * dx, Algebra.jacobian(gop, x) * dx) < 1e-11    # applied without assembling (sum factorisation): other round-off
         end
     end
 end
@@ -76,8 +76,10 @@ end
     n = D == 2 ? (4, 3) : (2, 2, 2)
     model = mk(D, n)
     Ω = Triangulation(model); dΩ = Measure(Ω, 2order)
-    # boundary integrals on non-affine hexahedra differ from Gridap already in `main` (a separate issue): 2D only there
-    with_boundary = D == 2 || all(geo_cellaff(model))
+    name == "partly deformed" && @test any(geo_cellaff(model)) && !all(geo_cellaff(model))
+    # boundary integrals on non-affine hexahedra of a mapped Cartesian model differ from Gridap already in `main`
+    # (Gridap's face maps there, a separate issue): skipped only for that model
+    with_boundary = !(D == 3 && name == "mapped n-cubes")
     Γ = BoundaryTriangulation(model); dΓ = Measure(Γ, 2order)
     V = TestFESpace(model, ReferenceFE(lagrangian, VectorValue{D,Float64}, order), dirichlet_tags=[1])
     U = TrialFESpace(V, x -> zero(VectorValue{D,Float64}))
@@ -126,4 +128,57 @@ end
     fun = KernelFunctional(en, U)
     x = randx(U; scale=0.3)
     @test fun(x) ≈ sum(en(FEFunction(U, x))) rtol = 1e-12
+end
+
+@testset "the kernels use the cell geometry: flagging deformed cells as affine changes the result" begin
+    model = deformed_model(2, (4, 4); every=1)
+    Ω = Triangulation(model); dΩ = Measure(Ω, 2)
+    V = TestFESpace(model, ReferenceFE(lagrangian, Float64, 1)); U = TrialFESpace(V)
+    res(u, v) = ∫(∇(v) ⋅ ∇(u) + u * v)dΩ
+    op = KernelOperator(res, (u, du, v) -> res(du, v), U, V)
+    g = op.rgroups[1]
+    @test !all(g.geo.cellaff)
+    x = randx(U); b0 = Algebra.residual(op, x)
+    saved = copy(g.geo.cellaff)
+    try
+        g.geo.cellaff .= true                                          # wrong on purpose: Jt of the first point everywhere
+        @test reldiff(Algebra.residual(op, x), b0) > 1e-6
+    finally
+        g.geo.cellaff .= saved
+    end
+    @test Algebra.residual(op, x) == b0
+end
+
+@testset "∇∇, skeletons (assembled, matrix-free) and functionals on a mixed mesh, against the per-point path" begin
+    model = deformed_model(2, (4, 4); every=3)
+    @test any(geo_cellaff(model)) && !all(geo_cellaff(model))
+    Ω = Triangulation(model); dΩ = Measure(Ω, 4)
+    Λ = SkeletonTriangulation(model); dΛ = Measure(Λ, 4)
+    V = TestFESpace(model, ReferenceFE(lagrangian, Float64, 2), dirichlet_tags="boundary"); U = TrialFESpace(V, 0.0)
+    res(u, v) = ∫(1e-2 * (∇∇(u) ⊙ ∇∇(v)) + ∇(v) ⋅ ∇(u) - v)dΩ + ∫(jump(∇(u)) ⋅ jump(∇(v)))dΛ
+    jac(u, du, v) = ∫(1e-2 * (∇∇(du) ⊙ ∇∇(v)) + ∇(v) ⋅ ∇(du))dΩ + ∫(jump(∇(du)) ⋅ jump(∇(v)))dΛ
+    en(u) = ∫(0.5 * (∇(u) ⋅ ∇(u)))dΩ + ∫(0.5 * (jump(∇(u)) ⋅ jump(∇(u))))dΛ
+    build() = (KernelOperator(res, jac, U, V), KernelOperator(res, jac, U, V; jacobian=:matrixfree), KernelFunctional(en, U))
+    op, mfop, fun = build()
+    HK.AFFINE_GEOMETRY[] = false
+    oq, mfq, funq = try
+        build()
+    finally
+        HK.AFFINE_GEOMETRY[] = true
+    end
+    x = randx(U); dx = randn(num_free_dofs(U))
+    @test reldiff(Algebra.residual(op, x), Algebra.residual(oq, x)) < 1e-13
+    @test reldiff(Algebra.jacobian(op, x), Algebra.jacobian(oq, x)) < 1e-13
+    mf = MatrixFreeJacobian(mfop); prepare!(mf, x)
+    mq = MatrixFreeJacobian(mfq); prepare!(mq, x)
+    @test reldiff(mf * dx, mq * dx) < 1e-13
+    @test fun(x) ≈ funq(x) rtol = 1e-13
+    @test fun(x) ≈ sum(en(FEFunction(U, x))) rtol = 1e-12
+end
+
+@testset "HFK_AFFINE_GEOMETRY is read when the package is loaded" begin
+    code = "using HyperFEMKernels; print(HyperFEMKernels.AFFINE_GEOMETRY[])"
+    run_with(v) = read(addenv(`$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) -e $code`, "HFK_AFFINE_GEOMETRY" => v), String)
+    @test run_with("0") == "false"
+    @test run_with("1") == "true"
 end

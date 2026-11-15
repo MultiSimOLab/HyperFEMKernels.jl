@@ -256,8 +256,9 @@ show_code(su::StateUpdate) = println(Base.remove_linenums!(deepcopy(su.expr)))
 "Update the states of one cell (no allocation; the part that runs on each device)."
 function update_cell!(su::StateUpdate{F,O,FE,ST,NW}, xls, auxd, cell::Int) where {F,O,FE,ST,NW}
     map((fe, xl) -> gather_fe!(xl, fe, cell), su.fes, xls)
+    cg = su.geo === nothing ? nothing : cell_geometry(su.geo, cell)       # once per cell if affine
     for q in 1:su.np
-        iJt = su.geo === nothing ? nothing : point_geometry(su.geo, q, cell)[2]
+        iJt = su.geo === nothing ? nothing : point_geometry(su.geo, cg, q, cell)[2]
         FV = map((fe, xl) -> fe_point_value(fe, xl, q, iJt), su.fes, xls)
         Aq = map(a -> @inbounds(a[q, cell]), auxd)
         Sq = map(s -> @inbounds(s[q, cell]), su.states)

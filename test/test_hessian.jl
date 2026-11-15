@@ -291,11 +291,11 @@ end
             op1 = KernelOperator(prob.res, prob.jac, prob.U, prob.V; nthreads=1)
             @test reldiff(Algebra.residual(op1, x), Algebra.residual(op, x)) < HTOL
             @test reldiff(Algebra.jacobian(op1, x), Algebra.jacobian(op, x)) < HTOL
-            # simplices: no curvature stored for the matrix-free skeleton groups (the Q1 reference Hessians of
-            # quadrilaterals do not vanish, so Cartesian cells store a curvature that is zero at run time)
+            # affine cells (simplices and Cartesian cells): no curvature stored for the matrix-free skeleton groups
+            # (the Q1 reference Hessians of quadrilaterals do not vanish, but every cell is flagged affine, `cellaff`)
             mf = MatrixFreeJacobian(op)
             for (g, gd) in zip(op.jgroups, mf.data)
-                g isa HK.SkeletonGroup && @test (size(gd[1].Phi, 1) == 0 && size(gd[2].Phi, 1) == 0) == simplex
+                g isa HK.SkeletonGroup && @test size(gd[1].Phi, 1) == 0 && size(gd[2].Phi, 1) == 0
             end
         end
     end
