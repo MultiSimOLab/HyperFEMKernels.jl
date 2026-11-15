@@ -108,16 +108,64 @@ end
     g = op.rgroups[1]
     a = only(coord_aux(op))
     cols = HK.group_columns(g.colors)
-    @test HK.engine_aux(a, g.geo, cols, eachindex(g.cellmap)) === a
+    @test HK.engine_aux(a, g.geo, () -> cols, eachindex(g.cellmap)) === a
     # the geometry of other points (another quadrature): not recognised, Gridap's array is used
     geo2 = HK.GeoTable(get_triangulation(p.V), quad_points(Measure(p.Ω, 4)), quad_weights(Measure(p.Ω, 4)))
-    @test HK.engine_aux(a, geo2, cols, eachindex(g.cellmap)) === a.lazy
+    @test HK.engine_aux(a, geo2, () -> cols, eachindex(g.cellmap)) === a.lazy
     # other cells (shifted columns): not recognised
     @test !HK.coord_points_match(a, g.geo, cols, circshift(collect(eachindex(g.cellmap)), 1))
-    # the engine's values equal Gridap's
+    # the engine's values are Gridap's (the same points, so bit for bit)
     M = Matrix{Float64}(undef, g.geo.np, length(g.cellmap))
     HK.materialize_coord!(M, a, eachindex(g.cellmap), g.geo.np, g.geo)
-    @test maximum(abs(M[q, c] - a.lazy[c][q]) for c in axes(M, 2), q in axes(M, 1)) < 1e-14
+    @test all(M[q, c] == a.lazy[c][q] for c in axes(M, 2), q in axes(M, 1))
+    # skeleton: a function of x on the facets with the facets of the class shifted is not recognised
+    model = cartesian_model(2, (3, 3))
+    Λ = SkeletonTriangulation(model); dΛ = Measure(Λ, 2)
+    V = TestFESpace(model, ReferenceFE(lagrangian, Float64, 1); conformity=:L2)
+    ops = KernelOperator((u, v) -> ∫(CellField(gx, Λ) * jump(u) * jump(v))dΛ, (u, du, v) -> ∫(CellField(gx, Λ) * jump(du) * jump(v))dΛ,
+                         TrialFESpace(V), V)
+    gs = first(g for g in ops.rgroups if g isa HK.SkeletonGroup && !isempty(coord_aux(ops)))
+    as = first(x for x in gs.aux if x isa HK.CoordArray)
+    @test HK.coord_points_match(as, gs.geo, eachindex(gs.facets), gs.facets)
+    @test !HK.coord_points_match(as, gs.geo, eachindex(gs.facets), circshift(gs.facets, 1))
+end
+
+@testset "functions discontinuous on faces: the same points as Gridap ($(D)D, simplex = $simplex)" for (D, simplex, n) in
+        ((2, false, 7), (2, true, 7), (3, false, 3), (3, true, 3))
+    model = cartesian_model(D, ntuple(_ -> n, 3); simplex)
+    Γ = BoundaryTriangulation(model); dΓ = Measure(Γ, 2)
+    Λ = SkeletonTriangulation(model); dΛ = Measure(Λ, 2)
+    V = TestFESpace(model, ReferenceFE(lagrangian, Float64, 1); conformity=:L2); U = TrialFESpace(V)
+    ftr(x) = x[1] >= 1.0 ? 1.0 : 0.0                                   # a load on the side x = 1, without tags
+    xm = 3 / n                                                          # a mesh line
+    fmat(x) = x[1] <= xm ? 1.0 : 10.0                                   # a material indicator with a jump on it
+    mΛ = CellField(fmat, Λ)
+    res(u, v) = ∫(ftr * u * v)dΓ + ∫(mΛ * jump(u) * jump(v))dΛ
+    jac(u, du, v) = ∫(ftr * du * v)dΓ + ∫(mΛ * jump(du) * jump(v))dΛ
+    op = KernelOperator(res, jac, U, V)
+    @test length(coord_aux(op)) >= 2 && isempty(other_aux(op))
+    c = check(res, jac, U, V, randx(U); op)
+    @test c.res < TOL && c.jac < TOL
+end
+
+@testset "a boundary of several face classes: f only at the quadrature points of its faces" begin
+    model = cartesian_model(2, (6, 6))
+    Γ = BoundaryTriangulation(model); dΓ = Measure(Γ, 2)
+    V = TestFESpace(model, ReferenceFE(lagrangian, Float64, 1)); U = TrialFESpace(V)
+    calls = Ref(0)
+    onΓ(x) = any(c -> abs(c) < 1e-12 || abs(c - 1) < 1e-12, x)
+    fb(x) = (calls[] += 1; onΓ(x) || error("f called off the boundary at $x"); 1 + x[1] * x[2])
+    res(u, v) = ∫(fb * u * v)dΓ
+    jac(u, du, v) = ∫(fb * du * v)dΓ
+    op = KernelOperator(res, jac, U, V; nthreads=1)
+    @test length(op.rgroups) > 1 && length(coord_aux(op)) == length(op.rgroups) + length(op.jgroups)
+    x = randx(U)
+    b = Algebra.residual(op, x)
+    calls[] = 0
+    Algebra.residual!(b, op, x)
+    @test calls[] == num_cells(Γ) * op.rgroups[1].geo.np                  # each face once, at its own points
+    c = check(res, jac, U, V, x; op)
+    @test c.res < TOL && c.jac < TOL
 end
 
 @testset "no allocation: the engine fill allocates nothing and the assembly as much as without a function of x" begin
@@ -176,4 +224,54 @@ end
         c = check(r3, j3, p.U, p.V, x; op=op3)
         @test c.res < TOL && c.jac < TOL
     end
+end
+
+@testset "update: functions of the same type equal in one capture and different in the next" begin
+    p = poisson_2d(; order=1)
+    make(a) = (x -> a * (1 + x[1]))
+    forms(f1, f2) = ((u, v) -> ∫(∇(v) ⋅ ∇(u) + f1 * u * v + f2 * v)p.dΩ, (u, du, v) -> ∫(∇(v) ⋅ ∇(du) + f1 * du * v)p.dΩ)
+    for (Λ0, Λ1) in ((0.0, 0.5), (0.5, 0.0))
+        r0, j0 = forms(make(Λ0), make(2Λ0))
+        op = KernelOperator(r0, j0, p.U, p.V)
+        x = randx(p.U); Algebra.residual(op, x)
+        r1, j1 = forms(make(Λ1), make(2Λ1))
+        op1 = update(op, r1, j1)
+        @test op1.rsig == op.rsig
+        c = check(r1, j1, p.U, p.V, x; op=op1)
+        @test c.res < TOL && c.jac < TOL
+    end
+end
+
+@testset "update allocates nothing per cell with functions of x; cache_aux keeps the first values" begin
+    function update_bytes(n)
+        model = CartesianDiscreteModel((0, 1, 0, 1, 0, 1), (n, n, n))
+        Ω = Triangulation(model); dΩ = Measure(Ω, 2)
+        V = TestFESpace(model, ReferenceFE(lagrangian, Float64, 1)); U = TrialFESpace(V)
+        forms(a) = ((u, v) -> ∫(∇(v) ⋅ ∇(u) + (x -> a * x[1]) * u * v)dΩ, (u, du, v) -> ∫(∇(v) ⋅ ∇(du) + (x -> a * x[1]) * du * v)dΩ)
+        op = KernelOperator(forms(1.0)..., U, V)
+        Algebra.residual(op, zeros(num_free_dofs(U)))
+        update(op, forms(2.0)...)
+        @allocated update(op, forms(3.0)...)
+    end
+    small, large = update_bytes(4), update_bytes(12)                  # 27 × more cells
+    @test large < small + 50_000
+    # with cache_aux = true the buffers are never refilled: the first captured value stays (documented)
+    p = poisson_2d(; order=1)
+    make(a) = (x -> a * (1 + x[1]))
+    forms2(f) = ((u, v) -> ∫(∇(v) ⋅ ∇(u) + f * u * v)p.dΩ, (u, du, v) -> ∫(∇(v) ⋅ ∇(du) + f * du * v)p.dΩ)
+    op = KernelOperator(forms2(make(2.0))..., p.U, p.V; cache_aux=true)
+    x = randx(p.U); b2 = Algebra.residual(op, x)
+    op3 = update(op, forms2(make(-3.0))...)
+    @test Algebra.residual(op3, x) == b2
+end
+
+@testset "KernelFunctional with a function of x" begin
+    p = poisson_2d(; order=2, simplex=true)
+    en(a) = u -> ∫((x -> 0.5 * (a + x[1])) * u * u)p.dΩ
+    fun = KernelFunctional(en(1.0), p.U)
+    @test !isempty([a for g in fun.groups for a in g.aux if a isa HK.CoordArray])
+    x = randx(p.U; scale=0.3)
+    @test fun(x) ≈ sum(en(1.0)(FEFunction(p.U, x))) rtol = 1e-12
+    fun2 = update(fun, en(-2.0))
+    @test fun2(x) ≈ sum(en(-2.0)(FEFunction(p.U, x))) rtol = 1e-12
 end

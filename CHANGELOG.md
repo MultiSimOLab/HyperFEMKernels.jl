@@ -4,11 +4,14 @@
 
 - **Functions of the coordinates compiled.** `CellField(f, Ω)`, a Julia function `f` used directly in the
   weak form (`f * v`, `Operation(g)(f, uh)`), on volume, boundary, skeleton and subdomain triangulations,
-  are read as a new auxiliary leaf (`CoordArray`) and evaluated by the engine: `f(x)` at the physical
-  quadrature points computed from the cell nodes and the geometric shape functions, with the operations
-  above them compiled into the integrand. Before, they were evaluated cell by cell through Gridap's lazy
+  are read as a new auxiliary leaf (`CoordArray`) and evaluated by the engine: `f(x)` at Gridap's physical
+  quadrature points (read once per group after checking them against the group's geometry, so that a
+  function discontinuous on a face gives Gridap's values), only on the cells or faces the group
+  integrates, with the operations above them compiled into the integrand. Before, they were evaluated cell by cell through Gridap's lazy
   arrays (e.g. `∫(2 * cfun * H(uf) * v)dΩ` on 64 000 hexahedra, one thread: 47 MB and ~11 ms per assembly).
-  A group whose geometry does not reproduce Gridap's points keeps Gridap's array (same values).
+  A group whose geometry does not reproduce Gridap's points keeps Gridap's array (same values;
+  `HFK_DEBUG_COORD=1` prints why). Not yet by the engine: `∇(CellField(f, Ω))` and functions of x
+  passed to `update_states!` (still Gridap's arrays).
 - `update`: the type of a function of the coordinates is part of the structure; the same function, or a
   closure of the same type with other captured values, is rebound (the new values are used), another
   type compiles again (documented in `update` and the README).

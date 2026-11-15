@@ -26,8 +26,9 @@ Base.hash(a::Leaf, h::UInt) = hash((a.role, a.field, a.deriv, a.side), h)
 
 """
 Data that does not depend on the unknown, test or trial functions, as a cell-wise array of its
-values at the points: a Gridap array (evaluated by Gridap per cell) or an `FEArray` (an FE
-function evaluated by the engine from its nodal values, see `fefunctions.jl`).
+values at the points: a Gridap array (evaluated by Gridap per cell), an `FEArray` (an FE
+function evaluated by the engine from its nodal values, see `fefunctions.jl`) or a `CoordArray` (a
+function of the coordinates evaluated by the engine at the physical points, see `coordfunctions.jl`).
 """
 struct Aux <: Node
     array::AbstractArray
@@ -193,7 +194,8 @@ _walk_leaves!(found, role, n::Const) = nothing
 """
 Whether two auxiliary arrays are the same data: the same array, or the same FE function (or
 gradient) at the same points, which Gridap builds as a new lazy array at each use in the form
-(method for `FEArray` in `fefunctions.jl`). The generic method compares the boxed arrays
+(method for `FEArray` in `fefunctions.jl`; a function of x, `CoordArray`, is only the same as
+itself, see `coordfunctions.jl`). The generic method compares the boxed arrays
 (`@nospecialize`): Gridap's lazy arrays are large nested immutable structs, and `===` on the
 unboxed copies a specialised method would receive is not reliable (Julia 1.13: false for two
 copies of the same array).

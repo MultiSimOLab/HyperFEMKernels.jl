@@ -47,7 +47,8 @@ struct Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF,UU,RB} <: AbstractGroup
     use::UU             # FieldUse per field: derivatives of the unknown evaluated at the points
     rb::RB              # reference weights of the test slots per field (`residual_weights`), for the matrix-product residual
     geo::GeoTable{D,JF}
-    aux::Tuple          # Gridap arrays, evaluated per cell (lazy; their types are not part of the group's type,
+    aux::Tuple          # auxiliary arrays: Gridap arrays (evaluated per cell, lazily), FE functions (`FEArray`) and
+                        # functions of x (`CoordArray`) evaluated by the engine; their types are not part of the group's type,
                         # so that a changed auxiliary expression does not recompile the kernels)
                         # AUX: type of the dense values of `aux` at the points (NTuple of Matrix{T}, see materialize_aux)
     smv::SV             # slot specs (test) per field
@@ -105,7 +106,7 @@ function Group(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int,
     any(((t, u),) -> t isa PiolaTable && has_hess(u), zip(tables, use)) &&
         error("HyperFEMKernels: second derivatives (∇∇) of H(div) fields are not supported")
     rb = Tuple(residual_weights(t, sp, geo.np) for (t, sp) in zip(tables, smv))
-    aux = Tuple(engine_aux(a.array, geo, group_columns(colors), eachindex(cellmap)) for a in pf.aux)
+    aux = Tuple(engine_aux(a.array, geo, () -> group_columns(colors), eachindex(cellmap)) for a in pf.aux)
     AUX = Tuple{(Matrix{eltype(eltype(a))} for a in aux)...}
     NF = length(tables)
     lin = linear_maps ? LinearForm(terms, pf, tables, aux, pf.trial.nslots == 0 ? :res : :jac) : nothing
@@ -134,7 +135,7 @@ end
 "The group `g` with its values (operations, coefficients, parameters, auxiliary arrays, linear maps) read from `terms`."
 function rebind(g::Group, terms::Vector{Term})
     pf = PointForm(terms, g.pf)
-    aux = Tuple(engine_aux(a.array, g.geo, group_columns(g.colors), eachindex(g.cellmap)) for a in pf.aux)
+    aux = Tuple(engine_aux(a.array, g.geo, () -> group_columns(g.colors), eachindex(g.cellmap)) for a in pf.aux)
     lin = g.lin === nothing ? nothing : LinearForm(terms, pf, g.tables, aux, g.lin)
     typeof(g)(pf, lin, g.locs, g.tables, g.use, g.rb, g.geo, aux, g.smv, g.smu, g.trian, g.xq, g.auxcache, g.cellmap, g.colors, g.wkey)
 end
@@ -194,9 +195,10 @@ form allows it (see `linearmaps.jl`); otherwise, and with `linear_maps = false`,
 differentiation with dual numbers.
 
 The auxiliary data (fields that do not depend on the unknown, e.g. a previous state or an
-interpolated field) is evaluated by Gridap into dense buffers owned by the operator, allocated at
-the first assembly and refilled in place at every assembly. With `cache_aux = true` it is evaluated
-only once per operator (the buffers are not refilled). Only safe when that data does not change
+interpolated field) is evaluated into dense buffers owned by the operator — by the engine for FE
+functions and functions of the coordinates, by Gridap otherwise — allocated at the first assembly
+and refilled in place at every assembly. With `cache_aux = true` it is evaluated only once per
+operator (the buffers are not refilled, also after `update`). Only safe when that data does not change
 while the operator is used (e.g. it must not be built from the FE function that holds the current
 Newton iterate).
 
@@ -500,6 +502,8 @@ Structure and values: the types of the operations of the form and of the functio
 again with other captured values (`make(a) = x -> a * x[1]`, then `make(2.0)`, `make(3.0)`) has the same
 type and is rebound, and the new values are used at the next assembly; a function of another type
 (another anonymous function, another named function) is a new structure and is compiled again.
+With `cache_aux = true` the auxiliary buffers are shared and never refilled, so data read through
+them (FE functions, functions of x and other `CellField`s) keeps its first values.
 """
 function update(op::KernelOperator, res, jac)
     D = num_point_dims(get_triangulation(field_spaces(op.U)[1]))
@@ -708,8 +712,10 @@ function materialize_aux!(vals::AUX, g::Group{NSV,NSU,PF,TT,AUX}, nthreads::Int)
         a isa StateColumns && continue
         M = vals[k]
         if a isa CoordArray
-            # a function of the coordinates kept by `engine_aux`: f at the points of the group's geometry
-            @sync for ch in chunks
+            # a function of the coordinates kept by `engine_aux`: f at Gridap's points stored with the
+            # geometry, only on the columns the group integrates (a boundary group: the faces of its class)
+            cols = g.geo.points[][1]::Vector{Int32}
+            @sync for ch in Iterators.partition(cols, cld(length(cols), max(1, nthreads)))
                 Threads.@spawn materialize_coord!(M, a, ch, np, g.geo)
             end
         elseif a isa FEArray && g.geo.Jf === nothing && length(a) == ncells && size(a.fe.N, 1) == np

@@ -51,6 +51,9 @@ struct GeoTable{D,JF}
                                              # entries of each D × D Hessian, zero-padded on manifold cells); concrete eltype
     affine::Bool                             # the reference Hessians vanish (simplices): the cell maps are affine
     Mv::Matrix{Float64}                      # np × ng, values of the geometric shape functions at the points (`point_coordinate`)
+    points::Base.RefValue{Union{Nothing,Tuple{Vector{Int32},Matrix{VectorValue{D,Float64}}}}}
+                                             # nothing, or (columns integrated, Gridap's physical points np × ncols), read
+                                             # once for the functions of x of the groups using this table (`coord_points!`)
 end
 
 """
@@ -95,7 +98,8 @@ function GeoTable(trian::Triangulation, xq::AbstractVector, w::AbstractVector; c
     end
     affine = all(iszero, ddMp)
     Mv = Matrix{Float64}(evaluate(M, xq))
-    GeoTable{D,typeof(Jf)}(length(xq), ng, dMp, collect(Float64, w), coords, Jf, dc, ddMp, affine, Mv)
+    GeoTable{D,typeof(Jf)}(length(xq), ng, dMp, collect(Float64, w), coords, Jf, dc, ddMp, affine, Mv,
+        Ref{Union{Nothing,Tuple{Vector{Int32},Matrix{VectorValue{D,Float64}}}}}(nothing))
 end
 
 "A reference gradient (`VectorValue{dc}`) zero-padded to `D` components (manifold cells, `dc < D`)."

@@ -43,8 +43,9 @@ backend for its drivers (`backend = :compiled`).
   their nodal values at every assembly, with the operations above them compiled into the integrand.
   Functions of the coordinates (`CellField(f, Ω)`, or a Julia function `f` used directly in the form,
   also on boundaries, skeletons and subdomains) are evaluated by the engine as `f(x)` at the physical
-  quadrature points computed from the cell nodes, without allocations. Other `CellField`s are evaluated
-  by Gridap once per assembly into dense buffers that are reused.
+  quadrature points (Gridap's own points, read once), without allocations. Other `CellField`s (and, for
+  now, gradients of functions of x and functions of x passed to `update_states!`) are evaluated by Gridap
+  once per assembly into dense buffers that are reused.
 - **Threads, no allocations.** Cells are coloured so that the assembly loop is threaded without
   locks; element kernels allocate nothing (`allocations` reports it), which is also the
   requirement for GPU execution.
@@ -57,8 +58,8 @@ backend for its drivers (`backend = :compiled`).
   compiled again, still reusing tables, geometry and colouring. The same for `KernelFunctional`.
   The type of an operation or of a function of the coordinates is structure, its captured values are
   not: a closure created again with other captured values (`a -> (x -> a * x[1])`) is rebound and its
-  new values are used, while a function of another type (another closure, another named function)
-  compiles again.
+  new values are used (not with `cache_aux = true`, whose buffers are never refilled), while a function
+  of another type (another closure, another named function) compiles again.
 - **Matrix-free Jacobian.** `MatrixFreeJacobian` applies `J(x)·dx` without assembling, with sum
   factorisation on quadrilaterals and hexahedra; `KernelOperator(…; jacobian = :matrixfree)` hands
   it to a Newton solver and `MatrixFreeSolver` (Krylov.jl) solves the tangent systems on it, with
