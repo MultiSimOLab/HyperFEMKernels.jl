@@ -104,25 +104,25 @@ end
 
 "A compiled class of facets of a skeleton: same points on both sides."
 mutable struct SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D,NF2,LF,JF,UU,GW} <: AbstractGroup   # mutable: passed by reference
-    pf::PF
-    lin::LF                        # LinearForm or nothing
-    locs::NTuple{NF2,Int}          # offset of each (side, field) in the facet element vector: plus fields, then minus (+ ndl)
-    tables::TT                     # FieldTable per (side, field): plus fields at xqp, then minus fields at xqm
-    use::UU                        # FieldUse per (side, field)
-    geo::GeoTable{D,JF}            # plus cells at xqp, with Jf (facet measure)
-    geom::GeoTable{D,Nothing}      # minus cells at xqm (only Jt⁻¹ is used)
-    aux::Tuple                     # auxiliary arrays on the skeleton (Gridap arrays, functions of x: `CoordArray`), materialised
+    const pf::PF
+    const lin::LF                        # LinearForm or nothing
+    const locs::NTuple{NF2,Int}          # offset of each (side, field) in the facet element vector: plus fields, then minus (+ ndl)
+    const tables::TT                     # FieldTable per (side, field): plus fields at xqp, then minus fields at xqm
+    const use::UU                        # FieldUse per (side, field)
+    const geo::GeoTable{D,JF}            # plus cells at xqp, with Jf (facet measure)
+    const geom::GeoTable{D,Nothing}      # minus cells at xqm (only Jt⁻¹ is used)
+    const aux::Tuple                     # auxiliary arrays on the skeleton (Gridap arrays, functions of x: `CoordArray`), materialised
                                    # per facet of the class (AUX: dense types)
-    smv::SV
-    smu::SU
-    trian::Triangulation
-    key::Vector{Float64}           # class key (points of both sides), for reuse in `update`
-    auxcache::Base.RefValue{Any}
-    facets::Vector{Int32}          # facets of the class (indices in the skeleton)
-    skel::SkeletonData
-    colors::Vector{Vector{Int32}}  # facets of the class per colour (local indices, 1:length(facets))
-    wkey::UInt                     # identity of the quadrature weights of its terms (`rebind`)
-    work::GW                       # element buffers per task (`GroupWork`, `task_buffers`), reused across assemblies
+    const smv::SV
+    const smu::SU
+    const trian::Triangulation
+    const key::Vector{Float64}           # class key (points of both sides), for reuse in `update`
+    const auxcache::Base.RefValue{Any}
+    const facets::Vector{Int32}          # facets of the class (indices in the skeleton)
+    const skel::SkeletonData
+    const colors::Vector{Vector{Int32}}  # facets of the class per colour (local indices, 1:length(facets))
+    const wkey::UInt                     # identity of the quadrature weights of its terms (`rebind`)
+    const work::GW                       # element buffers per task (`GroupWork`, `task_buffers`), reused across assemblies
 end
 
 function SkeletonGroup(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int, ndl::Int, skel::SkeletonData, cls,
@@ -335,6 +335,7 @@ function cells!(::Val{K}, b, A, op::KernelOperator, g::SkeletonGroup{NSV,NSU,PF,
             scatter_residual!(b, op.fields, re, cm, ndl)
         end
     else
+        K === :blocks && error("HyperFEMKernels: nodal block diagonals (`BlockJacobi`) of skeleton integrals are not supported")
         KeT = buf.KeT
         nzv = A                                    # the nonzeros of the matrix (`jacobian!`)
         size(skel.nzpos, 2) == size(skel.cells, 2) || error("HyperFEMKernels: the facet positions of the skeleton were not computed")

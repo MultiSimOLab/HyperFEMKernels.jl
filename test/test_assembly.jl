@@ -216,20 +216,78 @@ end
     # the buffers are shared by the groups `update` rebinds: no new allocation after an update either
     op2 = update(op, res, jac)
     @test rbytes(b, op2, x) == 0
-    # with threads: a fixed amount per call (the tasks), the same for a mesh 9 × larger
-    function threaded_bytes(n)
-        p = poisson_2d(; n=(n, n), order=2)
-        op = KernelOperator(p.res, p.jac, p.U, p.V; nthreads=4)
-        x = randx(p.U); b = Algebra.residual(op, x)
-        rbytes(b, op, x)
+    # multi-field (Dirichlet values gathered per field)
+    p = coupled_3d()
+    op = KernelOperator(p.res, p.jac, p.U, p.V; nthreads=1)
+    x = randx(p.U); b = Algebra.residual(op, x); A = Algebra.jacobian(op, x)
+    @test rbytes(b, op, x) == 0 && jbytes(A, op, x) == 0
+    # with threads: a fixed amount per call (the tasks), the same for a mesh 4 × larger
+    w = HK.WORK_PER_TASK[]
+    HK.WORK_PER_TASK[] = 1                                            # always as many tasks as threads
+    try
+        function threaded_bytes(n)
+            p = poisson_2d(; n=(n, n), order=2)
+            op = KernelOperator(p.res, p.jac, p.U, p.V; nthreads=4)
+            x = randx(p.U); b = Algebra.residual(op, x)
+            rbytes(b, op, x)
+        end
+        small, large = threaded_bytes(20), threaded_bytes(40)
+        @test large <= small + 512
+    finally
+        HK.WORK_PER_TASK[] = w
     end
-    small, large = threaded_bytes(40), threaded_bytes(80)            # 4 × more cells, the same number of tasks
-    @test large <= small + 1024
+end
+
+@testset "buffers shared by the operators update derives; block size fixed with the buffers" begin
+    # alternate assemblies of an operator and of one derived by `update` (same buffers), growing the tasks
+    p = elasticity_3d(; n=(3, 3, 2), order=2)
+    forms(s) = ((u, v) -> s * p.res(u, v), (u, du, v) -> s * p.jac(u, du, v))
+    op = KernelOperator(forms(1.0)..., p.U, p.V; nthreads=1)
+    op2 = update(op, forms(2.0)...)
+    @test op2.rgroups[1].work === op.rgroups[1].work
+    x = randx(p.U)
+    fresh(s) = KernelOperator(forms(s)..., p.U, p.V; nthreads=1)
+    b1, b2 = Algebra.residual(fresh(1.0), x), Algebra.residual(fresh(2.0), x)
+    A1, A2 = Algebra.jacobian(fresh(1.0), x), Algebra.jacobian(fresh(2.0), x)
+    for _ in 1:2
+        @test reldiff(Algebra.residual(op, x), b1) < 1e-14 && reldiff(Algebra.residual(op2, x), b2) < 1e-14
+        @test reldiff(Algebra.jacobian(op, x), A1) < 1e-14 && reldiff(Algebra.jacobian(op2, x), A2) < 1e-14
+    end
+    op4 = update(op, forms(2.0)...)
+    w = HK.WORK_PER_TASK[]
+    HK.WORK_PER_TASK[] = 1
+    try
+        op4t = KernelOperator(forms(2.0)..., p.U, p.V; nthreads=4)              # more tasks: buffer sets copied
+        @test reldiff(Algebra.jacobian(op4t, x), A2) < 1e-13
+    finally
+        HK.WORK_PER_TASK[] = w
+    end
+    # POINT_BLOCK changed after the operator was built: the buffers keep their block size (27 points per cell)
+    pb = HK.POINT_BLOCK[]
+    try
+        for qb in (0, 27, 5)
+            HK.POINT_BLOCK[] = qb
+            @test reldiff(Algebra.jacobian(op, x), A1) < 1e-13
+            @test reldiff(Algebra.jacobian(update(op, forms(1.0)...), x), A1) < 1e-13
+        end
+    finally
+        HK.POINT_BLOCK[] = pb
+    end
 end
 
 @testset "tuning switches read from the environment when the package is loaded" begin
     code = "using HyperFEMKernels; const H = HyperFEMKernels; print(H.MATRIX_PRODUCTS[], ' ', H.WORK_PER_TASK[], ' ', H.POINT_BLOCK[])"
     run_with(env...) = read(addenv(`$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) -e $code`, env...), String)
     @test run_with("HFK_MATRIX_PRODUCTS" => "0", "HFK_WORK_PER_TASK" => "500", "HFK_POINT_BLOCK" => "4") == "false 500 4"
-    @test run_with("HFK_MATRIX_PRODUCTS" => "1", "HFK_WORK_PER_TASK" => "x", "HFK_POINT_BLOCK" => "0") == "true 20000 0"
+    @test run_with("HFK_MATRIX_PRODUCTS" => "off", "HFK_WORK_PER_TASK" => "x", "HFK_POINT_BLOCK" => "0") == "false 20000 0"
+    @test run_with("HFK_MATRIX_PRODUCTS" => "", "HFK_WORK_PER_TASK" => "", "HFK_POINT_BLOCK" => "") == "true 20000 12"
+    # in the same process
+    old = get(ENV, "HFK_WORK_PER_TASK", nothing)
+    try
+        ENV["HFK_WORK_PER_TASK"] = "777"; HK.read_env_settings!()
+        @test HK.WORK_PER_TASK[] == 777
+    finally
+        old === nothing ? delete!(ENV, "HFK_WORK_PER_TASK") : (ENV["HFK_WORK_PER_TASK"] = old)
+        HK.read_env_settings!()
+    end
 end

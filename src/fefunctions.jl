@@ -126,9 +126,9 @@ assembly materialises it with the engine (`materialize_fe!`): the current free a
 values are read at every assembly, without evaluating Gridap's lazy tree.
 """
 mutable struct FEArray{T,FE} <: AbstractVector{Vector{T}}   # mutable: read from the untyped tuple of a group without a copy
-    lazy::AbstractArray      # Gridap's array (the same values, evaluated lazily)
-    fe::FE                   # FEData
-    n::Int                   # length (cells), stored: `size` without calling the untyped lazy array
+    const lazy::AbstractArray      # Gridap's array (the same values, evaluated lazily)
+    const fe::FE                   # FEData
+    const n::Int                   # length (cells), stored: `size` without calling the untyped lazy array
 end
 FEArray(a, fe::FEData) = FEArray{eltype(fe),typeof(fe)}(a, fe, length(a))
 Base.size(f::FEArray) = (f.n,)

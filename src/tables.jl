@@ -40,21 +40,21 @@ gradient is the tangential gradient `pinvJt(Jt) ⋅ ∇̂` that Gridap uses, so 
 change.
 """
 mutable struct GeoTable{D,JF}     # mutable: passed by reference (no boxing in dynamically dispatched calls)
-    np::Int
-    ng::Int
-    dM::Matrix{VectorValue{D,Float64}}      # np × ng, reference gradients (at the cell points), zero-padded to D
-    w::Vector{Float64}                       # np
-    coords::Matrix{VectorValue{D,Float64}}   # ng × ncells (of the integration triangulation)
-    Jf::JF
-    dc::Int                                  # dimension of the cells (dc < D: manifold)
-    ddM::Array{Float64,3}                    # D² × np × ng, reference Hessians of the geometric shape functions (column-major
+    const np::Int
+    const ng::Int
+    const dM::Matrix{VectorValue{D,Float64}}      # np × ng, reference gradients (at the cell points), zero-padded to D
+    const w::Vector{Float64}                       # np
+    const coords::Matrix{VectorValue{D,Float64}}   # ng × ncells (of the integration triangulation)
+    const Jf::JF
+    const dc::Int                                  # dimension of the cells (dc < D: manifold)
+    const ddM::Array{Float64,3}                    # D² × np × ng, reference Hessians of the geometric shape functions (column-major
                                              # entries of each D × D Hessian, zero-padded on manifold cells); concrete eltype
-    affine::Bool                             # the reference Hessians vanish (simplices): the cell maps are affine
-    Mv::Matrix{Float64}                      # np × ng, values of the geometric shape functions at the points (`point_coordinate`)
-    points::Base.RefValue{Union{Nothing,Tuple{Vector{Int32},Vector{Matrix{VectorValue{D,Float64}}}}}}
+    const affine::Bool                             # the reference Hessians vanish (simplices): the cell maps are affine
+    const Mv::Matrix{Float64}                      # np × ng, values of the geometric shape functions at the points (`point_coordinate`)
+    const points::Base.RefValue{Union{Nothing,Tuple{Vector{Int32},Vector{Matrix{VectorValue{D,Float64}}}}}}
                                              # nothing, or (columns integrated, point sets: Gridap's physical points
                                              # np × length(columns)), for the functions of x of the groups (`coord_points!`)
-    cellaff::Vector{Bool}                    # per column: the cell map is affine (Jt constant in the cell, `affine_cells`), so
+    const cellaff::Vector{Bool}                    # per column: the cell map is affine (Jt constant in the cell, `affine_cells`), so
                                              # the kernels compute Jt, inv(Jt) and the measure once per cell (`cell_geometry`)
 end
 

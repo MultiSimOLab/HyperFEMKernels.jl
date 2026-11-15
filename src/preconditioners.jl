@@ -202,7 +202,7 @@ function block_diagonal!(st::BlockJacobiState, mf::MatrixFreeJacobian; route::Sy
             end
         end
     else
-        dvals = dirichlet_values!(op)
+        dvals = refresh_dirichlet_values!(op)
         for g in op.jgroups
             run_cells!(Val(:blocks), nothing, st, op, g, mf.x, dvals)
         end

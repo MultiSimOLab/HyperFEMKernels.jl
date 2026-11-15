@@ -202,3 +202,18 @@ end
         @test (op1.rsig == op.rsig) == ((Λ0 == 0) == (Λ1 == 0))
     end
 end
+
+@testset "operations of the same closure type equal in one capture and different in the next" begin
+    p = poisson_2d(; order=1)
+    mk(a) = (r -> a * r)
+    forms(Λ) = ((u, v) -> ∫(∇(v) ⋅ ∇(u) + (mk(Λ) ∘ u) * v + (mk(2Λ) ∘ u) * v)p.dΩ,
+                (u, du, v) -> ∫(∇(v) ⋅ ∇(du) + (mk(Λ) ∘ du) * v + (mk(2Λ) ∘ du) * v)p.dΩ)
+    for (Λ0, Λ1) in ((0.0, 0.5), (0.5, 0.0), (0.5, 1.5))
+        op = KernelOperator(forms(Λ0)..., p.U, p.V)
+        x = randx(p.U); Algebra.residual(op, x)
+        op1 = update(op, forms(Λ1)...)
+        c = check(forms(Λ1)..., p.U, p.V, x; op=op1)
+        @test c.res < TOL && c.jac < TOL
+        @test (op1.rsig == op.rsig) == ((Λ0 == 0) == (Λ1 == 0))
+    end
+end

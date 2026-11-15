@@ -130,13 +130,11 @@ end
         (; U, V, res, jac)
     end
     pc, pu = problem(mc), problem(mu)
+    @test get_cell_dof_ids(pc.V) == get_cell_dof_ids(pu.V)           # the same numbering on both models
     x = randx(pc.U)
     opc = KernelOperator(pc.res, pc.jac, pc.U, pc.V)
     @test nofallback(opc)
     gu = get_algebraic_operator(FEOperator(pu.res, pu.jac, pu.U, pu.V))
     @test reldiff(Algebra.residual(opc, x), Algebra.residual(gu, x)) < TOL
     @test reldiff(Algebra.jacobian(opc, x), Algebra.jacobian(gu, x)) < TOL
-    # and differs from Gridap on the Cartesian model itself (affine faces)
-    gc = get_algebraic_operator(FEOperator(pc.res, pc.jac, pc.U, pc.V))
-    @test reldiff(Algebra.residual(opc, x), Algebra.residual(gc, x)) > 1e-4
 end

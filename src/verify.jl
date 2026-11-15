@@ -25,7 +25,7 @@ not allocate (requirement for GPU execution); a nonzero value points to the poin
 of the weak form (e.g. a constitutive law that builds dense matrices).
 """
 function allocations(op::KernelOperator, x::AbstractVector)
-    dvals = dirichlet_values!(op)
+    dvals = refresh_dirichlet_values!(op)
     out = NamedTuple{(:kind, :group, :bytes),Tuple{Symbol,Int,Int}}[]
     for (kind, groups) in ((:residual, op.rgroups), (:jacobian, op.jgroups)), (i, g) in enumerate(groups)
         push!(out, (kind=kind, group=i, bytes=_element_allocations(kind, op, g, x, dvals)))
