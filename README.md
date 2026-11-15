@@ -40,17 +40,26 @@ backend for its drivers (`backend = :compiled`).
   `BoundaryTriangulation(Ωsolid, tags = "Interface")`), with tangential gradients as in Gridap.
 - **Data in the form.** `FEFunction`s that are not the unknown (a previous state, a field interpolated
   from another physics or from boundary data), their gradients and their Hessians are evaluated by the engine from
-  their nodal values at every assembly, with the operations above them compiled into the integrand;
-  other `CellField`s are evaluated by Gridap once per assembly into dense buffers that are reused.
+  their nodal values at every assembly, with the operations above them compiled into the integrand.
+  Functions of the coordinates (`CellField(f, Ω)`, or a Julia function `f` used directly in the form,
+  also on boundaries, skeletons and subdomains) are evaluated by the engine as `f(x)` at the physical
+  quadrature points (Gridap's own points, read once), without allocations. Other `CellField`s (and, for
+  now, gradients of functions of x and functions of x passed to `update_states!`) are evaluated by Gridap
+  once per assembly into dense buffers that are reused.
 - **Threads, no allocations.** Cells are coloured so that the assembly loop is threaded without
   locks; element kernels allocate nothing (`allocations` reports it), which is also the
   requirement for GPU execution.
 - **Cheap updates.** Numbers in the weak form (load factors, time steps, material parameters) are
   run-time parameters: `update(op, res, jac)` with forms of the same structure (same measures,
-  operations and constants up to their values, same FE functions) rebinds the compiled groups —
+  operations and constants up to their values, same FE functions, functions of the coordinates of
+  the same type) rebinds the compiled groups —
   code, tables, sparsity pattern, colouring, linear maps and the dense auxiliary buffers are reused and
   only the values change; nothing is compiled or allocated per cell. A form of another structure is
   compiled again, still reusing tables, geometry and colouring. The same for `KernelFunctional`.
+  The type of an operation or of a function of the coordinates is structure, its captured values are
+  not: a closure created again with other captured values (`a -> (x -> a * x[1])`) is rebound and its
+  new values are used (not with `cache_aux = true`, whose buffers are never refilled), while a function
+  of another type (another closure, another named function) compiles again.
 - **Matrix-free Jacobian.** `MatrixFreeJacobian` applies `J(x)·dx` without assembling, with sum
   factorisation on quadrilaterals and hexahedra; `KernelOperator(…; jacobian = :matrixfree)` hands
   it to a Newton solver and `MatrixFreeSolver` (Krylov.jl) solves the tangent systems on it, with

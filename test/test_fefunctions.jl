@@ -118,7 +118,7 @@ end
 
 @testset "a subtree the reader cannot translate stays one Gridap array (no regression)" begin
     p = poisson_2d(; order=1)
-    g(x) = sin(x[1])                                                    # a function of x: Gridap data
+    g = CellField(collect(range(1.0, 2.0; length=num_cells(p.model))), p.Ω)   # cell-wise data: a Gridap array
     res(u, v) = ∫(∇(v) ⋅ ∇(u) - (g * v))p.dΩ
     op = KernelOperator(res, p.jac, p.U, p.V)
     @test isempty(fe_aux(op)) && length(gridap_aux(op)) == 1
