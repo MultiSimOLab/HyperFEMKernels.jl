@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **No allocation in repeated assemblies with one thread.** The element buffers of each task (and the local
+  dof vectors of FE functions in the form) are kept in the compiled groups (`GroupWork`) and reused, shared by
+  the groups `update` rebinds; the Dirichlet values are gathered into a vector of the operator; with one thread
+  (or one chunk) no task is spawned. `residual!` and `jacobian!` then allocate nothing when the auxiliary data
+  is evaluated by the engine (FE functions, functions of x); with threads only the tasks allocate, a fixed amount
+  per call. An operator is not reentrant: two assemblies of the same operator must not run at the same time.
+- `HFK_MATRIX_PRODUCTS`, `HFK_WORK_PER_TASK` and `HFK_POINT_BLOCK` are read when the package is loaded
+  (`__init__`), not frozen at precompilation; `HyperFEMKernels.read_env_settings!()` reads them again.
 - `update`: the structural signature records which auxiliary data share a slot. Gridap arrays that are equal
   in one capture and different in the next (e.g. gradients of two functions of x built from closures of the
   same type, `∇(CellField(make(Λ), Ω))`, with equal captured values at `Λ = 0`) no longer make `update` fail

@@ -182,3 +182,54 @@ end
         @test all(a -> a.bytes == 0, allocations(op, randx(prob.U)))
     end
 end
+
+@testset "repeated assembly with one thread allocates nothing (element buffers kept in the groups)" begin
+    # measured through functions with explicit arguments (closures over the test's variables box them)
+    rbytes(b, op, x) = (Algebra.residual!(b, op, x); Algebra.residual!(b, op, x); @allocated Algebra.residual!(b, op, x))
+    jbytes(A, op, x) = (Algebra.jacobian!(A, op, x); Algebra.jacobian!(A, op, x); (@allocated Algebra.jacobian!(A, op, x)))
+    # volume, Lagrangian P1/P2 2D and vector 3D, with an FE function and a function of x as data
+    for (p, extra) in ((poisson_2d(; order=1), true), (poisson_2d(; order=2, simplex=true), true), (elasticity_3d(), false))
+        Vw = TestFESpace(p.model, ReferenceFE(lagrangian, Float64, 1))
+        wh = interpolate(x -> 1 + x[1], Vw)
+        fx(x) = 2 + x[1] * x[2]
+        res = extra ? ((u, v) -> p.res(u, v) + ∫(wh * fx * (u ⋅ v))p.dΩ) : p.res
+        jac = extra ? ((u, du, v) -> p.jac(u, du, v) + ∫(wh * fx * (du ⋅ v))p.dΩ) : p.jac
+        op = KernelOperator(res, jac, p.U, p.V; nthreads=1)
+        x = randx(p.U); b = Algebra.residual(op, x); A = Algebra.jacobian(op, x)
+        @test rbytes(b, op, x) == 0
+        @test jbytes(A, op, x) == 0
+        c = check(res, jac, p.U, p.V, x; op)
+        @test c.res < TOL && c.jac < TOL
+    end
+    # boundary and skeleton groups
+    model = CartesianDiscreteModel((0, 1, 0, 1), (4, 4))
+    Ω = Triangulation(model); dΩ = Measure(Ω, 2)
+    Γ = BoundaryTriangulation(model); dΓ = Measure(Γ, 2)
+    Λ = SkeletonTriangulation(model); dΛ = Measure(Λ, 2)
+    V = TestFESpace(model, ReferenceFE(lagrangian, Float64, 1); conformity=:L2); U = TrialFESpace(V)
+    res(u, v) = ∫(u * v)dΩ + ∫(u * v)dΓ + ∫(jump(u) * jump(v))dΛ
+    jac(u, du, v) = res(du, v)
+    op = KernelOperator(res, jac, U, V; nthreads=1)
+    x = randx(U); b = Algebra.residual(op, x); A = Algebra.jacobian(op, x)
+    @test rbytes(b, op, x) == 0
+    @test jbytes(A, op, x) == 0
+    # the buffers are shared by the groups `update` rebinds: no new allocation after an update either
+    op2 = update(op, res, jac)
+    @test rbytes(b, op2, x) == 0
+    # with threads: a fixed amount per call (the tasks), the same for a mesh 9 × larger
+    function threaded_bytes(n)
+        p = poisson_2d(; n=(n, n), order=2)
+        op = KernelOperator(p.res, p.jac, p.U, p.V; nthreads=4)
+        x = randx(p.U); b = Algebra.residual(op, x)
+        rbytes(b, op, x)
+    end
+    small, large = threaded_bytes(40), threaded_bytes(80)            # 4 × more cells, the same number of tasks
+    @test large <= small + 1024
+end
+
+@testset "tuning switches read from the environment when the package is loaded" begin
+    code = "using HyperFEMKernels; const H = HyperFEMKernels; print(H.MATRIX_PRODUCTS[], ' ', H.WORK_PER_TASK[], ' ', H.POINT_BLOCK[])"
+    run_with(env...) = read(addenv(`$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) -e $code`, env...), String)
+    @test run_with("HFK_MATRIX_PRODUCTS" => "0", "HFK_WORK_PER_TASK" => "500", "HFK_POINT_BLOCK" => "4") == "false 500 4"
+    @test run_with("HFK_MATRIX_PRODUCTS" => "1", "HFK_WORK_PER_TASK" => "x", "HFK_POINT_BLOCK" => "0") == "true 20000 0"
+end

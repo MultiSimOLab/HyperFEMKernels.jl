@@ -54,7 +54,10 @@ backend for its drivers (`backend = :compiled`).
   package is loaded, disables the shortcut).
 - **Threads, no allocations.** Cells are coloured so that the assembly loop is threaded without
   locks; element kernels allocate nothing (`allocations` reports it), which is also the
-  requirement for GPU execution.
+  requirement for GPU execution. The element buffers are kept in the operator, so a repeated
+  `residual!`/`jacobian!` with one thread allocates nothing (with threads, only the tasks: a fixed
+  amount per call); auxiliary data left to Gridap (other `CellField`s) still allocates in Gridap. An
+  operator is not reentrant (do not assemble the same operator from two tasks at once).
 - **Cheap updates.** Numbers in the weak form (load factors, time steps, material parameters) are
   run-time parameters: `update(op, res, jac)` with forms of the same structure (same measures,
   operations and constants up to their values, same FE functions, functions of the coordinates of

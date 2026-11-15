@@ -39,7 +39,7 @@ cell (√det(Jt Jtᵀ) of the rectangular Jacobian) and `inv(Jt)` applied to a z
 gradient is the tangential gradient `pinvJt(Jt) ⋅ ∇̂` that Gridap uses, so the kernels need no other
 change.
 """
-struct GeoTable{D,JF}
+mutable struct GeoTable{D,JF}     # mutable: passed by reference (no boxing in dynamically dispatched calls)
     np::Int
     ng::Int
     dM::Matrix{VectorValue{D,Float64}}      # np × ng, reference gradients (at the cell points), zero-padded to D
