@@ -35,6 +35,31 @@ begin
         @test all(g -> g.lin === nothing, op.jgroups)   # dP(F, dF) is not linear in F: dual numbers
     end
 
+    @testset "Linear elasticity with the symmetric gradient, $(D)D, $(coef)" for D in (2, 3), coef in (:constant, :density)
+        # ε(u) is a SymTensorValue (D(D+1)/2 stored entries): the residual is compiled, not sent to Gridap.
+        # With a constant modulus it is linear in its state input ε(u) and gets a linear map; with a density
+        # coefficient E(ρh), as in SIMP, it is not linear in ρh and goes through dual numbers
+        model = CartesianDiscreteModel(D == 2 ? (0, 1, 0, 1) : (0, 1, 0, 1, 0, 1), D == 2 ? (6, 4) : (3, 2, 2))
+        Ω = Triangulation(model); dΩ = Measure(Ω, 2)
+        V = TestFESpace(model, ReferenceFE(lagrangian, VectorValue{D,Float64}, 1), dirichlet_tags="boundary")
+        U = TrialFESpace(V, x -> zero(VectorValue{D,Float64}))
+        Vρ = FESpace(model, ReferenceFE(lagrangian, Float64, 1))
+        ρh = FEFunction(Vρ, rand(num_free_dofs(Vρ)))
+        σ(e) = 0.6 * tr(e) * one(e) + 0.8 * e
+        E(ρ) = 1e-3 + ρ^3
+        c = coef === :constant ? 2.0 : (E ∘ ρh)
+        res(u, v) = ∫(c * (ε(v) ⊙ (σ ∘ ε(u))))dΩ
+        jac(u, du, v) = ∫(c * (ε(v) ⊙ (σ ∘ ε(du))))dΩ
+        x = rand(num_free_dofs(U))
+        op = @test_logs KernelOperator(res, jac, U, V)          # no fallback warning
+        @test op.fallback === nothing || (isempty(op.fallback.rtrians) && isempty(op.fallback.jtrians))
+        @test all(g -> (g.lin !== nothing) == (coef === :constant), op.rgroups)
+        r = check(res, jac, U, V, x; op)
+        @test r.res < TOL
+        @test r.jac < TOL
+        @test all(a -> a.bytes == 0, allocations(op, x))
+    end
+
     @testset "Hyperelasticity 3D P1 (tetrahedra)" begin
         model = simplexify(CartesianDiscreteModel((0, 1, 0, 1, 0, 1), (2, 2, 2)))
         Ω = Triangulation(model); dΩ = Measure(Ω, 2)
