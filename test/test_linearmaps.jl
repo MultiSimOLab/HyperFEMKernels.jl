@@ -116,3 +116,20 @@ end
     @test (opw0.jgroups[1].lin === nothing) == (opw1.jgroups[1].lin === nothing)
     c = check(resw(1.0), jacw(1.0), p.U, p.V, x; op=HK.update(opw0, resw(1.0), jacw(1.0))); @test c.res < TOL && c.jac < TOL
 end
+
+@testset "components of MultiValue inputs and parameters: the stored (independent) entries" begin
+    types = Any[VectorValue{3,Float64}, TensorValue{2,2,Float64,4}, SymTensorValue{2,Float64,3}, SymTensorValue{3,Float64,6},
+                SymFourthOrderTensorValue{2,Float64,9}, SymTracelessTensorValue{2,Float64,3}, SymTracelessTensorValue{3,Float64,6}]
+    isdefined(Gridap.TensorValues, :SkewSymTensorValue) && push!(types, Gridap.TensorValues.SkewSymTensorValue{3,Float64,3})
+    for T in types
+        n = HK.ncomp(T)
+        @test n == num_indep_components(T)
+        for k in 1:n
+            e = HK.unit_value(T, k)
+            @test e isa T && [HK.comp(e, j) for j in 1:n] == [j == k ? 1.0 : 0.0 for j in 1:n]
+        end
+        @test HK.rand_value(T) isa T
+        p = HK.random_param(zero(T))
+        @test p isa T && all(j -> 0.5 <= HK.comp(p, j) <= 1.5, 1:n)
+    end
+end

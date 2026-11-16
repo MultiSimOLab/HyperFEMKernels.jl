@@ -68,11 +68,13 @@ end
 comp(x::Real, k) = x
 comp(x::MultiValue, k) = x.data[k]
 ncomp(::Type{<:Real}) = 1
-ncomp(::Type{T}) where {T<:MultiValue} = length(T)
+# components of a state input in storage order (`x.data`): the independent ones, so a symmetric tensor
+# (`SymTensorValue{D}`, D(D+1)/2 entries) is not taken as D² (that made the residual fall back to Gridap)
+ncomp(::Type{T}) where {T<:MultiValue} = Gridap.TensorValues.num_indep_components(T)
 unit_value(::Type{<:Real}, k) = 1.0
-unit_value(::Type{T}, k) where {T<:MultiValue} = T(ntuple(i -> i == k ? 1.0 : 0.0, length(T)))
+unit_value(::Type{T}, k) where {T<:MultiValue} = T(ntuple(i -> i == k ? 1.0 : 0.0, ncomp(T)))
 rand_value(::Type{<:Real}) = rand()
-rand_value(::Type{T}) where {T<:MultiValue} = T(ntuple(_ -> rand(), length(T)))
+rand_value(::Type{T}) where {T<:MultiValue} = T(ntuple(_ -> rand(), ncomp(T)))
 
 "Types of `FV[f]` (value, gradient and, for nodal fields, Hessian) of a field."
 field_types(::FieldTable{D,Float64}) where {D} = (Float64, VectorValue{D,Float64}, TensorValue{D,D,Float64,D * D})
@@ -278,7 +280,7 @@ function random_params(ops::Tuple, consts::Vector{Int})
     Tuple(i in consts ? random_param(o) : o for (i, o) in enumerate(ops))
 end
 random_param(x::AbstractFloat) = typeof(x)(0.5 + rand())
-random_param(x::MultiValue) = eltype(x) <: AbstractFloat ? typeof(x)(Tuple(0.5 + rand() for _ in 1:length(x.data))) : x
+random_param(x::MultiValue) = eltype(x) <: AbstractFloat ? typeof(x)(Tuple(0.5 + rand() for _ in 1:ncomp(typeof(x)))) : x
 random_param(x) = x            # integers (e.g. exponents), booleans: structural, kept
 
 """

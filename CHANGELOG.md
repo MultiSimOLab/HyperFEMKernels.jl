@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Symmetric tensors in the linear maps.** The number of components of a state input or parameter was taken as
+  `length(T)`, which for `SymTensorValue{D}` is D² while the value stores D(D+1)/2 entries (and
+  `SymTracelessTensorValue` one less). Building the unit inputs threw, so every residual with the symmetric
+  gradient `ε(u)` (linear elasticity) was assembled by Gridap through the hybrid fallback, and a traceless
+  constant sent the whole form there. The linear maps now use the independent components, in the storage order
+  of `x.data`.
 - **No allocation in repeated assemblies with one thread.** The element buffers of each task (and the local
   dof vectors of FE functions in the form) are kept in the compiled groups (`GroupWork`) and reused, shared by
   the groups `update` rebinds; the Dirichlet values are gathered into a vector of the operator; with one thread
