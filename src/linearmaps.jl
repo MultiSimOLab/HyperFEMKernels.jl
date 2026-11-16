@@ -280,7 +280,7 @@ function random_params(ops::Tuple, consts::Vector{Int})
     Tuple(i in consts ? random_param(o) : o for (i, o) in enumerate(ops))
 end
 random_param(x::AbstractFloat) = typeof(x)(0.5 + rand())
-random_param(x::MultiValue) = eltype(x) <: AbstractFloat ? typeof(x)(Tuple(0.5 + rand() for _ in 1:length(x.data))) : x
+random_param(x::MultiValue) = eltype(x) <: AbstractFloat ? typeof(x)(Tuple(0.5 + rand() for _ in 1:ncomp(typeof(x)))) : x
 random_param(x) = x            # integers (e.g. exponents), booleans: structural, kept
 
 """

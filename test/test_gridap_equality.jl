@@ -37,8 +37,9 @@ begin
 
     @testset "Linear elasticity with the symmetric gradient, $(D)D, $(coef)" for D in (2, 3), coef in (:constant, :density)
         # ε(u) is a SymTensorValue (D(D+1)/2 stored entries): the residual is compiled, not sent to Gridap.
-        # With a constant modulus it is linear in its state input ε(u) and gets a linear map; with a density
-        # coefficient E(ρh), as in SIMP, it is not linear in ρh and goes through dual numbers
+        # With a constant modulus it is linear in its state input σ(ε(u)) and gets a linear map; with a density
+        # coefficient, as in SIMP, the term is the product of two state inputs, E(ρh) and σ(ε(u)), so it is not
+        # linear in them and goes through dual numbers
         model = CartesianDiscreteModel(D == 2 ? (0, 1, 0, 1) : (0, 1, 0, 1, 0, 1), D == 2 ? (6, 4) : (3, 2, 2))
         Ω = Triangulation(model); dΩ = Measure(Ω, 2)
         V = TestFESpace(model, ReferenceFE(lagrangian, VectorValue{D,Float64}, 1), dirichlet_tags="boundary")
@@ -58,6 +59,58 @@ begin
         @test r.res < TOL
         @test r.jac < TOL
         @test all(a -> a.bytes == 0, allocations(op, x))
+    end
+
+    @testset "Symmetric tensors in the form, $(D)D" for D in (2, 3)
+        # SymTensorValue / SymTracelessTensorValue store fewer entries than D²: state inputs of the Jacobian,
+        # off-diagonal entries against a full tensor, auxiliary data, constants and `update`
+        model = CartesianDiscreteModel(D == 2 ? (0, 1, 0, 1) : (0, 1, 0, 1, 0, 1), D == 2 ? (5, 4) : (3, 2, 2))
+        Ω = Triangulation(model); dΩ = Measure(Ω, 2)
+        V = TestFESpace(model, ReferenceFE(lagrangian, VectorValue{D,Float64}, 1), dirichlet_tags="boundary")
+        U = TrialFESpace(V, x -> 0.01 * x)
+        L = D * (D + 1) ÷ 2
+        σ(e) = 0.6 * tr(e) * one(e) + 0.8 * e
+        x = rand(num_free_dofs(U))
+        nofallback(op) = op.fallback === nothing || (isempty(op.fallback.rtrians) && isempty(op.fallback.jtrians))
+        function same(res, jac; jlin = nothing)
+            op = KernelOperator(res, jac, U, V)
+            r = check(res, jac, U, V, x; op)
+            ok = nofallback(op) && r.res < TOL && r.jac < TOL
+            jlin === nothing || (ok &= all(g -> (g.lin !== nothing) == jlin, op.jgroups))
+            ok
+        end
+        # Jacobian with ε(u) as a state input: linear map
+        @test same((u, v) -> ∫(0.5 * (ε(u) ⊙ ε(u)) * tr(ε(v)))dΩ, (u, du, v) -> ∫((ε(u) ⊙ ε(du)) * tr(ε(v)))dΩ; jlin = true)
+        # off-diagonal entries of ε(u) against a full tensor and a vector
+        w = VectorValue(ntuple(i -> Float64(i), D))
+        @test same((u, v) -> ∫(∇(v) ⊙ ε(u) + (ε(u) ⋅ v) ⋅ w)dΩ, (u, du, v) -> ∫(∇(v) ⊙ ε(du) + (ε(du) ⋅ v) ⋅ w)dΩ)
+        # auxiliary data: a SymTensorValue FE function, ε of an FE function, a function of x, a constant
+        Vs = FESpace(model, ReferenceFE(lagrangian, SymTensorValue{D,Float64}, 1))
+        σh = FEFunction(Vs, rand(num_free_dofs(Vs)))
+        uh0 = FEFunction(V, rand(num_free_dofs(V)))
+        @test same((u, v) -> ∫(ε(v) ⊙ σh + ε(v) ⊙ (σ ∘ ε(uh0)) + ε(v) ⊙ ε(u))dΩ,
+                   (u, du, v) -> ∫((σh ⊙ ε(du)) * (σh ⊙ ε(v)) + ε(v) ⊙ ε(du))dΩ)
+        fx(p) = SymTensorValue{D,Float64,L}(ntuple(i -> p[1] + i, L))
+        S0 = SymTensorValue{D,Float64,L}(ntuple(i -> 0.3 + i, L))
+        @test same((u, v) -> ∫(ε(v) ⊙ fx + ε(v) ⊙ S0 + (S0 ⊙ ε(u)) * tr(ε(v)))dΩ,
+                   (u, du, v) -> ∫((S0 ⊙ ε(du)) * tr(ε(v)) + (fx ⊙ ε(du)) * (S0 ⊙ ε(v)))dΩ)
+        # a traceless constant (its random parameters must have the independent entries only)
+        Q0 = SymTracelessTensorValue{D,Float64,L}(ntuple(i -> 0.3 + i, L - 1))
+        @test same((u, v) -> ∫(ε(v) ⊙ Q0 + (Q0 ⊙ ε(u)) * tr(ε(v)))dΩ, (u, du, v) -> ∫((Q0 ⊙ ε(du)) * tr(ε(v)))dΩ)
+        # update with symmetric state inputs and new constants
+        function forms(a, b)
+            s(e) = a * tr(e) * one(e) + b * e
+            r(u, v) = ∫(b * (ε(v) ⊙ (s ∘ ε(u))) + a * ((S0 ⊙ ε(u)) * tr(ε(v))))dΩ
+            j(u, du, v) = ∫(b * (ε(v) ⊙ (s ∘ ε(du))) + a * ((ε(u) ⊙ ε(du)) * tr(ε(v))))dΩ
+            r, j
+        end
+        r1, j1 = forms(0.6, 0.8); r2, j2 = forms(1.7, 0.3)
+        op = KernelOperator(r1, j1, U, V)
+        op2 = update(op, r2, j2)
+        c = check(r2, j2, U, V, x; op=op2)
+        @test c.res < TOL && c.jac < TOL && nofallback(op2)
+        @test all(((g2, g),) -> g2.pf.core === g.pf.core, zip(vcat(op2.rgroups, op2.jgroups), vcat(op.rgroups, op.jgroups)))
+        @test all(a -> a.bytes == 0, allocations(op2, x))
     end
 
     @testset "Hyperelasticity 3D P1 (tetrahedra)" begin
