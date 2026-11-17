@@ -1,0 +1,101 @@
+name: Latest dependencies
+# Weekly run of the tests against the newest dependency versions allowed by [compat], in particular new
+# Gridap patch releases: the engine reads Gridap's internals, so a patch release can break it even though
+# it is inside [compat]. On a scheduled failure GitHub e-mails the author of the last change to the
+# schedule below, and the `report` job opens an issue (or comments on the open one).
+# Releases outside [compat] (a new Gridap minor series) are not tested here: CompatHelper opens a pull
+# request for them. For the CI workflow to run on that pull request, CompatHelper must push with the
+# DOCUMENTER_KEY deploy key (a pull request created with GITHUB_TOKEN triggers no workflows).
+on:
+  schedule:
+    - cron: '17 7 * * 1'   # Mondays, 07:17 UTC (after CompatHelper; off the hour to avoid queue delays)
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/LatestDependencies.yml'   # validate changes to this workflow
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}   # never cancel a scheduled run
+jobs:
+  # Same three groups as the CI workflow (HFK_TEST_GROUP, see test/runtests.jl), on one platform.
+  test:
+    name: ${{ matrix.group }} tests - Julia 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [core, hdiv, hessian]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+      - uses: julia-actions/cache@v2
+      # The Manifest is not versioned, but the cached registry may be stale: update it, resolve the newest
+      # compatible versions and list them in the job summary.
+      - name: Resolve the newest compatible versions
+        run: |
+          julia --project -e 'using Pkg; Pkg.Registry.update(); Pkg.update()'
+          { echo '```'; julia --project -e 'using Pkg; Pkg.status(); println("\nHeld back:"); Pkg.status(outdated=true)'; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: julia-actions/julia-runtest@v1
+        env:
+          JULIA_NUM_THREADS: 2
+          HFK_TEST_GROUP: ${{ matrix.group }}
+  hyperfem:
+    name: HyperFEM weak forms - Julia 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: HyperFEMKernels.jl
+      - uses: actions/checkout@v4
+        with:
+          repository: MultiSimOLab/HyperFEM
+          ref: main
+          path: HyperFEM.jl
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+      - uses: julia-actions/cache@v2
+      - name: Set up environment with the newest compatible versions
+        run: |
+          julia -e 'using Pkg; Pkg.Registry.update()'
+          julia HyperFEMKernels.jl/test/hyperfem/setup.jl
+          julia --project=HyperFEMKernels.jl/test/hyperfem -e 'using Pkg; Pkg.update()'
+          { echo '```'; julia --project=HyperFEMKernels.jl/test/hyperfem -e 'using Pkg; Pkg.status(); println("\nHeld back:"); Pkg.status(outdated=true)'; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Run HyperFEM weak-form tests
+        run: julia -t 2 --project=HyperFEMKernels.jl/test/hyperfem HyperFEMKernels.jl/test/hyperfem/runtests.jl
+  # Scheduled runs only: open an issue on failure, or comment on the one already open. A job that hits
+  # timeout-minutes (e.g. a hang after a Gridap release) ends as `cancelled`, not `failure`, so both count.
+  report:
+    name: Report failure
+    needs: [test, hyperfem]
+    if: >-
+      !cancelled() && github.event_name == 'schedule' &&
+      (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Weekly tests with the latest dependencies are failing"
+          n=$(gh issue list --state open --search "\"$title\" in:title" --json number,title \
+                --jq "map(select(.title == \"$title\")) | .[0].number // empty")
+          if [ -n "$n" ]; then
+            gh issue comment "$n" --body "Still failing on $(date -u +%F): $RUN_URL"
+          else
+            gh issue create --title "$title" --body "The weekly run against the newest dependency versions allowed by \`[compat]\` (and HyperFEM \`main\` for the weak-form tests) failed or timed out on $(date -u +%F): $RUN_URL
+
+          The summary of each job lists the package versions it used and those held back. Close this issue once the tests pass again.
+
+          cc @jmartfrut"
+          fi
