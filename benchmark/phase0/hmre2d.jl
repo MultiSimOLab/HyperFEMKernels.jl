@@ -25,7 +25,7 @@ meshfile(r) = r === nothing ? MESH_ORIG : joinpath(@__DIR__, "..", "meshes", "hm
 # Original implementation (hMRE_2D.jl): inverse of the right stretch tensor via matrix sqrt.
 function invU_sqrt(F; ε=1e-12)
     F_ = get_array(F)
-    I2_ = get_array(I2)
+    I2_ = get_array(I2D)
     S = F_' * F_
     Sreg = S + ε * I2_
     Sroot = sqrt(Sreg)
@@ -34,9 +34,9 @@ end
 
 # Closed form in 2D: U = (C + √det C · I) / √(tr C + 2√det C), with C = FᵀF (+ εI as above).
 function invU_closed(F; ε=1e-12)
-    C = transpose(F) ⋅ F + ε * I2
+    C = transpose(F) ⋅ F + ε * I2D
     s = sqrt(det(C))
-    U = (C + s * I2) / sqrt(tr(C) + 2s)
+    U = (C + s * I2D) / sqrt(tr(C) + 2s)
     return inv(U)
 end
 

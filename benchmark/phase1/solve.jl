@@ -67,7 +67,7 @@ function hmre_solve(r, backend)
     Nh = interpolate_everywhere(x -> VectorValue(1.0, 0.0), V_N)
     Bah = interpolate_everywhere(VectorValue([0.0, -Banorm]), V_N)
     function invU(F; ε=1e-12)   # original implementation (matrix square root)
-        F_ = get_array(F); S = F_' * F_ + ε * get_array(I2)
+        F_ = get_array(F); S = F_' * F_ + ε * get_array(I2D)
         TensorValue(inv(sqrt(S)))
     end
     ∂Ψmag∂F(Fn, N, Ba) = (-αr / μ0) * (Ba ⊗ ((invU(Fn)) * N))

@@ -88,9 +88,9 @@ function hmre(r::Real, rv::Real=2; hybrid::Bool=false, Bfactor::Real=1.0)
     # (the matrix-sqrt form of the original script builds dense matrices; a local function with keyword
     # arguments is called dynamically by Julia and allocates too, see `allocations(op, x)`)
     function invU(F)
-        C = transpose(F) ⋅ F + 1e-12 * I2
+        C = transpose(F) ⋅ F + 1e-12 * I2D
         s = sqrt(det(C))
-        inv((C + s * I2) / sqrt(tr(C) + 2s))
+        inv((C + s * I2D) / sqrt(tr(C) + 2s))
     end
     ∂Ψmag∂F(Fn, N, Ba) = (-αr / μ0) * (Ba ⊗ ((invU(Fn)) * N))
     res(Λ) = (u, v) -> ∫((∇(v)' ⊙ (∂Ψs∂F ∘ (F ∘ (∇(u)'), Nh))))dΩs + Λ * ∫((∂Ψmag∂F ∘ (F ∘ (∇(uh⁻)'), Nh, Bah)) ⊙ (∇(v)'))dΩs
