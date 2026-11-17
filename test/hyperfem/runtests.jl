@@ -56,8 +56,8 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
         # integrand (re-read at every assembly), ∂Ψmag∂F compiled with it
         # (the original script's `invU(F; ε=1e-12)`: a local function with keyword arguments is called
         # dynamically by Julia and allocates in the element kernel, which `allocations` reports)
-        invU0(F) = (F_ = get_array(F); TensorValue(inv(sqrt(F_' * F_ + 1e-12 * get_array(I2)))))   # original (matrix sqrt)
-        invU(F) = (C = transpose(F) ⋅ F + 1e-12 * I2; s = sqrt(det(C)); inv((C + s * I2) / sqrt(tr(C) + 2s)))  # closed form, 2D
+        invU0(F) = (F_ = get_array(F); TensorValue(inv(sqrt(F_' * F_ + 1e-12 * get_array(I2D)))))   # original (matrix sqrt)
+        invU(F) = (C = transpose(F) ⋅ F + 1e-12 * I2D; s = sqrt(det(C)); inv((C + s * I2D) / sqrt(tr(C) + 2s)))  # closed form, 2D
         Λ = 0.35
         jac(u, du, v) = ∫(∇(v)' ⊙ ((∂Ψs∂FF ∘ (F ∘ (∇(u)'), Nh)) ⊙ (∇(du)')))dΩs
         x = 1e-4 .* randn(num_free_dofs(U))
