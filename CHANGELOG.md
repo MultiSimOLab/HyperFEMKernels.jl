@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.5
 
 - **Symmetric tensors in the linear maps.** The number of components of a state input or parameter was taken as
   `length(T)`, which for `SymTensorValue{D}` is D² while the value stores D(D+1)/2 entries (and
