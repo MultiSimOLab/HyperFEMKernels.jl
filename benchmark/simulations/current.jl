@@ -1,5 +1,5 @@
-# Times HyperFEM's simulation tests (test/SimulationsTests of the HyperFEM next to this package, branch
-# kernel-backend) and backend = :lazy and :compiled. Each run twice; the second (warm) time is
+# Times HyperFEM's simulation tests (test/SimulationsTests of the HyperFEM next to this package) with
+# backend = :lazy and :compiled. Each run twice; the second (warm) time is
 # reported, with the convergence value, so that it can be compared with official.jl.
 #   julia -t auto --project=benchmark benchmark/simulations/current.jl
 using HyperFEMKernels, HyperFEM, Gridap, LinearAlgebra, Printf
