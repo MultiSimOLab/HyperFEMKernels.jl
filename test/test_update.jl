@@ -218,69 +218,83 @@ end
     end
 end
 
-# Linear maps on the fast path: a term whose operations are bitwise identical keeps its map only if its control
-# evaluation gives exactly the stored coefficients. Operations that read mutable data (a `Ref`, a non-`const`
-# global) are the same object while their values change: the control evaluation must catch it.
+# Linear maps on the fast path: their values are re-evaluated at every `update` (exactly, with the new values of
+# the operations), also when an operation reads mutable data (a `Ref`, a non-`const` global) or when a change is
+# much smaller than other entries of the same row. The values equal those of an operator built from scratch.
 const UPD_MU = Ref(1.0)
 σ_ref(ε) = 2 * UPD_MU[] * ε + 3.0 * tr(ε) * one(ε)       # a singleton function reading a global Ref
 upd_lambda = 3.0                                          # a non-const global
 σ_glob(ε) = 2.0 * ε + upd_lambda * tr(ε) * one(ε)
 σ_mk(μ) = ε -> 2μ * ε + 3.0 * tr(ε) * one(ε)              # an isbits closure: the value is part of the operation
-"Per linear group of the Jacobian (and the residual), whether each map of `op2` is the same object as in `op`."
-reused(op2, op) = [g2.lin.maps[i] === g.lin.maps[i] for (g2, g) in zip(vcat(op2.rgroups, op2.jgroups), vcat(op.rgroups, op.jgroups))
-                   if g.lin !== nothing for i in eachindex(g.lin.maps)]
+const UPD_BIG = Ref(1e20)
+const UPD_A = Ref(1.0)
+h_abs(s1, s2, d) = (UPD_BIG[] * s1 + UPD_A[] * s2) * d   # a change of UPD_A absorbed by rounding at any single point
 
-@testset "update: linear maps reused only when the operations and their values are unchanged" begin
+@testset "update: linear maps re-evaluated exactly with the new values of the operations" begin
     p = elasticity_3d(; n=(2, 2, 2))
     εs(w) = 0.5 * (∇(w) + ∇(w)')
     forms(σ, c) = ((u, v) -> ∫(εs(v) ⊙ (σ ∘ εs(u)) + c * (u ⋅ v))p.dΩ,
                    (u, du, v) -> ∫(εs(v) ⊙ (σ ∘ εs(du)) + c * (du ⋅ v))p.dΩ)
     x = randx(p.U)
-    fresh_ok(op, fs) = (c = check(fs..., p.U, p.V, x; op); c.res < UTOL && c.jac < UTOL)
-
-    # nothing changes: every map is reused, and the operator equals a fresh one
+    function same_as_fresh_maps(op2, fs)
+        fresh = KernelOperator(fs..., p.U, p.V)
+        c = check(fs..., p.U, p.V, x; op=op2)
+        Af = Algebra.jacobian(fresh, x)
+        # same residual and Jacobian as Gridap and as a fresh operator (the maps of an operator built where an entry
+        # is zero, e.g. μ = 0, may store fewer entries than the updated ones: same values, other layout)
+        c.res < UTOL && c.jac < UTOL && reldiff(Algebra.jacobian(op2, x), Af) < UTOL
+    end
     op = KernelOperator(forms(σ_mk(1.0), 0.5)..., p.U, p.V)
     @test all(g -> g.lin !== nothing, op.jgroups)
     op1 = update(op, forms(σ_mk(1.0), 0.5)...)
-    @test shared(op1, op) && all(reused(op1, op))
-    @test fresh_ok(op1, forms(σ_mk(1.0), 0.5))
-
-    # a number inside the integrand changes: only the map of the term that reads it is evaluated again
-    op2 = update(op1, forms(σ_mk(1.0), 0.7)...)
-    r = reused(op2, op1)
-    @test any(r) && !all(r) && fresh_ok(op2, forms(σ_mk(1.0), 0.7))
-
-    # a captured value changes: that term's map is evaluated again, the other term keeps its map
-    op3 = update(op2, forms(σ_mk(2.0), 0.7)...)
-    r = reused(op3, op2)
-    @test any(r) && !all(r) && fresh_ok(op3, forms(σ_mk(2.0), 0.7))
-
-    # -0.0 and 0.0 are different bits: evaluated again, same values
-    op4 = update(op3, forms(σ_mk(-0.0), 0.7)...); op5 = update(op4, forms(σ_mk(0.0), 0.7)...)
-    @test fresh_ok(op5, forms(σ_mk(0.0), 0.7))
-
-    # the same singleton function reading a global Ref whose value changes: identical operations, new values
+    @test shared(op1, op) && same_as_fresh_maps(op1, forms(σ_mk(1.0), 0.5))
+    @test same_as_fresh_maps(update(op1, forms(σ_mk(1.0), 0.7)...), forms(σ_mk(1.0), 0.7))      # a number in the integrand
+    @test same_as_fresh_maps(update(op1, forms(σ_mk(2.0), 0.5)...), forms(σ_mk(2.0), 0.5))      # a captured value
+    @test same_as_fresh_maps(update(update(op1, forms(σ_mk(-0.0), 0.5)...), forms(σ_mk(0.0), 0.5)...), forms(σ_mk(0.0), 0.5))
     UPD_MU[] = 1.0
     opr = KernelOperator(forms(σ_ref, 0.5)..., p.U, p.V)
-    @test all(reused(update(opr, forms(σ_ref, 0.5)...), opr))       # unchanged: reused
     UPD_MU[] = 4.0
-    opr2 = update(opr, forms(σ_ref, 0.5)...)
-    @test !all(reused(opr2, opr)) && fresh_ok(opr2, forms(σ_ref, 0.5))
+    @test same_as_fresh_maps(update(opr, forms(σ_ref, 0.5)...), forms(σ_ref, 0.5))              # a global Ref changed
     UPD_MU[] = 1.0
-
-    # a non-const global read by the operation
     global upd_lambda = 3.0
     opg = KernelOperator(forms(σ_glob, 0.5)..., p.U, p.V)
     global upd_lambda = 7.5
-    opg2 = update(opg, forms(σ_glob, 0.5)...)
-    @test !all(reused(opg2, opg)) && fresh_ok(opg2, forms(σ_glob, 0.5))
+    @test same_as_fresh_maps(update(opg, forms(σ_glob, 0.5)...), forms(σ_glob, 0.5))            # a non-const global changed
     global upd_lambda = 3.0
+    μv = [1.0]; σv = ε -> 2μv[1] * ε + 3.0 * tr(ε) * one(ε)
+    opv = KernelOperator(forms(σv, 0.5)..., p.U, p.V); μv[1] = 5.0
+    @test same_as_fresh_maps(update(opv, forms(σv, 0.5)...), forms(σv, 0.5))                    # a captured array changed in place
 
-    # a closure capturing an array modified in place (not isbits): always evaluated again
-    μv = [1.0]
-    σv = ε -> 2μv[1] * ε + 3.0 * tr(ε) * one(ε)
-    opv = KernelOperator(forms(σv, 0.5)..., p.U, p.V)
-    μv[1] = 5.0
-    opv2 = update(opv, forms(σv, 0.5)...)
-    @test fresh_ok(opv2, forms(σv, 0.5))
+    # a state input (an FE function) in the term and a change much smaller than another entry of the row
+    q = poisson_2d(; n=(4, 4))
+    U0 = TrialFESpace(q.V, 0.0)                                  # u = 0 everywhere: J = UPD_A × mass
+    W = TestFESpace(q.model, ReferenceFE(lagrangian, Float64, 1)); wh = interpolate(x -> 1.0, W)
+    res(u, v) = ∫(v * (h_abs ∘ (u, wh, u)))q.dΩ
+    jac(u, du, v) = ∫(v * (h_abs ∘ (u, wh, du)))q.dΩ
+    x0 = zeros(num_free_dofs(U0))
+    UPD_BIG[] = 1e20; UPD_A[] = 1.0
+    opa = KernelOperator(res, jac, U0, q.V); A1 = Algebra.jacobian(opa, x0)
+    UPD_A[] = 2.0
+    A2 = Algebra.jacobian(update(opa, res, jac), x0)
+    @test any(g -> g.lin !== nothing, opa.jgroups)
+    @test reldiff(A2, Algebra.jacobian(KernelOperator(res, jac, U0, q.V), x0)) < UTOL && norm(A2) ≈ 2norm(A1)
+    UPD_A[] = 1.0
+end
+
+@testset "tasks for the auxiliary arrays filled by the engine (aux_tasks, HFK_AUX_WORK_PER_TASK)" begin
+    w = HK.AUX_WORK_PER_TASK[]
+    @test w == 512                                                 # default (the environment of the tests does not set it)
+    @test HK.aux_tasks(4, 0, 8) == 1 && HK.aux_tasks(4, 10, 0) == 1 && HK.aux_tasks(1, 10^6, 8) == 1
+    @test HK.aux_tasks(4, 63, 8) == 1 && HK.aux_tasks(4, 64, 8) == 1 && HK.aux_tasks(4, 128, 8) == 2
+    @test HK.aux_tasks(4, 256, 8) == 4 && HK.aux_tasks(4, 10^6, 8) == 4    # large meshes: one task per thread, as before
+    HK.AUX_WORK_PER_TASK[] = 0                                     # a nonpositive value set by hand: no division by zero
+    @test HK.aux_tasks(4, 10, 8) == 4
+    HK.AUX_WORK_PER_TASK[] = w
+    withenv("HFK_AUX_WORK_PER_TASK" => "100") do
+        HK.read_env_settings!(); @test HK.AUX_WORK_PER_TASK[] == 100
+    end
+    withenv("HFK_AUX_WORK_PER_TASK" => "0") do
+        HK.read_env_settings!(); @test HK.AUX_WORK_PER_TASK[] == 1
+    end
+    HK.read_env_settings!(); @test HK.AUX_WORK_PER_TASK[] == w
 end
