@@ -204,14 +204,14 @@ end
 end
 
 @testset "no allocation: the engine fill allocates nothing and the assembly as much as without a function of x" begin
-    function bytes(n; coord=true)
+    function bytes(n; coord=true, nthreads=Threads.nthreads())
         model = CartesianDiscreteModel((0, 1, 0, 1, 0, 1), (n, n, n))
         Ω = Triangulation(model); dΩ = Measure(Ω, 2)
         V0 = TestFESpace(model, ReferenceFE(lagrangian, Float64, 0); conformity=:L2); U0 = TrialFESpace(V0)
         V1 = TestFESpace(model, ReferenceFE(lagrangian, Float64, 1))
         uf = FEFunction(V1, rand(num_free_dofs(V1)))
         c = coord ? CellField(x -> 1 + x[1], Ω) : interpolate(x -> 1 + x[1], V1)
-        op = KernelOperator((u, v) -> ∫(2 * c * uf * v)dΩ, (u, du, v) -> ∫(0.0 * du * v)dΩ, U0, V0; jacobian=:matrixfree)
+        op = KernelOperator((u, v) -> ∫(2 * c * uf * v)dΩ, (u, du, v) -> ∫(0.0 * du * v)dΩ, U0, V0; jacobian=:matrixfree, nthreads)
         b = zeros(num_free_dofs(V0)); x0 = zeros(num_free_dofs(U0))
         Algebra.residual!(b, op, x0); Algebra.residual!(b, op, x0)
         if coord
@@ -222,9 +222,17 @@ end
         end
         @allocated Algebra.residual!(b, op, x0)
     end
-    small, large = bytes(4), bytes(12)                                # 27 × more cells
-    @test large <= small + 256                                        # no allocation per cell (the number of tasks may differ)
-    @test large <= bytes(12; coord=false) + 512                       # same per-call buffers as with an FE function
+    # one thread: no task, nothing allocated on any mesh
+    @test bytes(4; nthreads=1) == 0 && bytes(12; nthreads=1) == 0
+    # a mesh below the minimum work per task (64 cells × 8 points = AUX_WORK_PER_TASK) is filled without tasks
+    # with any number of threads: nothing allocated
+    @test 64 * 8 <= HK.AUX_WORK_PER_TASK[] && bytes(4; nthreads=4) == 0
+    # with tasks: no allocation per cell, only per task. Both meshes are above the thresholds of the auxiliary fill
+    # (AUX_WORK_PER_TASK) and of the assembly (WORK_PER_TASK), so they run with the same number of tasks
+    nt = min(4, Threads.nthreads())
+    small, large = bytes(28; nthreads=nt), bytes(36; nthreads=nt)      # 2.1 × more cells
+    @test large <= small + 256
+    @test large <= bytes(36; coord=false, nthreads=nt) + 512          # same per-call buffers as with an FE function
 end
 
 @testset "update: same function, other captured values, other function" begin

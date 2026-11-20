@@ -44,17 +44,24 @@ const SparseMap = Vector{Tuple{Int32,Int32,Int32,Float64}}
 debug_linear() = get(ENV, "HFK_DEBUG_LINEAR", "0") == "1"    # read at run time (when an operator is built)
 _nolin(why) = (debug_linear() && println("HyperFEMKernels: linear-map shortcut not used: ", why); nothing)
 
-"One additive term of a linear form: its generated slot function with the data to re-evaluate its map."
+"""
+One additive term of a linear form: its generated slot function with the data to re-evaluate its map.
+
+`probe` is a fixed generic value of the state inputs and `fprint` the slot coefficients of the term at it
+(computed directly, not through the map). `update` keeps the map of a term whose operations are bitwise
+identical (`===`, isbits) to the previous ones only if the term still gives exactly `fprint` at `probe`:
+operations that read mutable data (a non-`const` global, a `Ref`) are identical as objects while their
+values change, and the control evaluation sees it.
+"""
 struct LinearTerm
     lin::Any                   # (ops, S, sv, su) -> slot-dependent value of the term
     lops::Tuple                # its operations (parameters at `consts`)
     consts::Vector{Int}
     types::Vector{DataType}    # types of its state inputs
     gidx::Vector{Int}          # global index of each state input
+    probe::Tuple               # control point (one value per state input)
+    fprint::Vector{Float64}    # slot coefficients of the term at `probe`
 end
-
-"EXPERIMENT small-problem-overhead: reuse the values of a linear map on `update` when its parameters are unchanged."
-const REUSE_MAPS = Ref(true)
 
 struct LinearForm{F,O,C,ST,AP,VT}
     state::F            # (ops, FV, A) -> tuple of all state inputs of the group
@@ -173,7 +180,8 @@ function LinearForm(terms0::Vector{Term}, pf::PointForm, tables, aux::Tuple, kin
         end
         m isa String && return _nolin("term $i $m")
         push!(maps, m)
-        push!(lterms, LinearTerm(lin, lops, consts, types, gidx))
+        probe = Tuple(rand_value(T) for T in types)
+        push!(lterms, LinearTerm(lin, lops, consts, types, gidx, probe, coeffs(probe, lops)))
     end
     apply = generate_apply(maps, ST, kind === :res ? nsv : nsv * nsu)
     vals = map_values(maps, coefs)
@@ -204,18 +212,21 @@ function LinearForm(terms0::Vector{Term}, pf::PointForm, tables, aux::Tuple, old
         _, lops, consts = term_parts(t, gidx, inputs, pf)
         typeof(lops) == typeof(ot.lops) && consts == ot.consts && gidx == ot.gidx ||
             error("HyperFEMKernels: the weak form changed its structure (rebinding the linear maps of another structure)")
-        if REUSE_MAPS[] && isbits(lops) && lops === ot.lops
-            # same parameters, bit by bit (EXPERIMENT small-problem-overhead): the values of the map cannot have changed
-            push!(maps, old.maps[i])
+        coeffs(S) = slot_coeffs(ot.lin, lops, S, nsv, nsu, old.kind)
+        fp = coeffs(ot.probe)                                  # control evaluation (one point)
+        if isbits(lops) && lops === ot.lops && same_bits(fp, ot.fprint)
+            push!(maps, old.maps[i])                           # same operations, same values: the map is unchanged
         else
-            coeffs(S) = slot_coeffs(ot.lin, lops, S, nsv, nsu, old.kind)
             push!(maps, map_with_values(old.maps[i], coeffs, ot.types, gidx))
         end
-        push!(lterms, LinearTerm(ot.lin, lops, consts, ot.types, gidx))
+        push!(lterms, LinearTerm(ot.lin, lops, consts, ot.types, gidx, ot.probe, fp))
     end
     vals = map_values(maps, coefs)
     LinearForm{F,O,C,ST,typeof(old.apply),typeof(vals)}(old.state, ops, coefs, maps, old.apply, vals, ex, lterms, old.kind)
 end
+
+"Bitwise equality of two coefficient vectors (`===` per entry: -0.0 ≠ 0.0, NaN = NaN with the same bits)."
+same_bits(a::Vector{Float64}, b::Vector{Float64}) = length(a) == length(b) && all(i -> a[i] === b[i], eachindex(a))
 
 "The map `m` (positions kept) with its values re-evaluated: constant entries from zero inputs, the others from unit inputs."
 function map_with_values(m::SparseMap, coeffs, types, gidx)

@@ -7,6 +7,12 @@ const EMPTY_SLOTS = SVector{0,Float64}()
 const MATRIX_PRODUCTS = Ref(true)
 "Minimum work per task of the threaded assembly, in points × element-matrix entries (`HFK_WORK_PER_TASK`, default 20000)."
 const WORK_PER_TASK = Ref(20000)
+"""
+Minimum number of quadrature points per task when the auxiliary arrays (FE functions, functions of the
+coordinates, other `CellField`s) are filled and when internal variables are updated (`HFK_AUX_WORK_PER_TASK`,
+default 512): small meshes are filled without tasks, larger ones with as many tasks as before.
+"""
+const AUX_WORK_PER_TASK = Ref(512)
 
 "Global numbering of one field: cell dof ids of test and trial spaces and offsets."
 struct FieldLayout
@@ -760,10 +766,8 @@ function materialize_aux!(vals::AUX, g::Group{NSV,NSU,PF,TT,AUX}, nthreads::Int)
     vals
 end
 
-"EXPERIMENT small-problem-overhead: minimum number of cells per task when auxiliary arrays are filled (0 = as on main)."
-const AUX_CELLS_PER_TASK = Ref(64)
-"Number of tasks to fill an auxiliary array of `n` columns with `nt` threads."
-aux_tasks(nt::Int, n::Int) = AUX_CELLS_PER_TASK[] <= 0 ? nt : clamp(n ÷ AUX_CELLS_PER_TASK[], 1, nt)
+"Number of tasks to fill an auxiliary array of `ncols` columns of `np` points with `nt` threads: at least `AUX_WORK_PER_TASK` points per task."
+aux_tasks(nt::Int, ncols::Int, np::Int) = clamp((ncols * np) ÷ AUX_WORK_PER_TASK[], 1, max(1, nt))
 
 # One auxiliary array of a group: one task (no spawn, no allocation) or one per chunk of cells.
 function materialize_one!(M::Matrix, a::CoordArray, g::Group, nt::Int, k::Int)
@@ -771,7 +775,7 @@ function materialize_one!(M::Matrix, a::CoordArray, g::Group, nt::Int, k::Int)
     # only on the columns the group integrates (a boundary group: the faces of its class)
     np = g.geo.np
     ncols = length(g.geo.points[][1])
-    nt = aux_tasks(nt, ncols)
+    nt = aux_tasks(nt, ncols, np)
     if nt == 1 || ncols <= 1
         materialize_coord!(M, a, 1:ncols, np, g.geo)
     else
@@ -786,7 +790,7 @@ function materialize_one!(M::Matrix, a::FEArray, g::Group, nt::Int, k::Int)
     # cell integrals at the points of the FE leaf's basis table; anything else (boundary integrals,
     # other points) takes Gridap's lazy array, which gives the same values
     (g.geo.Jf === nothing && length(a) == ncells && size(a.fe.N, 1) == np) || return materialize_gridap!(M, a, g, nt)
-    nt = aux_tasks(nt, ncells)
+    nt = aux_tasks(nt, ncells, np)
     if nt == 1 || ncells <= 1
         materialize_fe!(M, a, 1:ncells, np, g.geo, fe_buffer(g, k, 1, a))
     else
@@ -804,7 +808,7 @@ materialize_one!(M::Matrix, a, g::Group, nt::Int, k::Int) = materialize_gridap!(
 function materialize_gridap!(M::Matrix, a, g::Group, nt::Int)
     a isa StateColumns && return M               # a KernelState (states.jl): its matrix is the dense value
     np, ncells = g.geo.np, size(g.geo.coords, 2)
-    nt = aux_tasks(nt, ncells)
+    nt = aux_tasks(nt, ncells, np)
     if nt == 1 || ncells <= 1
         _materialize!(M, a, 1:ncells, np)
     else
@@ -1173,6 +1177,7 @@ end
 function read_env_settings!()
     MATRIX_PRODUCTS[] = env_flag("HFK_MATRIX_PRODUCTS", true)
     WORK_PER_TASK[] = max(1, env_int("HFK_WORK_PER_TASK", 20000))
+    AUX_WORK_PER_TASK[] = max(1, env_int("HFK_AUX_WORK_PER_TASK", 512))
     POINT_BLOCK[] = env_int("HFK_POINT_BLOCK", 12)
     AFFINE_GEOMETRY[] = affine_geometry_from_env()
     nothing
