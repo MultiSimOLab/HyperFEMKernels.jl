@@ -53,6 +53,9 @@ struct LinearTerm
     gidx::Vector{Int}          # global index of each state input
 end
 
+"EXPERIMENT small-problem-overhead: reuse the values of a linear map on `update` when its parameters are unchanged."
+const REUSE_MAPS = Ref(true)
+
 struct LinearForm{F,O,C,ST,AP,VT}
     state::F            # (ops, FV, A) -> tuple of all state inputs of the group
     ops::O
@@ -201,8 +204,13 @@ function LinearForm(terms0::Vector{Term}, pf::PointForm, tables, aux::Tuple, old
         _, lops, consts = term_parts(t, gidx, inputs, pf)
         typeof(lops) == typeof(ot.lops) && consts == ot.consts && gidx == ot.gidx ||
             error("HyperFEMKernels: the weak form changed its structure (rebinding the linear maps of another structure)")
-        coeffs(S) = slot_coeffs(ot.lin, lops, S, nsv, nsu, old.kind)
-        push!(maps, map_with_values(old.maps[i], coeffs, ot.types, gidx))
+        if REUSE_MAPS[] && isbits(lops) && lops === ot.lops
+            # same parameters, bit by bit (EXPERIMENT small-problem-overhead): the values of the map cannot have changed
+            push!(maps, old.maps[i])
+        else
+            coeffs(S) = slot_coeffs(ot.lin, lops, S, nsv, nsu, old.kind)
+            push!(maps, map_with_values(old.maps[i], coeffs, ot.types, gidx))
+        end
         push!(lterms, LinearTerm(ot.lin, lops, consts, ot.types, gidx))
     end
     vals = map_values(maps, coefs)
