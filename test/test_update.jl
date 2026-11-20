@@ -217,3 +217,70 @@ end
         @test (op1.rsig == op.rsig) == ((Λ0 == 0) == (Λ1 == 0))
     end
 end
+
+# Linear maps on the fast path: a term whose operations are bitwise identical keeps its map only if its control
+# evaluation gives exactly the stored coefficients. Operations that read mutable data (a `Ref`, a non-`const`
+# global) are the same object while their values change: the control evaluation must catch it.
+const UPD_MU = Ref(1.0)
+σ_ref(ε) = 2 * UPD_MU[] * ε + 3.0 * tr(ε) * one(ε)       # a singleton function reading a global Ref
+upd_lambda = 3.0                                          # a non-const global
+σ_glob(ε) = 2.0 * ε + upd_lambda * tr(ε) * one(ε)
+σ_mk(μ) = ε -> 2μ * ε + 3.0 * tr(ε) * one(ε)              # an isbits closure: the value is part of the operation
+"Per linear group of the Jacobian (and the residual), whether each map of `op2` is the same object as in `op`."
+reused(op2, op) = [g2.lin.maps[i] === g.lin.maps[i] for (g2, g) in zip(vcat(op2.rgroups, op2.jgroups), vcat(op.rgroups, op.jgroups))
+                   if g.lin !== nothing for i in eachindex(g.lin.maps)]
+
+@testset "update: linear maps reused only when the operations and their values are unchanged" begin
+    p = elasticity_3d(; n=(2, 2, 2))
+    εs(w) = 0.5 * (∇(w) + ∇(w)')
+    forms(σ, c) = ((u, v) -> ∫(εs(v) ⊙ (σ ∘ εs(u)) + c * (u ⋅ v))p.dΩ,
+                   (u, du, v) -> ∫(εs(v) ⊙ (σ ∘ εs(du)) + c * (du ⋅ v))p.dΩ)
+    x = randx(p.U)
+    fresh_ok(op, fs) = (c = check(fs..., p.U, p.V, x; op); c.res < UTOL && c.jac < UTOL)
+
+    # nothing changes: every map is reused, and the operator equals a fresh one
+    op = KernelOperator(forms(σ_mk(1.0), 0.5)..., p.U, p.V)
+    @test all(g -> g.lin !== nothing, op.jgroups)
+    op1 = update(op, forms(σ_mk(1.0), 0.5)...)
+    @test shared(op1, op) && all(reused(op1, op))
+    @test fresh_ok(op1, forms(σ_mk(1.0), 0.5))
+
+    # a number inside the integrand changes: only the map of the term that reads it is evaluated again
+    op2 = update(op1, forms(σ_mk(1.0), 0.7)...)
+    r = reused(op2, op1)
+    @test any(r) && !all(r) && fresh_ok(op2, forms(σ_mk(1.0), 0.7))
+
+    # a captured value changes: that term's map is evaluated again, the other term keeps its map
+    op3 = update(op2, forms(σ_mk(2.0), 0.7)...)
+    r = reused(op3, op2)
+    @test any(r) && !all(r) && fresh_ok(op3, forms(σ_mk(2.0), 0.7))
+
+    # -0.0 and 0.0 are different bits: evaluated again, same values
+    op4 = update(op3, forms(σ_mk(-0.0), 0.7)...); op5 = update(op4, forms(σ_mk(0.0), 0.7)...)
+    @test fresh_ok(op5, forms(σ_mk(0.0), 0.7))
+
+    # the same singleton function reading a global Ref whose value changes: identical operations, new values
+    UPD_MU[] = 1.0
+    opr = KernelOperator(forms(σ_ref, 0.5)..., p.U, p.V)
+    @test all(reused(update(opr, forms(σ_ref, 0.5)...), opr))       # unchanged: reused
+    UPD_MU[] = 4.0
+    opr2 = update(opr, forms(σ_ref, 0.5)...)
+    @test !all(reused(opr2, opr)) && fresh_ok(opr2, forms(σ_ref, 0.5))
+    UPD_MU[] = 1.0
+
+    # a non-const global read by the operation
+    global upd_lambda = 3.0
+    opg = KernelOperator(forms(σ_glob, 0.5)..., p.U, p.V)
+    global upd_lambda = 7.5
+    opg2 = update(opg, forms(σ_glob, 0.5)...)
+    @test !all(reused(opg2, opg)) && fresh_ok(opg2, forms(σ_glob, 0.5))
+    global upd_lambda = 3.0
+
+    # a closure capturing an array modified in place (not isbits): always evaluated again
+    μv = [1.0]
+    σv = ε -> 2μv[1] * ε + 3.0 * tr(ε) * one(ε)
+    opv = KernelOperator(forms(σv, 0.5)..., p.U, p.V)
+    μv[1] = 5.0
+    opv2 = update(opv, forms(σv, 0.5)...)
+    @test fresh_ok(opv2, forms(σv, 0.5))
+end
