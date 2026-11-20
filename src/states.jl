@@ -283,13 +283,9 @@ function materialize_state_aux(su::StateUpdate{F,O,FE,ST,NW,AUX}, nthreads::Int)
         a = su.aux[k].array
         a isa StateColumns && return a.M
         M = Matrix{eltype(eltype(a))}(undef, su.np, su.ncells)
-        nt = aux_tasks(nthreads, su.ncells, su.np)
-        if nt == 1
-            _materialize!(M, a, 1:su.ncells, su.np)
-        else
-            @sync for ch in Iterators.partition(1:su.ncells, cld(su.ncells, nt))
-                Threads.@spawn _materialize!(M, a, ch, su.np)
-            end
+        chunks = collect(Iterators.partition(1:su.ncells, cld(su.ncells, max(1, nthreads))))
+        @sync for ch in chunks
+            Threads.@spawn _materialize!(M, a, ch, su.np)
         end
         M
     end

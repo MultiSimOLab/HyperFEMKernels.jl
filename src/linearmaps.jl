@@ -44,23 +44,13 @@ const SparseMap = Vector{Tuple{Int32,Int32,Int32,Float64}}
 debug_linear() = get(ENV, "HFK_DEBUG_LINEAR", "0") == "1"    # read at run time (when an operator is built)
 _nolin(why) = (debug_linear() && println("HyperFEMKernels: linear-map shortcut not used: ", why); nothing)
 
-"""
-One additive term of a linear form: its generated slot function with the data to re-evaluate its map.
-
-`probe` is a fixed generic value of the state inputs and `fprint` the slot coefficients of the term at it
-(computed directly, not through the map). `update` keeps the map of a term whose operations are bitwise
-identical (`===`, isbits) to the previous ones only if the term still gives exactly `fprint` at `probe`:
-operations that read mutable data (a non-`const` global, a `Ref`) are identical as objects while their
-values change, and the control evaluation sees it.
-"""
+"One additive term of a linear form: its generated slot function with the data to re-evaluate its map."
 struct LinearTerm
     lin::Any                   # (ops, S, sv, su) -> slot-dependent value of the term
     lops::Tuple                # its operations (parameters at `consts`)
     consts::Vector{Int}
     types::Vector{DataType}    # types of its state inputs
     gidx::Vector{Int}          # global index of each state input
-    probe::Tuple               # control point (one value per state input)
-    fprint::Vector{Float64}    # slot coefficients of the term at `probe`
 end
 
 struct LinearForm{F,O,C,ST,AP,VT}
@@ -82,7 +72,7 @@ ncomp(::Type{<:Real}) = 1
 # (`SymTensorValue{D}`, D(D+1)/2 entries) is not taken as D² (that made the residual fall back to Gridap)
 ncomp(::Type{T}) where {T<:MultiValue} = Gridap.TensorValues.num_indep_components(T)
 unit_value(::Type{<:Real}, k) = 1.0
-unit_value(::Type{T}, k) where {T<:MultiValue} = T(ntuple(i -> i == k ? 1.0 : 0.0, ncomp(T)))
+unit_value(::Type{T}, k) where {T<:MultiValue} = T(ntuple(i -> i == k ? 1.0 : 0.0, Val(ncomp(T))))
 rand_value(::Type{<:Real}) = rand()
 rand_value(::Type{T}) where {T<:MultiValue} = T(ntuple(_ -> rand(), ncomp(T)))
 
@@ -180,8 +170,7 @@ function LinearForm(terms0::Vector{Term}, pf::PointForm, tables, aux::Tuple, kin
         end
         m isa String && return _nolin("term $i $m")
         push!(maps, m)
-        probe = Tuple(rand_value(T) for T in types)
-        push!(lterms, LinearTerm(lin, lops, consts, types, gidx, probe, coeffs(probe, lops)))
+        push!(lterms, LinearTerm(lin, lops, consts, types, gidx))
     end
     apply = generate_apply(maps, ST, kind === :res ? nsv : nsv * nsu)
     vals = map_values(maps, coefs)
@@ -213,20 +202,12 @@ function LinearForm(terms0::Vector{Term}, pf::PointForm, tables, aux::Tuple, old
         typeof(lops) == typeof(ot.lops) && consts == ot.consts && gidx == ot.gidx ||
             error("HyperFEMKernels: the weak form changed its structure (rebinding the linear maps of another structure)")
         coeffs(S) = slot_coeffs(ot.lin, lops, S, nsv, nsu, old.kind)
-        fp = coeffs(ot.probe)                                  # control evaluation (one point)
-        if isbits(lops) && lops === ot.lops && same_bits(fp, ot.fprint)
-            push!(maps, old.maps[i])                           # same operations, same values: the map is unchanged
-        else
-            push!(maps, map_with_values(old.maps[i], coeffs, ot.types, gidx))
-        end
-        push!(lterms, LinearTerm(ot.lin, lops, consts, ot.types, gidx, ot.probe, fp))
+        push!(maps, map_with_values(old.maps[i], coeffs, ot.types, gidx))
+        push!(lterms, LinearTerm(ot.lin, lops, consts, ot.types, gidx))
     end
     vals = map_values(maps, coefs)
     LinearForm{F,O,C,ST,typeof(old.apply),typeof(vals)}(old.state, ops, coefs, maps, old.apply, vals, ex, lterms, old.kind)
 end
-
-"Bitwise equality of two coefficient vectors (`===` per entry: -0.0 ≠ 0.0, NaN = NaN with the same bits)."
-same_bits(a::Vector{Float64}, b::Vector{Float64}) = length(a) == length(b) && all(i -> a[i] === b[i], eachindex(a))
 
 "The map `m` (positions kept) with its values re-evaluated: constant entries from zero inputs, the others from unit inputs."
 function map_with_values(m::SparseMap, coeffs, types, gidx)
@@ -324,13 +305,20 @@ function generate_apply(maps::Vector{SparseMap}, ST, N::Int)
     RuntimeGeneratedFunction(@__MODULE__, @__MODULE__, ex)
 end
 
-"Slot coefficients (vector for :res, vec of the matrix for :jac) of a linear part for inputs `S`."
-function slot_coeffs(lin, lops, S, nsv, nsu, kind)
-    zsv = zeros(SVector{nsv,Float64})
-    if kind === :res
+"""
+Slot coefficients (vector for :res, vec of the matrix for :jac) of a linear part for inputs `S`.
+
+The slot counts and the kind go to a method specialised on them (function barrier): with plain `Int`s the
+static vectors and the dual numbers had no inferable type and every evaluation dispatched dynamically,
+which made the re-evaluation of the maps in `update` dominate small problems. Same operations, same values.
+"""
+slot_coeffs(lin, lops, S, nsv, nsu, kind) = _slot_coeffs(lin, lops, S, Val(nsv), Val(nsu), Val(kind))
+function _slot_coeffs(lin, lops, S, ::Val{NV}, ::Val{NU}, ::Val{K}) where {NV,NU,K}
+    zsv = zeros(SVector{NV,Float64})
+    if K === :res
         return collect(ForwardDiff.gradient(v -> lin(lops, S, v, SVector{0,Float64}()), zsv))
     end
-    zsu = zeros(SVector{nsu,Float64})
+    zsu = zeros(SVector{NU,Float64})
     vec(collect(ForwardDiff.jacobian(w -> ForwardDiff.gradient(v -> lin(lops, S, v, w), zsv), zsu)))   # [test slot, trial slot]
 end
 

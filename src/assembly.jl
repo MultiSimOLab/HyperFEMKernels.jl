@@ -8,9 +8,11 @@ const MATRIX_PRODUCTS = Ref(true)
 "Minimum work per task of the threaded assembly, in points × element-matrix entries (`HFK_WORK_PER_TASK`, default 20000)."
 const WORK_PER_TASK = Ref(20000)
 """
-Minimum number of quadrature points per task when the auxiliary arrays (FE functions, functions of the
-coordinates, other `CellField`s) are filled and when internal variables are updated (`HFK_AUX_WORK_PER_TASK`,
-default 512): small meshes are filled without tasks, larger ones with as many tasks as before.
+Minimum number of quadrature points per task when the engine fills the auxiliary arrays it evaluates itself (FE
+functions and functions of the coordinates, whose cost per point is small and bounded; `HFK_AUX_WORK_PER_TASK`,
+default 512): below `AUX_WORK_PER_TASK` points no task is spawned, from `AUX_WORK_PER_TASK × nthreads` points on there
+are as many tasks as threads. Arrays evaluated by Gridap (arbitrary operations, e.g. on `CellState`s, with unbounded
+cost per point) keep one task per thread.
 """
 const AUX_WORK_PER_TASK = Ref(512)
 
@@ -767,7 +769,7 @@ function materialize_aux!(vals::AUX, g::Group{NSV,NSU,PF,TT,AUX}, nthreads::Int)
 end
 
 "Number of tasks to fill an auxiliary array of `ncols` columns of `np` points with `nt` threads: at least `AUX_WORK_PER_TASK` points per task."
-aux_tasks(nt::Int, ncols::Int, np::Int) = clamp((ncols * np) ÷ AUX_WORK_PER_TASK[], 1, max(1, nt))
+aux_tasks(nt::Int, ncols::Int, np::Int) = clamp((ncols * np) ÷ max(1, AUX_WORK_PER_TASK[]), 1, max(1, nt))
 
 # One auxiliary array of a group: one task (no spawn, no allocation) or one per chunk of cells.
 function materialize_one!(M::Matrix, a::CoordArray, g::Group, nt::Int, k::Int)
@@ -808,7 +810,6 @@ materialize_one!(M::Matrix, a, g::Group, nt::Int, k::Int) = materialize_gridap!(
 function materialize_gridap!(M::Matrix, a, g::Group, nt::Int)
     a isa StateColumns && return M               # a KernelState (states.jl): its matrix is the dense value
     np, ncells = g.geo.np, size(g.geo.coords, 2)
-    nt = aux_tasks(nt, ncells, np)
     if nt == 1 || ncells <= 1
         _materialize!(M, a, 1:ncells, np)
     else
