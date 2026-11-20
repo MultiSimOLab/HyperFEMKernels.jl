@@ -760,12 +760,18 @@ function materialize_aux!(vals::AUX, g::Group{NSV,NSU,PF,TT,AUX}, nthreads::Int)
     vals
 end
 
+"EXPERIMENT small-problem-overhead: minimum number of cells per task when auxiliary arrays are filled (0 = as on main)."
+const AUX_CELLS_PER_TASK = Ref(64)
+"Number of tasks to fill an auxiliary array of `n` columns with `nt` threads."
+aux_tasks(nt::Int, n::Int) = AUX_CELLS_PER_TASK[] <= 0 ? nt : clamp(n ÷ AUX_CELLS_PER_TASK[], 1, nt)
+
 # One auxiliary array of a group: one task (no spawn, no allocation) or one per chunk of cells.
 function materialize_one!(M::Matrix, a::CoordArray, g::Group, nt::Int, k::Int)
     # a function of the coordinates kept by `engine_aux`: f at Gridap's points stored with the geometry,
     # only on the columns the group integrates (a boundary group: the faces of its class)
     np = g.geo.np
     ncols = length(g.geo.points[][1])
+    nt = aux_tasks(nt, ncols)
     if nt == 1 || ncols <= 1
         materialize_coord!(M, a, 1:ncols, np, g.geo)
     else
@@ -780,6 +786,7 @@ function materialize_one!(M::Matrix, a::FEArray, g::Group, nt::Int, k::Int)
     # cell integrals at the points of the FE leaf's basis table; anything else (boundary integrals,
     # other points) takes Gridap's lazy array, which gives the same values
     (g.geo.Jf === nothing && length(a) == ncells && size(a.fe.N, 1) == np) || return materialize_gridap!(M, a, g, nt)
+    nt = aux_tasks(nt, ncells)
     if nt == 1 || ncells <= 1
         materialize_fe!(M, a, 1:ncells, np, g.geo, fe_buffer(g, k, 1, a))
     else
@@ -797,6 +804,7 @@ materialize_one!(M::Matrix, a, g::Group, nt::Int, k::Int) = materialize_gridap!(
 function materialize_gridap!(M::Matrix, a, g::Group, nt::Int)
     a isa StateColumns && return M               # a KernelState (states.jl): its matrix is the dense value
     np, ncells = g.geo.np, size(g.geo.coords, 2)
+    nt = aux_tasks(nt, ncells)
     if nt == 1 || ncells <= 1
         _materialize!(M, a, 1:ncells, np)
     else
