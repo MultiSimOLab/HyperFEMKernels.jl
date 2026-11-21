@@ -41,9 +41,10 @@ For each case and thread count, two numbers of the compiled backend and one of m
 - **compiled / Gridap**: in the same process (the state of the machine cancels), for the branch and for main.
   FAIL when the whole interval of the branch is above 1.02, or above the limit of an exception;
 - **bytes per call**: the minimum over the samples. FAIL when the branch allocates more than main + 256 B for a
-  call whose bytes are deterministic (assemblies, products, state updates), 5 % + 64 KiB more for other calls
-  (builds, `update`, pattern build: ~2.5 % between processes with the same code) or 10 % + 1 MiB more for a
-  simulation (~5 % between processes);
+  call whose bytes are deterministic (assemblies, products, state updates). For other calls (builds, `update`,
+  pattern build) and simulations the bytes change between processes running the same code (up to 25 % for a
+  pattern build in the A/A runs), so more than 5 % + 64 KiB (calls) or 10 % + 1 MiB (simulations) is reported as
+  a warning, not a failure;
 - **results**: a norm of the result of each case, branch against main (relative 1e-10 for calls, 1e-7 for
   simulations; a non-finite result of the branch fails);
 - **informative**: cold latency (build and first call, one sample per process), the deterministic facts of the
@@ -73,14 +74,20 @@ A/A experiment of 2026-11-21), so the unit of evidence is a pair of processes, n
 2. Suspect cases (branch/main above 1.03, or 1.25 under 5 ms; compiled/Gridap above its limit) are measured by 2
    more pairs of processes, which build the groups of those cases and warm up and measure only them. With
    `--cases`, every selected case gets the extra pairs.
+   The pairs of stage 2 load only the suspect cases (less memory in use than the first pair); main and branch are
+   affected alike.
 3. Verdict per case on the t interval over the pairs (`stats.jl`): FAIL when the whole interval is above the
    limit, PASS when it is below, INCONCLUSIVE otherwise (then repeat with more pairs, as the report says). The
    smallest regression stage 1 catches has not been measured; a regression of a few per cent can pass it when the
    bias of that pair goes the other way.
 
 Before the measurements the gate waits (up to 10 min) for the other processes to use less than one core; `--force`
-measures anyway and says so in the report. The two environments must have the same Julia, HyperFEM and Gridap
-(checked; the report gives the versions). BLAS threads are left at their default (what users get); the report
+measures anyway and says so in the report. The two environments must resolve the same packages (every version in
+the Manifests, except HyperFEMKernels itself: checked before measuring).
+
+Calls under 5 ms use a 25 % threshold (their bias between processes reached ~24 % in the A/A runs); a case that
+measures slower without reaching its threshold shows it in the verdict column ("ok (+10 %, under the 25 %
+threshold)"). Their regressions are guarded mainly by the deterministic checks of the test suite. BLAS threads are left at their default (what users get); the report
 gives them.
 
 ## Exceptions

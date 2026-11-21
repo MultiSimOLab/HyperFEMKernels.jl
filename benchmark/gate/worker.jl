@@ -75,7 +75,7 @@ for id in copy(ORDER)
     c = CASES[id]
     progress("warm-up of $id")
     try
-        tk = minimum(@elapsed(c.kernel()) for _ in 1:2)
+        tk = minimum(@elapsed(c.kernel()) for _ in 1:(INJECT > 0 ? 5 : 2))
         tg = c.gridap === nothing ? 0.0 : minimum(@elapsed(c.gridap()) for _ in 1:2)
         TEST[id] = tk
         BATCHK[id] = batch_size(tk)

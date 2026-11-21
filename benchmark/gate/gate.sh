@@ -91,6 +91,6 @@ case $status in
   0) v=PASS ;; 1) v=FAIL ;; 3) v=INCONCLUSIVE ;; *) v="could not run (exit $status)"; status=2 ;;
 esac
 ln -sfn "$OUT" "$W/latest"
-echo "gate.sh: $v in $mins min — report $OUT/report.md"
+[ -f "$OUT/report.md" ] && echo "gate.sh: $v in $mins min — report $OUT/report.md" || echo "gate.sh: $v in $mins min — see $OUT/logs/driver.log"
 notify "$label: $v ($mins min)"
 exit $status

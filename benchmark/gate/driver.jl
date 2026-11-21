@@ -256,7 +256,10 @@ function analyse(nt, id)
         pest, plo, phi = interval(parb)
         pv = length(parb) == 1 ? (parb[1] <= plim ? :pass : :inconclusive) : verdict(plo, phi, plim)
     end
-    mv = bk_b <= bytes_limit(kind, exact, bk_m) ? :pass : :fail
+    # memory: a FAIL for deterministic bytes (assemblies, products); a warning otherwise (builds, pattern builds and
+    # simulations allocate amounts that change between processes running the same code, up to 25 % in the A/A runs)
+    mem_over = bk_b > bytes_limit(kind, exact, bk_m)
+    mv = mem_over && exact ? :fail : :pass
     vm = get(VALUES, (nt, 1, "main", id), NaN); vb = get(VALUES, (nt, 1, "branch", id), NaN)
     dv = !isfinite(vm) ? NaN : !isfinite(vb) ? Inf : abs(vb - vm) / max(abs(vm), 1e-300)   # NaN: not compared
     vv = isnan(dv) || dv <= value_tol(kind) ? :pass : :fail
@@ -264,7 +267,7 @@ function analyse(nt, id)
     (id=id, threads=nt, kind=kind, hasg=hasg, npairs=length(rat), t_main=t_main, t_branch=median(tb), g_main=hasg ? median(gm) : NaN,
      g_branch=hasg ? median(gb) : NaN, est=est, lo=lo, hi=hi, limit=lim, tv=tv, ctl=isempty(ctl) ? NaN : gmean(ctl),
      par_main=isempty(parm) ? NaN : gmean(parm), pest=pest, plo=plo, phi=phi, plimit=plim, pv=pv, bk_m=bk_m, bk_b=bk_b, bg_m=bg_m, mv=mv,
-     dv=dv, vv=vv, overall=overall)
+     dv=dv, vv=vv, overall=overall, mem_warn=mem_over && !exact)
 end
 "Suspect after stage 1: worth the extra pairs of stage 2."
 function suspect(nt, id)
@@ -285,7 +288,11 @@ function why(a)
     a.pv === :inconclusive && push!(w, "parity with Gridap undecided")
     a.mv === :fail && push!(w, "memory $(fmt_b(a.bk_m)) → $(fmt_b(a.bk_b))")
     a.vv === :fail && push!(w, @sprintf("results differ (%.1e)", a.dv))
-    isempty(w) ? (a.est < 0.97 && a.npairs >= 1 ? @sprintf("ok (%+.0f %%)", 100(a.est - 1)) : "ok") : join(w, "; ")
+    a.mem_warn && push!(w, "memory $(fmt_b(a.bk_m)) → $(fmt_b(a.bk_b)) (warning: not deterministic)")
+    isempty(w) || a.overall === :pass || return join(w, "; ")
+    s = a.est < 0.97 ? @sprintf("ok (%+.0f %%)", 100(a.est - 1)) :
+        a.est > 1.03 ? @sprintf("ok (%+.0f %%, under the %.0f %% threshold)", 100(a.est - 1), 100(a.limit - 1)) : "ok"
+    isempty(w) ? s : s * "; " * join(w, "; ")
 end
 function report(results, errors, meta, minutes)
     nf = count(a -> a.overall === :fail, results) + length(errors)
@@ -408,6 +415,16 @@ function main()
     errors = String[]
     if !FORCE && !wait_quiet(600)
         println(stderr, "driver.jl: the machine never got quiet (other processes ≥ 1 core for 10 min); use --force"); exit(2)
+    end
+    # the two environments must resolve the same packages (only HyperFEMKernels may differ)
+    mans = Dict(l => TOML.parsefile(joinpath(ENVS[l], "Manifest.toml"))["deps"] for l in ("main", "branch"))
+    vers(m) = Dict(k => get(first(v), "version", get(first(v), "git-tree-sha1", "")) for (k, v) in m if k != "HyperFEMKernels")
+    vm, vb = vers(mans["main"]), vers(mans["branch"])
+    diffs = [k for k in union(keys(vm), keys(vb)) if get(vm, k, "-") != get(vb, k, "-")]
+    if !isempty(diffs)
+        println(stderr, "driver.jl: the environments of main and of the branch resolve different packages: ",
+                join(("$k $(get(vm, k, "-")) / $(get(vb, k, "-"))" for k in sort(diffs)), ", "))
+        exit(2)
     end
     ids1 = Dict{Int,Vector{String}}()
     for nt in THREADS
