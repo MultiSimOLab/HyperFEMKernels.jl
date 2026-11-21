@@ -5,16 +5,6 @@
 #   threads = 0 for every thread count
 
 [[exception]]
-case = "aorta_p1p1/jacobian"
-threads = 1
-type = "slower_than_gridap"
-limit = 1.6
-reason = "Jacobian of the stabilised P1–P1 groups by nested dual numbers; factorisation test×trial planned"
-measured = "compiled 1.016 s vs Gridap 0.675 s (Mac M5 Max, Julia 1.13.0, main 75f5a92)"
-date = "2026-11-21"
-decision = "advisor's proposal accepted by Jesús (2026-11-21)"
-
-[[exception]]
 case = "sims/Stokes"
 threads = 0
 type = "slower_than_gridap"

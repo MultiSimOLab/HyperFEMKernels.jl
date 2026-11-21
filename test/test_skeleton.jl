@@ -137,10 +137,12 @@ end
         @test noalloc(op, x)
         A = Algebra.jacobian(op, x)
         @test norm(A - A') > 1e-6 * norm(A)        # the consistent tangent is not symmetric
-        # weight × jump is bilinear in the state inputs: the skeleton groups take the dual-number path
+        # weight × jump is bilinear in the state inputs: no linear maps on the skeleton groups (factorised
+        # test × trial when linear_maps, nested dual numbers otherwise)
         for g in op.jgroups
             g isa HK.SkeletonGroup || continue
-            @test g.lin === nothing
+            @test !(g.lin isa HK.LinearForm)
+            @test (g.lin isa HK.FactorForm) == linear_maps
         end
         # the facet-size data of the skeleton groups lives in buffers refilled in place (not reallocated)
         b = Algebra.residual(op, x)

@@ -38,7 +38,8 @@ end
 "Same generated functions (no recompilation) in every group of two operators."
 same_code(op, op2) = all(zip(vcat(op.rgroups, op.jgroups), vcat(op2.rgroups, op2.jgroups))) do (g, g2)
     typeof(g2) === typeof(g) && typeof(g2.pf.core) === typeof(g.pf.core) && (g.lin === nothing) == (g2.lin === nothing) &&
-        (g.lin === nothing || (typeof(g2.lin.apply) === typeof(g.lin.apply) && typeof(g2.lin.state) === typeof(g.lin.state)))
+        (g.lin === nothing || (g.lin isa HyperFEMKernels.FactorForm ? typeof(g2.lin) === typeof(g.lin) :
+                               (typeof(g2.lin.apply) === typeof(g.lin.apply) && typeof(g2.lin.state) === typeof(g.lin.state))))
 end
 
 @testset "Oseen step: time loop (data in place, numbers through update)" begin

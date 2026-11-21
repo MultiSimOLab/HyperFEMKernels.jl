@@ -32,7 +32,7 @@ begin
         @test cd.jac < TOL
         op = KernelOperator(res, jac, U, V)
         @test all(g -> g.lin !== nothing, op.rgroups)   # residual: linear map of P(F)
-        @test all(g -> g.lin === nothing, op.jgroups)   # dP(F, dF) is not linear in F: dual numbers
+        @test all(g -> !(g.lin isa HK.LinearForm), op.jgroups)   # dP(F, dF) is not linear in F: no linear maps (factorised)
     end
 
     @testset "Linear elasticity with the symmetric gradient, $(D)D, $(coef)" for D in (2, 3), coef in (:constant, :density)

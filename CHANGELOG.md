@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Factorised Jacobians.** A Jacobian term of the form c·W(N(A, B)), with A depending only on the test function,
+  B only on the trial function, N one of ⋅, ⊙, * and c, W multipliers and divisors that depend on the state (sums
+  and signs distributed), is assembled from T[i, j] = c·W(N(∂A/∂s_i, ∂B/∂r_j)) with one level of dual numbers,
+  seeded only on the slots of the factors, instead of nested dual numbers over all slots. Groups the linear maps
+  already take are unchanged; a group that does not take this form keeps the nested path, and the generated code is
+  checked at construction against the integrand at random points and parameters (falls back if it does not match).
+  On the stabilised P1–P1 aorta (HyperFEM CFD, 1 thread) the Jacobian goes from 1.02 s to 0.24 s (Gridap: 0.68 s;
+  4 threads: 0.285 → 0.066 s) and a time step from 1.93 to 1.17 s; construction takes +2 % and the first step
+  compiles less (cold start to the second step: 85 → 81 s). Mac M5 Max, Julia 1.13.0. `HFK_FACTORISE=0` disables it;
+  `HFK_DEBUG_FACTORISE=1` prints the reason when a group is not factorised.
+
 - **Sparsity pattern by field blocks, as Gridap.** The Jacobian stored every (test, trial) pair of the local dofs of
   every cell, also for pairs of fields that no term couples. It now stores a block only on the cells (and facets)
   of the integrals that couple the two fields, decided from the structure of the captured form: the pattern is

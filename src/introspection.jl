@@ -39,7 +39,8 @@ What the operator does, for checks that do not depend on timings:
 - `groups`: one entry per compiled group, `(kind, group, domain, cells, points, path)` with `kind` `:residual` or
   `:jacobian`, `domain` `:volume`, `:boundary` or `:skeleton`, `cells` the integration cells (facets on a
   skeleton), `points` the quadrature points per cell and `path` `:linear_maps` (coefficients from linear maps of
-  the state inputs) or `:duals` (dual numbers: one level for a residual, nested for a Jacobian);
+  the state inputs), `:factorised` (Jacobian: test factor × trial factor, `factorforms.jl`) or `:duals` (dual
+  numbers: one level for a residual, nested for a Jacobian);
 - `fallback_residual`, `fallback_jacobian`: triangulations assembled by Gridap;
 - `jacobian`: `:assembled` or `:matrixfree`;
 - `nnz`, `pattern_bytes`: nonzeros of the sparsity pattern and bytes of the pattern and positions (`-1` when the
@@ -51,7 +52,7 @@ function work_summary(op::KernelOperator)
     for (kind, gs) in ((:residual, op.rgroups), (:jacobian, op.jgroups)), (i, g) in enumerate(gs)
         domain = g isa SkeletonGroup ? :skeleton : num_cell_dims(g.trian) == Dc ? :volume : :boundary
         cells = g isa SkeletonGroup ? length(g.facets) : length(g.cellmap)
-        push!(groups, (kind=kind, group=i, domain=domain, cells=cells, points=g.geo.np, path=g.lin === nothing ? :duals : :linear_maps))
+        push!(groups, (kind=kind, group=i, domain=domain, cells=cells, points=g.geo.np, path=g.lin === nothing ? :duals : g.lin isa FactorForm ? :factorised : :linear_maps))
     end
     p = op.pattern
     built = p.A0 !== nothing

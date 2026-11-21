@@ -52,6 +52,13 @@ backend for its drivers (`backend = :compiled`).
   quadrature point (assembly, matrix-free, skeletons, functionals, FE functions in the form, internal
   variables); curved or deformed cells keep the per-point geometry (`HFK_AFFINE_GEOMETRY=0`, read when the
   package is loaded, disables the shortcut).
+- **Factorised Jacobians.** When a term of the Jacobian is a sum of products of a factor that depends only on the
+  test function and one that depends only on the trial function (by ⋅, ⊙ or *), under multipliers and divisors that
+  depend on the state, the tangent at a quadrature point is built as T[i, j] = c·W(N(∂A/∂s_i, ∂B/∂r_j)) with one
+  level of dual numbers instead of two (the stabilised SUPG/PSPG terms of the CFD formulations, for example). The generated
+  code is checked at construction against the original integrand at random points; a group that does not take this
+  form, or fails the check, keeps the nested dual numbers. `HFK_FACTORISE=0` disables it and `HFK_DEBUG_FACTORISE=1`
+  prints why a group is not factorised.
 - **Threads, no allocations.** Cells are coloured so that the assembly loop is threaded without
   locks; element kernels allocate nothing (`allocations` reports it), which is also the
   requirement for GPU execution. The element buffers are kept in the operator, so a repeated
@@ -63,7 +70,7 @@ backend for its drivers (`backend = :compiled`).
   again, for operators built afterwards): `HFK_MATRIX_PRODUCTS` (`1`/`0`, element residual and Jacobian as
   matrix products on node-contiguous fields), `HFK_WORK_PER_TASK` (minimum work per task, default 20000),
   `HFK_POINT_BLOCK` (points per block of the matrix-product Jacobian, default 12, 0 = all),
-  `HFK_AFFINE_GEOMETRY` (`1`/`0`, geometry once per affine cell), `HFK_AUX_WORK_PER_TASK` (minimum quadrature
+  `HFK_AFFINE_GEOMETRY` (`1`/`0`, geometry once per affine cell), `HFK_FACTORISE` (`1`/`0`, factorised Jacobians), `HFK_AUX_WORK_PER_TASK` (minimum quadrature
   points per task when the engine fills FE functions and functions of x on volume and boundary groups, default 512:
   small meshes are filled without tasks; skeleton groups and data evaluated by Gridap keep one task per thread).
 - **Cheap updates.** Numbers in the weak form (load factors, time steps, material parameters) are

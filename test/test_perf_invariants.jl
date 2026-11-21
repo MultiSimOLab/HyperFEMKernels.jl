@@ -9,15 +9,16 @@ paths(op) = [(g.kind, g.domain, g.path) for g in HK.work_summary(op).groups]
 @testset "paths of the compiled groups" begin
     p = poisson_2d()
     @test paths(KernelOperator(p.res, p.jac, p.U, p.V)) == [(:residual, :volume, :linear_maps), (:jacobian, :volume, :linear_maps)]
-    for p in (elasticity_3d(), coupled_3d())        # St Venant–Kirchhoff tangent: not linear in its state inputs
-        @test paths(KernelOperator(p.res, p.jac, p.U, p.V)) == [(:residual, :volume, :linear_maps), (:jacobian, :volume, :duals)]
+    for p in (elasticity_3d(), coupled_3d())        # St Venant–Kirchhoff tangent: not linear in its state inputs, factorised
+        @test paths(KernelOperator(p.res, p.jac, p.U, p.V)) == [(:residual, :volume, :linear_maps), (:jacobian, :volume, :factorised)]
     end
-    # Oseen step (SUPG/PSPG/LSIC, backflow, Robin outlet): the stabilised volume terms and the backflow term go by
-    # dual numbers (products of state inputs), the Robin term by linear maps
+    # Oseen step (SUPG/PSPG/LSIC, backflow, Robin outlet): the stabilised volume terms and the backflow term are
+    # factorised (products of state inputs: not linear maps), the Robin term goes by linear maps; the residuals by
+    # dual numbers (one level)
     s = oseen_channel()
     op = KernelOperator(s.res, s.jac, s.U, s.V)
     @test paths(op) == [(:residual, :volume, :duals), (:residual, :boundary, :duals), (:residual, :boundary, :duals),
-                        (:jacobian, :volume, :duals), (:jacobian, :boundary, :linear_maps), (:jacobian, :boundary, :duals)]
+                        (:jacobian, :volume, :factorised), (:jacobian, :boundary, :linear_maps), (:jacobian, :boundary, :factorised)]
     w = HK.work_summary(op)
     @test w.fallback_residual == 0 && w.fallback_jacobian == 0 && w.jacobian === :assembled
     @test w.nnz == nnz(HK.sparsity_pattern(op)) && w.pattern_bytes > 0
@@ -67,7 +68,7 @@ end
 @testset "update: same structure takes the fast path (no code generated, no pattern built)" begin
     s = oseen_channel()
     op = KernelOperator(s.res, s.jac, s.U, s.V)
-    nlin = count(g -> g.lin !== nothing, vcat(op.rgroups, op.jgroups))
+    nlin = count(g -> g.lin isa HK.LinearForm, vcat(op.rgroups, op.jgroups))   # factorised groups evaluate no maps
     HK.reset_counters!()
     op2 = update(op, s.res, s.jac)
     c = HK.counters()

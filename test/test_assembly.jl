@@ -88,7 +88,8 @@ end
     for (g, g2) in zip(vcat(op.rgroups, op.jgroups), vcat(op2.rgroups, op2.jgroups))
         @test typeof(g2.pf.core) === typeof(g.pf.core)
         @test (g.lin === nothing) == (g2.lin === nothing)
-        g.lin === nothing || @test typeof(g2.lin.apply) === typeof(g.lin.apply) && typeof(g2.lin.state) === typeof(g.lin.state)
+        g.lin isa HK.LinearForm && @test typeof(g2.lin.apply) === typeof(g.lin.apply) && typeof(g2.lin.state) === typeof(g.lin.state)
+        g.lin isa HK.FactorForm && @test typeof(g2.lin) === typeof(g.lin)
     end
 end
 
@@ -102,7 +103,8 @@ end
         op2 = HK.update(op, res(Λ, t), jac(Λ))
         for (g, g2) in zip(vcat(op.rgroups, op.jgroups), vcat(op2.rgroups, op2.jgroups))
             @test typeof(g2.pf.core) === typeof(g.pf.core)
-            g.lin === nothing || @test typeof(g2.lin.apply) === typeof(g.lin.apply)
+            g.lin isa HK.LinearForm && @test typeof(g2.lin.apply) === typeof(g.lin.apply)
+            g.lin isa HK.FactorForm && @test typeof(g2.lin) === typeof(g.lin)      # same generated code
         end
         c = check(res(Λ, t), jac(Λ), e.U, e.V, x; op=op2)
         @test c.res < TOL && c.jac < TOL

@@ -138,6 +138,9 @@ function Group(terms::Vector{Term}, trian::Triangulation, Uspaces, locs, D::Int,
     AUX = Tuple{(Matrix{eltype(eltype(a))} for a in aux)...}
     NF = length(tables)
     lin = linear_maps ? LinearForm(terms, pf, tables, aux, pf.trial.nslots == 0 ? :res : :jac) : nothing
+    if lin === nothing && linear_maps && pf.trial.nslots > 0 && FACTORISE[]     # Jacobian not linear in its inputs
+        lin = FactorForm(terms, pf, tables, aux)
+    end
     ndl = locs[end] + ndofs(tables[end])
     work = group_work(tables, smv, smu, geo.np, ndl)
     Group{pf.test.nslots,pf.trial.nslots,typeof(pf),typeof(tables),AUX,typeof(smv),typeof(smu),D,NF,typeof(lin),typeof(geo.Jf),typeof(use),typeof(rb),typeof(work)}(
@@ -162,11 +165,16 @@ function terms_of(g::AbstractGroup, forms::Vector{Form})
     Term[t for t in forms[k].terms if objectid(t.weights) == g.wkey]
 end
 
+"The linear maps or factorised tangent of a group rebound to `terms` (same structure)."
+rebind_lin(::Nothing, terms, pf, tables, aux) = nothing
+rebind_lin(lf::LinearForm, terms, pf, tables, aux) = (bump!(:linear_maps_evaluated); LinearForm(terms, pf, tables, aux, lf))
+rebind_lin(ff::FactorForm, terms, pf, tables, aux) = FactorForm(terms, pf, ff)
+
 "The group `g` with its values (operations, coefficients, parameters, auxiliary arrays, linear maps) read from `terms`."
 function rebind(g::Group, terms::Vector{Term})
     pf = PointForm(terms, g.pf)
     aux = Tuple(engine_aux(a.array, g.geo, () -> group_columns(g.colors), eachindex(g.cellmap)) for a in pf.aux)
-    lin = g.lin === nothing ? nothing : (bump!(:linear_maps_evaluated); LinearForm(terms, pf, g.tables, aux, g.lin))
+    lin = rebind_lin(g.lin, terms, pf, g.tables, aux)
     typeof(g)(pf, lin, g.locs, g.tables, g.use, g.rb, g.geo, aux, g.smv, g.smu, g.trian, g.xq, g.auxcache, g.cellmap, g.colors, g.wkey, g.work)
 end
 
@@ -188,8 +196,14 @@ function verify_rebind(rebound::Vector{Any}, fresh::Vector{Any}, what::String)
         all(k -> a.pf.ops[k] == b.pf.ops[k], a.pf.consts) || error("HyperFEMKernels: rebind check ($what): parameters differ")
         typeof.(a.pf.ops) == typeof.(b.pf.ops) || error("HyperFEMKernels: rebind check ($what): operation types differ")
         typeof.(a.aux) == typeof.(b.aux) || error("HyperFEMKernels: rebind check ($what): auxiliary data types differ")
-        (a.lin === nothing) == (b.lin === nothing) || error("HyperFEMKernels: rebind check ($what): linear-map shortcut differs")
+        typeof(a.lin) == typeof(b.lin) || error("HyperFEMKernels: rebind check ($what): linear-map or factorised path differs")
         a.lin === nothing && continue
+        if a.lin isa FactorForm
+            a.lin.expr == b.lin.expr || error("HyperFEMKernels: rebind check ($what): factorised tangent differs")
+            a.lin.coefs == b.lin.coefs || error("HyperFEMKernels: rebind check ($what): factorised coefficients differ")
+            all(k -> a.lin.ops[k] == b.lin.ops[k], a.lin.consts) || error("HyperFEMKernels: rebind check ($what): factorised parameters differ")
+            continue
+        end
         a.lin.expr == b.lin.expr || error("HyperFEMKernels: rebind check ($what): state function differs")
         pos(m) = [(e[1], e[2], e[3]) for e in m]
         all(((m, n),) -> pos(m) == pos(n), zip(a.lin.maps, b.lin.maps)) || error("HyperFEMKernels: rebind check ($what): linear-map positions differ")
@@ -1282,11 +1296,7 @@ function element_jacobian!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}, xl
         map((t, W, sv, su) -> point_weights!(W, t, q, iJt, Jt, Φ, hess_weights(sv, su)), tables, dNb, g.smv, g.smu)
         FV = field_values(tables, locs, g.use, xl, q, iJt, Jt, Φ)
         Aq = map(a -> @inbounds(a[q, cell]), auxd)
-        T = if LF === Nothing
-            ForwardDiff.jacobian(r -> ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsv), zsu)   # T[test slot, trial slot]
-        else
-            SMatrix{NSV,NSU,Float64,NSV * NSU}(apply_maps(g.lin, g.lin.state(g.lin.ops, FV, Aq), Val(NSV * NSU)))
-        end
+        T = point_tangent(g.lin, pf, FV, Aq, Val(NSV), Val(NSU))   # T[test slot, trial slot]
         map((tf, lf, smf, bf) -> map((tg, lg, smg, bg) ->
                 contract_jacobian!(KeT, tf, lf, smf, bf, tg, lg, smg, bg, T, dV),
                 tables, locs, g.smu, dNb),
@@ -1319,11 +1329,7 @@ function element_jacobian_mm!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF},
             map((t, W, sv, su) -> point_weights!(W, t, q, iJt, Jt, Φ, hess_weights(sv, su)), tables, Wb, g.smv, g.smu)
             FV = field_values(tables, locs, g.use, xl, q, iJt, Jt, Φ)
             Aq = map(a -> @inbounds(a[q, cell]), auxd)
-            T = if LF === Nothing
-                ForwardDiff.jacobian(r -> ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsv), zsu)   # T[test slot, trial slot]
-            else
-                SMatrix{NSV,NSU,Float64,NSV * NSU}(apply_maps(g.lin, g.lin.state(g.lin.ops, FV, Aq), Val(NSV * NSU)))
-            end
+            T = point_tangent(g.lin, pf, FV, Aq, Val(NSV), Val(NSU))   # T[test slot, trial slot]
             map((t, sm, W, B) -> store_test_weights!(B, sm, W, ql, t.nn), tables, g.smv, Wb, Bb)
             map((smf, Gf) -> map((tg, smg, Wg, G) -> store_trial_block!(G, smf, smg, Wg, T, ql, dV, tg.nn),
                                  tables, g.smu, Wb, Gf), g.smv, Gb)
@@ -1360,6 +1366,7 @@ function read_env_settings!()
     AUX_WORK_PER_TASK[] = max(1, env_int("HFK_AUX_WORK_PER_TASK", 512))
     POINT_BLOCK[] = env_int("HFK_POINT_BLOCK", 12)
     AFFINE_GEOMETRY[] = affine_geometry_from_env()
+    FACTORISE[] = env_flag("HFK_FACTORISE", true)
     nothing
 end
 point_block(np::Int) = (qb = POINT_BLOCK[]; qb <= 0 ? np : min(qb, np))
