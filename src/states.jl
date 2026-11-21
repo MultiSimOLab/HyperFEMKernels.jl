@@ -218,7 +218,7 @@ function StateUpdate(updater, args::Tuple, x::CellPoint, written::Vector{Int}, n
         $(st.body...)
         return ops[1]($(argex...))
     end)
-    core = RuntimeGeneratedFunction(@__MODULE__, @__MODULE__, ex)
+    core = generated(ex)
     needs_geo = any(f -> fe_deriv(f) >= 1, ctx.fes)
     geo = needs_geo ? geo_table(trian, uniform_value(xdata, "the quadrature points")) : nothing
     fes = Tuple(ctx.fes)

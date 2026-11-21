@@ -139,7 +139,7 @@ function LinearForm(terms0::Vector{Term}, pf::PointForm, tables, aux::Tuple, kin
     terms, inputs, term_inputs, ex, ops = linear_parts(terms0, pf)
     coefs = Tuple(t.coef for t in terms)
     all(t -> dependent(t.expr), terms) || return _nolin("a term does not depend on test/trial functions")
-    state = RuntimeGeneratedFunction(@__MODULE__, @__MODULE__, ex)
+    state = generated(ex)
     # concrete types of the inputs: evaluate once on sample data (small random state, first cell)
     FVs = map(t -> map(T -> 0.01 * rand_value(T), field_types(t)), tables)
     As = map(a -> a[1][1], aux)
@@ -156,7 +156,7 @@ function LinearForm(terms0::Vector{Term}, pf::PointForm, tables, aux::Tuple, kin
     for (i, t) in enumerate(terms)
         gidx = term_inputs[i]
         lex, lops, consts = term_parts(t, gidx, inputs, pf)
-        lin = RuntimeGeneratedFunction(@__MODULE__, @__MODULE__, lex)
+        lin = generated(lex)
         types = DataType[ST.parameters[g] for g in gidx]
         # the actual parameters, and random ones: positions and linearity must not depend on the values
         rops = random_params(lops, consts)
@@ -302,7 +302,7 @@ function generate_apply(maps::Vector{SparseMap}, ST, N::Int)
     end
     comps = [isempty(sm) ? 0.0 : Expr(:call, :+, sm...) for sm in sums]
     ex = :((V, S) -> SVector{$N,Float64}(($(comps...),)))
-    RuntimeGeneratedFunction(@__MODULE__, @__MODULE__, ex)
+    generated(ex)
 end
 
 """

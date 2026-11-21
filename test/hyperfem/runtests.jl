@@ -33,6 +33,17 @@ gop(res, jac, U, V) = get_algebraic_operator(FEOperator(res, jac, U, V))
         @test c.res < TOL && c.jac < TOL
         @test all(g -> g.lin !== nothing, op.rgroups) && all(g -> g.lin !== nothing, op.jgroups)
         @test all(a -> a.bytes == 0, allocations(op, x))
+        # performance invariants (test/test_perf_invariants.jl): every group by linear maps, no fallback; an update
+        # with the same structure takes the fast path and generates no code; repeated assemblies do not allocate
+        w = HK.work_summary(op)
+        @test all(g -> g.path === :linear_maps, w.groups) && w.fallback_residual == 0 && w.fallback_jacobian == 0
+        HK.reset_counters!()
+        op2 = update(op, res, jac)
+        @test HK.counters().update_fast == 1 && HK.counters().codegen == 0 && HK.counters().patterns_built == 0
+        op1 = KernelOperator(res, jac, U, V; nthreads=1)
+        b1 = allocate_residual(op1, x); A1 = allocate_jacobian(op1, x)
+        residual!(b1, op1, x); jacobian!(A1, op1, x)
+        @test (@allocated residual!(b1, op1, x)) == 0 && (@allocated jacobian!(A1, op1, x)) == 0
     end
 
     @testset "hMRE 2D, Short_magnet.msh" begin

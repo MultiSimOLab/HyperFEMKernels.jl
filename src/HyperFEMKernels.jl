@@ -72,6 +72,7 @@ include("pmultigrid.jl")
 include("functionals.jl")
 include("states.jl")
 include("verify.jl")
+include("introspection.jl")
 
 function __init__()
     read_env_settings!()          # HFK_* switches at load time, not frozen at precompilation

@@ -1,0 +1,35 @@
+# Accepted exceptions of the performance gate (benchmark/gate/README.md). Every entry is a decision of Jesús: the
+# limit replaces the default one for that case and stays checked (a case above its limit still fails).
+#   type = "slower_than_gridap"  : compiled/Gridap (same process) allowed up to `limit` (default 1.02)
+#   type = "regression_vs_main"  : branch/main allowed up to `limit` (default 1.05; 1.25 under 5 ms)
+#   threads = 0 for every thread count
+
+[[exception]]
+case = "aorta_p1p1/jacobian"
+threads = 1
+type = "slower_than_gridap"
+limit = 1.6
+reason = "Jacobian of the stabilised P1–P1 groups by nested dual numbers; factorisation test×trial planned"
+measured = "compiled 1.016 s vs Gridap 0.675 s (Mac M5 Max, Julia 1.13.0, main 75f5a92)"
+date = "2026-11-21"
+decision = "advisor's proposal accepted by Jesús (2026-11-21)"
+
+[[exception]]
+case = "sims/Stokes"
+threads = 0
+type = "slower_than_gridap"
+limit = 1.05
+reason = "on par with Gridap; a 1.02 band would oscillate with the noise of the pairs"
+measured = "compiled/Gridap 1.000 [0.983–1.017] at 4 threads (A/A of the design, 2026-11-21)"
+date = "2026-11-21"
+decision = "advisor's proposal accepted by Jesús (2026-11-21)"
+
+[[exception]]
+case = "sims/ViscoElastic"
+threads = 0
+type = "slower_than_gridap"
+limit = 1.05
+reason = "on par with Gridap; a 1.02 band would oscillate with the noise of the pairs"
+measured = "compiled/Gridap 1.006 [0.971–1.042] at 4 threads (A/A of the design, 2026-11-21)"
+date = "2026-11-21"
+decision = "advisor's proposal accepted by Jesús (2026-11-21)"
