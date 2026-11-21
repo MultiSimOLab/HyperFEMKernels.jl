@@ -9,7 +9,7 @@ const MATRIX_PRODUCTS = Ref(true)
 const WORK_PER_TASK = Ref(20000)
 """
 Minimum number of quadrature points per task when the engine fills the auxiliary arrays it evaluates itself (FE
-functions and functions of the coordinates, whose cost per point is small and bounded; `HFK_AUX_WORK_PER_TASK`,
+functions and functions of the coordinates on volume and boundary groups, whose cost per point is small and bounded; `HFK_AUX_WORK_PER_TASK`,
 default 512): below `AUX_WORK_PER_TASK` points no task is spawned, from `AUX_WORK_PER_TASK × nthreads` points on there
 are as many tasks as threads. Arrays evaluated by Gridap (arbitrary operations, e.g. on `CellState`s, with unbounded
 cost per point) keep one task per thread.

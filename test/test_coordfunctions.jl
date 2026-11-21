@@ -226,7 +226,9 @@ end
     @test bytes(4; nthreads=1) == 0 && bytes(12; nthreads=1) == 0
     # a mesh below the minimum work per task (64 cells × 8 points = AUX_WORK_PER_TASK) is filled without tasks
     # with any number of threads: nothing allocated
-    @test 64 * 8 <= HK.AUX_WORK_PER_TASK[] && bytes(4; nthreads=4) == 0
+    w = HK.AUX_WORK_PER_TASK[]; HK.AUX_WORK_PER_TASK[] = 512        # the default, whatever the environment
+    @test bytes(4; nthreads=4) == 0                                     # 64 cells × 8 points = 512
+    HK.AUX_WORK_PER_TASK[] = w
     # with tasks: no allocation per cell, only per task. Both meshes are above the thresholds of the auxiliary fill
     # (AUX_WORK_PER_TASK) and of the assembly (WORK_PER_TASK), so they run with the same number of tasks
     nt = min(4, Threads.nthreads())

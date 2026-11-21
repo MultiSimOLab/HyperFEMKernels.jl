@@ -283,7 +283,8 @@ end
 
 @testset "tasks for the auxiliary arrays filled by the engine (aux_tasks, HFK_AUX_WORK_PER_TASK)" begin
     w = HK.AUX_WORK_PER_TASK[]
-    @test w == 512                                                 # default (the environment of the tests does not set it)
+    haskey(ENV, "HFK_AUX_WORK_PER_TASK") || @test w == 512          # default
+    HK.AUX_WORK_PER_TASK[] = 512                                   # the cases below assume the default
     @test HK.aux_tasks(4, 0, 8) == 1 && HK.aux_tasks(4, 10, 0) == 1 && HK.aux_tasks(1, 10^6, 8) == 1
     @test HK.aux_tasks(4, 63, 8) == 1 && HK.aux_tasks(4, 64, 8) == 1 && HK.aux_tasks(4, 128, 8) == 2
     @test HK.aux_tasks(4, 256, 8) == 4 && HK.aux_tasks(4, 10^6, 8) == 4    # large meshes: one task per thread, as before
@@ -297,4 +298,12 @@ end
         HK.read_env_settings!(); @test HK.AUX_WORK_PER_TASK[] == 1
     end
     HK.read_env_settings!(); @test HK.AUX_WORK_PER_TASK[] == w
+    HK.AUX_WORK_PER_TASK[] = w
+end
+
+@testset "the re-evaluation of a linear map is type-stable (the speed of update on small problems depends on it)" begin
+    lin = (ops, S, v, w) -> ops[1] * S[1] * v[1] * w[2] + v[2] * w[1]
+    S = (2.0,)
+    @test (@inferred HK._slot_coeffs(lin, (3.0,), S, Val(2), Val(2), Val(:jac))) == [0.0, 1.0, 6.0, 0.0]
+    @test (@inferred HK._slot_coeffs((ops, S, v, w) -> ops[1] * S[1] * v[2], (3.0,), S, Val(2), Val(0), Val(:res))) == [0.0, 6.0]
 end
