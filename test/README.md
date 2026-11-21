@@ -1,6 +1,6 @@
 # Tests
 
-`julia --project -e 'using Pkg; Pkg.test()'`. `HFK_TEST_GROUP=hdiv` runs only `test_hdiv.jl`, `HFK_TEST_GROUP=hessian` only `test_hessian.jl`, `HFK_TEST_GROUP=core` the other files up to `test_update.jl` and `HFK_TEST_GROUP=extended` the other files after it (default `all`); CI runs the four groups as separate jobs. Every test compares against Gridap or against explicit sums; the
+`julia --project -e 'using Pkg; Pkg.test()'`. `HFK_TEST_GROUP=hdiv` runs only `test_hdiv.jl`, `HFK_TEST_GROUP=hessian` only `test_hessian.jl`, `HFK_TEST_GROUP=core` the other files up to `test_update.jl` and `HFK_TEST_GROUP=extended` the other files after it (default `all`); CI runs the four groups as separate jobs. Each group runs in its own process, so a helper used by more than one test file goes in `common.jl`, not in one of the files (with the default `all` a misplaced helper still passes locally and only fails in CI). Every test compares against Gridap or against explicit sums; the
 tolerance is 1e-12 relative.
 
 | File | What it checks |
