@@ -6,15 +6,6 @@ nofallback_sk(op) = isempty(op.fallback.rtrians) && isempty(op.fallback.jtrians)
 nskgroups(op) = count(g -> g isa HK.SkeletonGroup, op.jgroups)
 noalloc(op, x) = all(a -> a.bytes == 0, allocations(op, x))
 
-"Interior-penalty Poisson problem: volume + jump of the unknown on the skeleton."
-function ip_poisson(; order=1, simplex=false, n=(5, 4), γ=10.0)
-    p = poisson_2d(; n, order, simplex)
-    Λ = SkeletonTriangulation(p.model); dΛ = Measure(Λ, 2order)
-    res(u, v) = ∫(∇(v) ⋅ ∇(u) - 2.0 * v)p.dΩ + ∫(γ * jump(v) * jump(u))dΛ
-    jac(u, du, v) = ∫(∇(v) ⋅ ∇(du))p.dΩ + ∫(γ * jump(v) * jump(du))dΛ
-    (; p, Λ, dΛ, res, jac)
-end
-
 @testset "interior penalty on quads/triangles, orders 1–3: no fallback, equality, no allocations" begin
     for order in (1, 2, 3), simplex in (false, true)
         s = ip_poisson(; order, simplex)

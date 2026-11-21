@@ -124,3 +124,39 @@ function cartesian_model(D::Int, n; mapped=false, simplex=false)
     model = mapped ? CartesianDiscreteModel(dom, cells; map=f) : CartesianDiscreteModel(dom, cells)
     simplex ? simplexify(model) : model
 end
+
+# Problems and helpers shared between test files of different CI groups (HFK_TEST_GROUP, see runtests.jl):
+# each group runs on its own, so a file cannot rely on definitions made by another file of the suite.
+
+"Builds an operator whose form is deliberately sent to Gridap, capturing the fallback warnings (they are expected here, not noise for the test log)."
+fallback_op(f, args...) = @test_logs (:warn, r"assembled by Gridap") match_mode = :any f(args...)
+
+function product_gradient_problem(; order=1, simplex=false, n=(5, 4))
+    p = poisson_2d(; n, order, simplex)
+    Λ = SkeletonTriangulation(p.model); dΛ = Measure(Λ, 2order)
+    γ = 10.0
+    # the skeleton term makes the Gridap-assembled pattern larger than the kernel's cell pattern
+    res(u, v) = ∫(∇(v) ⋅ ∇(u) - 2.0 * v + ∇(v) ⋅ ∇(u * u))p.dΩ + ∫(γ * jump(v) * jump(u))dΛ
+    jac(u, du, v) = ∫(∇(v) ⋅ ∇(du) + 2.0 * (∇(v) ⋅ ∇(du * u)))p.dΩ + ∫(γ * jump(v) * jump(du))dΛ
+    (; p, Λ, dΛ, res, jac)
+end
+
+"Interior-penalty Poisson problem: volume + jump of the unknown on the skeleton."
+function ip_poisson(; order=1, simplex=false, n=(5, 4), γ=10.0)
+    p = poisson_2d(; n, order, simplex)
+    Λ = SkeletonTriangulation(p.model); dΛ = Measure(Λ, 2order)
+    res(u, v) = ∫(∇(v) ⋅ ∇(u) - 2.0 * v)p.dΩ + ∫(γ * jump(v) * jump(u))dΛ
+    jac(u, du, v) = ∫(∇(v) ⋅ ∇(du))p.dΩ + ∫(γ * jump(v) * jump(du))dΛ
+    (; p, Λ, dΛ, res, jac)
+end
+
+"Model (0,2)×(0,1); active region Ωd without the top row of cells, split at x = 1 into Ωa (left) and Ωb (right)."
+function two_subdomains(; n=(8, 4))
+    model = CartesianDiscreteModel((0, 2, 0, 1), n)
+    cc = [sum(c) / length(c) for c in get_cell_coordinates(model)]
+    dom = [x[2] < 0.75 for x in cc]
+    Ωd = Triangulation(model, dom)
+    Ωa = Triangulation(model, [d && x[1] < 1 for (d, x) in zip(dom, cc)])
+    Ωb = Triangulation(model, [d && x[1] >= 1 for (d, x) in zip(dom, cc)])
+    (; model, Ωd, Ωa, Ωb)
+end
