@@ -27,6 +27,10 @@ _nofac(why) = (debug_factorise() && println("HyperFEMKernels: factorisation not 
 
 "Tag of the dual numbers of the factors."
 struct FactorTag end
+# The factorised tangent is the outermost differentiation of the generated code: an operation of the form that
+# differentiates internally with ForwardDiff nests its own tags inside it (ForwardDiff's order: inner ≺ outer).
+ForwardDiff.:≺(::Type{FactorTag}, ::Type{<:ForwardDiff.Tag}) = true
+ForwardDiff.:≺(::Type{<:ForwardDiff.Tag}, ::Type{FactorTag}) = false
 
 has_role(n::Leaf, r::Symbol) = n.role === r
 has_role(n::Op, r::Symbol) = any(a -> has_role(a, r), n.args)
@@ -190,8 +194,8 @@ function factor_code(terms::Vector{Term}, pf::PointForm)
     (ex, Tuple(st.ops), Tuple(pcoefs), st.consts, st)
 end
 
-"Copies of the auxiliary values of a point with random values of the same types (signs included)."
-rand_aux(As) = map(x -> x isa Union{AbstractFloat,MultiValue} ? (rand(Bool) ? 1 : -1) * rand_value(typeof(x)) : x, As)
+"Copies of the auxiliary values of a point with random values of the same types (random signs if `signs`)."
+rand_aux(As, signs::Bool) = map(x -> x isa Union{AbstractFloat,MultiValue} ? (signs && rand(Bool) ? -1 : 1) * rand_value(typeof(x)) : x, As)
 
 """
     FactorForm(terms, pf, tables, aux) -> FactorForm or nothing
@@ -209,7 +213,12 @@ function FactorForm(terms::Vector{Term}, pf::PointForm, tables, aux::Tuple)
         with_check_rng(() -> check_factorisation(ff, st, terms, pf, tables, aux))
     catch err
         err isa InterruptException && rethrow()
-        "the check failed: $(first(sprint(showerror, err), 200))"
+        # not a form outside the accepted ones (those return a reason without throwing): an operation that fails
+        # on the sample values, or an error of the generated code. The group keeps the nested dual numbers.
+        bump!(:factorise_errors)
+        @warn "HyperFEMKernels: factorised Jacobian not used for a group (it keeps the nested dual numbers): the \
+               construction check threw an error" exception = (err, catch_backtrace()) maxlog = 1
+        "the check threw: $(sprint(showerror, err))"
     end
     ok === true || return _nofac(ok)
     ff
@@ -236,10 +245,11 @@ end
 Check a factorised tangent T against the integrand itself: the integrand f(s, r) of a Jacobian is bilinear in the
 test and trial slots, so f(a, b) = aᵀ T b for any slot vectors a, b, and for random ones a wrong T fails with
 probability one. The integrand is evaluated with plain numbers (no dual numbers to compile). Four sample points
-(small random states; the auxiliary values of the first point, then random ones of the same types and random
-signs), three random pairs (a, b) each, with the actual parameters and with random ones (the same random value
-for a number of the integrand in both forms, so that a parameter that is zero now hides nothing); relative 1e-12
-of Σ|a_i||T_ij||b_j|. True, or the reason.
+(small random states; the auxiliary values of the first point, then random ones of the same types, positive and
+then with random signs), three random pairs (a, b) each, with the actual parameters and coefficients and with
+random ones (the same random value for a number of the integrand in both forms, random term coefficients, so that
+a parameter or a term that is zero now hides nothing); relative 1e-12 of Σ|a_i||T_ij||b_j|. A sample with random
+auxiliary values or parameters that an operation rejects (outside its domain) is skipped. True, or the reason.
 """
 function check_factorisation(ff::FactorForm, st::CodegenState, terms::Vector{Term}, pf::PointForm, tables, aux::Tuple)
     NV, NU = pf.test.nslots, pf.trial.nslots
@@ -248,21 +258,32 @@ function check_factorisation(ff::FactorForm, st::CodegenState, terms::Vector{Ter
     rvals = IdDict{Any,Any}()
     rops(o, s) = Tuple((k = findfirst(==(i), s.consts); k === nothing ? o[i] : get!(() -> random_param(o[i]), rvals, s.constnodes[k]))
                        for i in eachindex(o))
-    paramsets = Any[(pf.ops, ff.ops, false)]
-    !isempty(st0.consts) && length(st0.ops) == length(pf.ops) && push!(paramsets, (rops(pf.ops, st0), rops(ff.ops, st), true))
+    paramsets = Any[(pf.ops, pf.coefs, ff.ops, ff.coefs, false)]
+    # random term coefficients (a term with coefficient 0 now is checked too), mapped to the parts as in factor_code
+    rc = Tuple((rand(Bool) ? -1 : 1) * (0.5 + rand()) for _ in terms)
+    code_r = factor_code([Term(c, t.expr, t.weights, t.jacobians) for (c, t) in zip(rc, terms)], pf)
+    code_r isa String && return "random coefficients: $code_r"
+    randops = !isempty(st0.consts) && length(st0.ops) == length(pf.ops)
+    push!(paramsets, (randops ? rops(pf.ops, st0) : pf.ops, rc, randops ? rops(ff.ops, st) : ff.ops, code_r[3], true))
     As0 = map(a -> a[1][1], aux)
     for sample in 1:4
         FV = map(t -> map(T -> 0.01 * rand_value(T), field_types(t)), tables)
-        As = sample <= 2 ? As0 : rand_aux(As0)
-        for (po, fo, random) in paramsets
-            Tf = ff.fun(fo, ff.coefs, FV, As)
+        As = sample <= 2 ? As0 : rand_aux(As0, sample == 4)
+        skippable = sample > 2                                           # random auxiliary values
+        for (po, pc, fo, fc, random) in paramsets
+            Tf = try
+                ff.fun(fo, fc, FV, As)
+            catch err
+                (random || skippable) && !(err isa InterruptException) && continue   # outside an operation's domain
+                rethrow()
+            end
             for _ in 1:3
                 a = SVector{NV,Float64}(ntuple(_ -> 2rand() - 1, NV))
                 b = SVector{NU,Float64}(ntuple(_ -> 2rand() - 1, NU))
                 f = try
-                    pf.core(po, pf.coefs, FV, As, a, b)
+                    pf.core(po, pc, FV, As, a, b)
                 catch err
-                    random && !(err isa InterruptException) && break     # random parameters outside a function's domain
+                    (random || skippable) && !(err isa InterruptException) && break  # outside an operation's domain
                     rethrow()
                 end
                 scale = max(sum(abs.(a) .* abs.(Tf) .* abs.(b')), abs(f))

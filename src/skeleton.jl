@@ -296,8 +296,6 @@ function element_jacobian!(KeT, g::SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D,NF2,L
                            Wb) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF2,LF}
     fill!(KeT, 0.0)
     tables, locs, pf = g.tables, g.locs, g.pf
-    zsv = zero(SVector{NSV,Float64})
-    zsu = zero(SVector{NSU,Float64})
     hu = hess_use(g)
     cgs = cell_geometries(g, lf)
     for q in 1:g.geo.np

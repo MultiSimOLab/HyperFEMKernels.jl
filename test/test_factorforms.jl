@@ -2,7 +2,6 @@
 # T[i, j] = c·W(N(∂A/∂s_i, ∂B/∂r_j)). Checked against the nested dual-number path (the same operator with the
 # factorisation disabled) and against Gridap, on forms that factorise and on forms that must not.
 
-paths(op) = [(g.kind, g.domain, g.path) for g in HK.work_summary(op).groups]
 "Operator with the factorisation on or off (read at construction)."
 function with_factorise(f, flag::Bool)
     old = HK.FACTORISE[]
@@ -76,7 +75,57 @@ end
     ex, ops, coefs, consts, st = code
     bad = HK.FactorForm(g.lin.fun, ops, coefs .* (1 + 1e-9), ex, consts)       # a part off by 1e-9
     @test HK.check_factorisation(bad, st, terms, g.pf, g.tables, g.aux) isa String
+    dropped = HK.FactorForm(g.lin.fun, ops, zero.(coefs), ex, consts)             # every part dropped
+    @test HK.check_factorisation(dropped, st, terms, g.pf, g.tables, g.aux) isa String
     @test HK.check_factorisation(g.lin, st, terms, g.pf, g.tables, g.aux) === true
+end
+
+"Factorised, equal to the nested path (≤ 1e-13) and to Gridap, without allocations."
+function factorised_ok(res, jac, U, V; scale=0.3)
+    x = randx(U; scale)
+    opf = with_factorise(() -> KernelOperator(res, jac, U, V), true)
+    opn = with_factorise(() -> KernelOperator(res, jac, U, V), false)
+    Af, An = jacobian(opf, x), jacobian(opn, x)
+    (:factorised in jac_paths(opf)) && norm(Af - An) <= 1e-13 * norm(An) &&
+        check(res, jac, U, V, x; op=opf).jac < 1e-12 && all(a -> a.bytes == 0, allocations(opf, x))
+end
+
+@testset "more forms that factorise: scalars, Hessians, several fields, data with a domain, inner ForwardDiff" begin
+    p = poisson_2d(order=2)
+    jA(u, du, v) = ∫((v * du) * (u * u) + (∇(v) ⋅ ∇(du)) / (1.0 + u * u) - (u * u) * (v * (du * u)))p.dΩ
+    @test factorised_ok((u, v) -> jA(u, u, v), jA, p.U, p.V)
+    jE(u, du, v) = ∫((∇∇(v) ⊙ ∇∇(du)) * (1.0 + u * u) + ((∇∇(v) ⋅ ∇(u)) ⋅ ∇(du)) * u)p.dΩ        # Hessian slots
+    @test factorised_ok((u, v) -> jE(u, u, v), jE, p.U, p.V)
+    c3 = coupled_3d()                    # parts with different slot sets sharing sub-expressions
+    jB((u, φ), (du, dφ), (v, vφ)) = ∫(((∇ ⋅ v) + vφ) * ((∇ ⋅ du) + dφ) * (1.0 + φ * φ) + ((∇ ⋅ v) * dφ) * (u ⋅ u) -
+                                       (vφ * (du ⋅ u)) / (2.0 + φ * φ) + (u ⋅ u) * ((∇(v) ⋅ u) ⋅ (∇(du)' ⋅ ∇(φ)) - (v ⋅ ∇(dφ)) * φ))c3.dΩ
+    @test factorised_ok((x, y) -> jB(x, x, y), jB, c3.U, c3.V)
+    e = elasticity_3d()
+    # an operation of the data defined only for positive values (the check samples random data: must not fall back)
+    ρh = interpolate(x -> 1.0 + x[1], FESpace(e.model, ReferenceFE(lagrangian, Float64, 1)))
+    simp(r) = r^1.5
+    jC(u, du, v) = ∫((simp ∘ ρh) * (∇(v)' ⊙ (dP_svk ∘ (Fk ∘ (∇(u)'), ∇(du)'))))e.dΩ
+    HK.reset_counters!()
+    @test factorised_ok((u, v) -> jC(u, u, v), jC, e.U, e.V; scale=0.05)
+    @test HK.counters().factorise_errors == 0
+    # an operation that differentiates with ForwardDiff inside a factor (its tags nest inside the factor's)
+    dP_ad(F, dF) = TensorValue{3,3}(Tuple(ForwardDiff.derivative(t -> SVector(P_svk(F + t * dF).data), 0.0)))
+    jI(u, du, v) = ∫(∇(v)' ⊙ (dP_ad ∘ (Fk ∘ (∇(u)'), ∇(du)')))e.dΩ
+    @test factorised_ok((u, v) -> jI(u, u, v), jI, e.U, e.V; scale=0.05)
+end
+
+@testset "a parameter or a term that is zero at construction, then update" begin
+    e = elasticity_3d()
+    w = VectorValue(0.3, -0.2, 0.1)
+    jac(c, k) = (u, du, v) -> ∫((c * ((∇(v) ⋅ w) ⋅ (∇(du) ⋅ w)) + (v ⋅ du)) / (1.0 + norm ∘ u))e.dΩ +
+                              k * ∫((∇(v) ⊙ ∇(du)) / (1.0 + norm ∘ u))e.dΩ
+    res(c, k) = (u, v) -> jac(c, k)(u, u, v)
+    op = KernelOperator(res(0.0, 0.0), jac(0.0, 0.0), e.U, e.V)
+    @test :factorised in jac_paths(op)
+    op2 = HK.update(op, res(2.5, 1.5), jac(2.5, 1.5))
+    @test :factorised in jac_paths(op2)
+    x = randx(e.U; scale=0.1)
+    @test check(res(2.5, 1.5), jac(2.5, 1.5), e.U, e.V, x; op=op2).jac < 1e-12
 end
 
 @testset "update: the factorised groups are rebound without new code" begin

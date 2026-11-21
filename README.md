@@ -57,8 +57,8 @@ backend for its drivers (`backend = :compiled`).
   depend on the state, the tangent at a quadrature point is built as T[i, j] = c·W(N(∂A/∂s_i, ∂B/∂r_j)) with one
   level of dual numbers instead of two (the stabilised SUPG/PSPG terms of the CFD formulations, for example). The generated
   code is checked at construction against the original integrand at random points; a group that does not take this
-  form, or fails the check, keeps the nested dual numbers. `HFK_FACTORISE=0` disables it and `HFK_DEBUG_FACTORISE=1`
-  prints why a group is not factorised.
+  form, or fails the check, keeps the nested dual numbers. `HFK_FACTORISE=0` disables it, `HFK_DEBUG_FACTORISE=1`
+  prints why a group is not factorised, and `linear_maps = false` (nested dual numbers everywhere) turns it off too.
 - **Threads, no allocations.** Cells are coloured so that the assembly loop is threaded without
   locks; element kernels allocate nothing (`allocations` reports it), which is also the
   requirement for GPU execution. The element buffers are kept in the operator, so a repeated

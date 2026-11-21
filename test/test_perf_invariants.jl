@@ -98,7 +98,8 @@ end
     x = randx(p.U); b = allocate_residual(op, x); A = allocate_jacobian(op, x)
     HK.reset_counters!()
     residual!(b, op, x); jacobian!(A, op, x)
-    @test HK.counters() == (update_fast=0, update_full=0, patterns_built=0, codegen=0, linear_maps_evaluated=0, fallback_assemblies=0)
+    @test HK.counters() == (update_fast=0, update_full=0, patterns_built=0, codegen=0, linear_maps_evaluated=0, fallback_assemblies=0,
+                            factorise_errors=0)
     # a weak form with a Gridap-assembled part: one fallback assembly per residual and per Jacobian
     s = product_gradient_problem(; order=1)
     fop = fallback_op(KernelOperator, s.res, s.jac, s.p.U, s.p.V)

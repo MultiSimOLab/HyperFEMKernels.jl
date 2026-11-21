@@ -164,7 +164,6 @@ function prepare_cells!(gds::Tuple{GroupData{D},GroupData{D}}, g::SkeletonGroup{
     tables, locs, pf = g.tables, g.locs, g.pf
     ndl = op.ndl
     xl = zeros(2ndl)
-    zsv = zero(SVector{NSV,Float64}); zsu = zero(SVector{NSU,Float64})
     hu = hess_use(g)
     curved = size(gp.Phi, 1) > 0
     for lf in lfacets
@@ -201,7 +200,6 @@ function prepare_cells!(gd::GroupData{D}, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,
     tables, locs, pf = g.tables, g.locs, g.pf
     xl = zeros(op.ndl)
     sg = zeros(op.ndl)
-    zsv = zero(SVector{NSV,Float64}); zsu = zero(SVector{NSU,Float64})
     hu = hess_use(g)
     curved = size(gd.Phi, 1) > 0
     for cell in cells

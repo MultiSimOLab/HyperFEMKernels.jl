@@ -4,7 +4,8 @@
 # The counters are incremented by operator-level calls (construction, `update`, pattern build, code generation,
 # assemblies of the Gridap part), never inside the loops over cells or points.
 
-const COUNTER_NAMES = (:update_fast, :update_full, :patterns_built, :codegen, :linear_maps_evaluated, :fallback_assemblies)
+const COUNTER_NAMES = (:update_fast, :update_full, :patterns_built, :codegen, :linear_maps_evaluated, :fallback_assemblies,
+                       :factorise_errors)
 const COUNTERS = NamedTuple{COUNTER_NAMES}(ntuple(_ -> Threads.Atomic{Int}(0), length(COUNTER_NAMES)))
 
 "Increment the counter `name` (one of `COUNTER_NAMES`)."
@@ -21,7 +22,9 @@ Work done since the last `reset_counters!()` (process-wide, all operators):
 - `codegen`: functions generated (element kernels, linear maps, state updaters);
 - `linear_maps_evaluated`: values of the linear maps of a group evaluated again in `update` (one per group with
   linear maps and rebind);
-- `fallback_assemblies`: assemblies of a part of the weak form by Gridap (hybrid fallback).
+- `fallback_assemblies`: assemblies of a part of the weak form by Gridap (hybrid fallback);
+- `factorise_errors`: Jacobian groups whose factorisation check threw an error (they keep the nested dual numbers;
+  a form outside the accepted ones does not count here).
 """
 counters() = NamedTuple{COUNTER_NAMES}(map(c -> c[], values(COUNTERS)))
 

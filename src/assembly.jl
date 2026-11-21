@@ -196,7 +196,8 @@ function verify_rebind(rebound::Vector{Any}, fresh::Vector{Any}, what::String)
         all(k -> a.pf.ops[k] == b.pf.ops[k], a.pf.consts) || error("HyperFEMKernels: rebind check ($what): parameters differ")
         typeof.(a.pf.ops) == typeof.(b.pf.ops) || error("HyperFEMKernels: rebind check ($what): operation types differ")
         typeof.(a.aux) == typeof.(b.aux) || error("HyperFEMKernels: rebind check ($what): auxiliary data types differ")
-        typeof(a.lin) == typeof(b.lin) || error("HyperFEMKernels: rebind check ($what): linear-map or factorised path differs")
+        ((a.lin === nothing) == (b.lin === nothing) && (a.lin isa FactorForm) == (b.lin isa FactorForm)) ||
+            error("HyperFEMKernels: rebind check ($what): linear-map or factorised path differs")
         a.lin === nothing && continue
         if a.lin isa FactorForm
             a.lin.expr == b.lin.expr || error("HyperFEMKernels: rebind check ($what): factorised tangent differs")
@@ -339,8 +340,12 @@ kernels. `res` and `jac` are written as for Gridap's `FEOperator`. Use [`update`
 
 With `linear_maps = true` (default) residual coefficients and tangents are obtained by applying
 precomputed linear maps to the state inputs of each term (no dual numbers) whenever the weak
-form allows it (see `linearmaps.jl`); otherwise, and with `linear_maps = false`, by exact
-differentiation with dual numbers.
+form allows it (see `linearmaps.jl`); otherwise Jacobian tangents whose terms are products of a test
+factor and a trial factor are built with one level of dual numbers (factorised, see `factorforms.jl`;
+`HFK_FACTORISE=0` disables it), and the rest by exact differentiation with nested dual numbers. With
+`linear_maps = false` every group takes the nested dual numbers (neither linear maps nor factorisation).
+`HFK_FACTORISE` is read when a group is compiled (construction, or an `update` that compiles again): an
+`update` of the same structure keeps the path of each group.
 
 The auxiliary data (fields that do not depend on the unknown, e.g. a previous state or an
 interpolated field) is evaluated into dense buffers owned by the operator — by the engine for FE
@@ -1286,8 +1291,6 @@ function element_jacobian!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}, xl
                            dNb) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF}
     fill!(KeT, 0.0)
     tables, locs, pf = g.tables, g.locs, g.pf
-    zsv = zero(SVector{NSV,Float64})
-    zsu = zero(SVector{NSU,Float64})
     hu = hess_use(g)
     cg = cell_geometry(g.geo, cell)          # Jt, inv(Jt) and the measure once if the cell is affine
     for q in 1:g.geo.np
@@ -1316,8 +1319,6 @@ function element_jacobian_mm!(KeT, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,LF,JF},
     fill!(KeT, 0.0)
     tables, locs, pf = g.tables, g.locs, g.pf
     np = g.geo.np
-    zsv = zero(SVector{NSV,Float64})
-    zsu = zero(SVector{NSU,Float64})
     hu = hess_use(g)
     cg = cell_geometry(g.geo, cell)          # Jt, inv(Jt) and the measure once if the cell is affine
     for q0 in 1:qb:np
