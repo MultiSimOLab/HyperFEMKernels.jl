@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Sparsity pattern by field blocks, as Gridap.** The Jacobian stored every (test, trial) pair of the local dofs of
+  every cell, also for pairs of fields that no term couples. It now stores a block only on the cells (and facets)
+  of the integrals that couple the two fields, decided from the structure of the captured form: the pattern is
+  Gridap's (colptr and rowval equal in the tests). Unstabilised Stokes loses the pressure–pressure block, and
+  couplings on a subdomain or a boundary reserve only those cells. `update` keeps the pattern when the new form
+  fits in it (a lost block keeps the matrices of the driver) and builds a new one when a block is added: a matrix
+  allocated before must be allocated again, and `jacobian!` now compares the structure of a matrix it has not seen
+  (once per matrix) and refuses one with another pattern, also when the number of nonzeros is the same. With a
+  Gridap-assembled (fallback) part the pattern keeps every block on every cell. A block without a term has no
+  stored diagonal, as in Gridap (ILU/SOR on such a block fail). Building the pattern costs the same as before
+  (elasticity Q1 40³: 0.517 → 0.511–0.520 s; u–p Q1–Q1 30³: 0.322–0.326 s both, nnz −7 %; Mac M5 Max, 4 threads).
 - **Cheaper `update` on small problems.** The values of the linear maps are re-evaluated at every `update` (exactly,
   as before) without dynamic dispatch: the slot counts and the kind reach the dual-number evaluation as type
   parameters. On HyperFEM's simulation tests (a few cells, two `update`s per load or time step) the compiled backend

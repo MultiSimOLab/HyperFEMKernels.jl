@@ -355,16 +355,43 @@ end
 # Sparsity: the cross blocks (plus rows × minus columns and the reverse) of every facet, and the
 # positions of the whole facet matrix (2ndl × 2ndl) in the nonzeros.
 
-"Add the keys `(col << 32) | row` of the cross blocks of the facets of `sd`."
-function skeleton_keys!(keys::Vector{UInt64}, sd::SkeletonData, grow::Matrix{Int32}, gcol::Matrix{Int32}, ndl::Int)
-    for f in 1:size(sd.cells, 2)
-        cp, cm = sd.cells[1, f], sd.cells[2, f]
-        for (crow, ccol) in ((cp, cm), (cm, cp)), jj in 1:ndl
-            c = gcol[jj, ccol]
-            c > 0 || continue
-            for ii in 1:ndl
-                r = grow[ii, crow]
-                r > 0 && push!(keys, (UInt64(c) << 32) | UInt64(r))
+"""
+Add the keys `(col << 32) | row` of the facets of `sd`: with `mask = nothing` the cross blocks (plus rows × minus
+columns and the reverse; the blocks of each cell come with the volume pattern); with a `2nf × 2nf` mask over (side,
+field) the blocks it marks, also those of one side with itself.
+"""
+function skeleton_keys!(keys::Vector{UInt64}, sd::SkeletonData, grow::Matrix{Int32}, gcol::Matrix{Int32}, ndl::Int;
+                        fields::Vector{FieldLayout}=FieldLayout[], mask=nothing)
+    if mask === nothing
+        for f in 1:size(sd.cells, 2)
+            cp, cm = sd.cells[1, f], sd.cells[2, f]
+            for (crow, ccol) in ((cp, cm), (cm, cp)), jj in 1:ndl
+                c = gcol[jj, ccol]
+                c > 0 || continue
+                for ii in 1:ndl
+                    r = grow[ii, crow]
+                    r > 0 && push!(keys, (UInt64(c) << 32) | UInt64(r))
+                end
+            end
+        end
+        return keys
+    end
+    nf = length(fields)
+    for j in axes(mask, 2), i in axes(mask, 1)
+        mask[i, j] || continue
+        si, fi = divrem(i - 1, nf) .+ (1, 1)          # side (1 plus, 2 minus) and field of the rows
+        sj, fj = divrem(j - 1, nf) .+ (1, 1)
+        rows = fields[fi].loc+1:fields[fi].loc+fields[fi].nd
+        cols = fields[fj].loc+1:fields[fj].loc+fields[fj].nd
+        for f in 1:size(sd.cells, 2)
+            crow, ccol = sd.cells[si, f], sd.cells[sj, f]
+            for jj in cols
+                c = gcol[jj, ccol]
+                c > 0 || continue
+                for ii in rows
+                    r = grow[ii, crow]
+                    r > 0 && push!(keys, (UInt64(c) << 32) | UInt64(r))
+                end
             end
         end
     end
@@ -387,8 +414,7 @@ function skeleton_positions!(sd::SkeletonData, grow::Matrix{Int32}, gcol::Matrix
                 ci, i = ii <= ndl ? (cells[1], ii) : (cells[2], ii - ndl)
                 r = grow[i, ci]
                 r > 0 || continue
-                p = searchsortedfirst(view(rowval, lo:hi), r) + lo - 1
-                nzpos[ii+(jj-1)*n2, f] = p
+                nzpos[ii+(jj-1)*n2, f] = stored_position(rowval, lo, hi, r)   # 0: a block without a term
             end
         end
     end

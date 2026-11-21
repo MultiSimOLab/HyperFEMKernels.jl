@@ -35,8 +35,8 @@ iteration, plus one per Dirichlet projection in HyperFEM's drivers); in between,
 applies the matrix-free product with the preconditioner of a previous iterate. With `every = 1` the
 preconditioner is exact at every iteration and the matrix-free product only saves the matrix–vector
 product's memory traffic. The inner solver should not lag on its own (`reuse = 1`). If the operator
-is rebound to one with another sparsity pattern (a hybrid-fallback or skeleton term appeared), the
-matrix and the inner setup are rebuilt.
+is rebound to one with another sparsity pattern (`update` with a form that adds a (test, trial) block, a
+hybrid-fallback or a skeleton term), the matrix and the inner setup are rebuilt.
 """
 struct LaggedAssembled{LS<:Algebra.LinearSolver} <: OperatorPreconditioner
     solver::LS

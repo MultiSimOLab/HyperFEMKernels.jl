@@ -208,8 +208,112 @@ its nonzeros (`nzpos`, `ndl² × ncells`). Built at construction with `jacobian 
 mutable struct Sparsity
     A0::Union{Nothing,SparseMatrixCSC{Float64,Int}}
     nzpos::Matrix{Int32}
+    spec::Any                    # `BlockSpec` the pattern is built from, or `nothing` (every block on every cell)
+    const checked::Vector{NTuple{2,WeakRef}}   # (colptr, rowval) of matrices known to have this pattern (`check_matrix`)
+    const lock::ReentrantLock
 end
-Sparsity() = Sparsity(nothing, zeros(Int32, 0, 0))
+Sparsity(spec=nothing) = Sparsity(nothing, zeros(Int32, 0, 0), spec, NTuple{2,WeakRef}[], ReentrantLock())
+
+"""
+Check that `A` has the sparsity pattern of `p` (built) before writing its nonzeros through the positions of `p`.
+Two patterns with the same size and number of nonzeros can differ (a block exchanged for another of the same
+size), so the structure is compared, once per matrix: a matrix that passed is remembered by its column pointers
+and row indices (weak references) and the next assemblies only compare identities.
+"""
+function check_matrix(A::SparseMatrixCSC, p::Sparsity)
+    A0 = p.A0::SparseMatrixCSC{Float64,Int}
+    size(A) == size(A0) && nnz(A) == nnz(A0) ||
+        error("HyperFEMKernels: the matrix ($(size(A)), $(nnz(A)) nonzeros) does not have the sparsity pattern of the operator ($(size(A0)), $(nnz(A0)))")
+    rv, cp = rowvals(A), SparseArrays.getcolptr(A)
+    rv === rowvals(A0) && cp === SparseArrays.getcolptr(A0) && return A
+    lock(p.lock) do
+        any(((wc, wr),) -> wc.value === cp && wr.value === rv, p.checked) && return
+        cp == SparseArrays.getcolptr(A0) && rv == rowvals(A0) ||
+            error("HyperFEMKernels: the matrix does not have the sparsity pattern of the operator (same size and number of " *
+                  "nonzeros, other structure: was it allocated for an operator before an `update` that changed the coupled blocks? " *
+                  "allocate it again with `allocate_jacobian`)")
+        _forget_dead!(p.checked)
+        push!(p.checked, (WeakRef(cp), WeakRef(rv)))
+    end
+    A
+end
+_forget_dead!(c) = filter!(((wc, wr),) -> wc.value !== nothing && wr.value !== nothing, c)
+"Remember `A` (a copy of the pattern of `p`) as checked."
+function register_matrix!(A::SparseMatrixCSC, p::Sparsity)
+    lock(p.lock) do
+        _forget_dead!(p.checked)
+        push!(p.checked, (WeakRef(SparseArrays.getcolptr(A)), WeakRef(rowvals(A))))
+    end
+    A
+end
+
+"""
+Blocks of the Jacobian that the pattern reserves, decided from the structure of the captured forms (never from
+values: a term multiplied by a number that is zero keeps its block). `cells`: per set of integration cells of the
+volume and boundary groups (one entry per triangulation, with the `cellmap` of its groups), a mask `nf × nf` of the
+(test field, trial field) pairs with a term. `skel`: per skeleton triangulation, a mask `2nf × 2nf` over
+(side, field), plus side first. Terms assembled by Gridap (fallback) are added with Gridap's own pattern.
+This is the pattern Gridap allocates: a (test, trial) pair of dofs is stored if some term couples their fields on a
+cell (or facet) they both belong to. With a Jacobian part assembled by Gridap (hybrid fallback) the operator keeps
+the pattern with every block on every cell (`spec = nothing`): the fallback part can change in `update` without
+changing the signature, and that pattern covers whatever it adds on the cells.
+"""
+struct BlockSpec
+    cells::Vector{Tuple{Triangulation,Vector{Int32},BitMatrix}}   # (triangulation, its cell map, mask)
+    skel::Vector{Tuple{Triangulation,BitMatrix}}
+end
+
+# fields (and sides) of the leaves of `role` in an expression
+function _block_leaves(n::Node, role::Symbol)
+    found = Leaf[]
+    _walk_leaves!(found, role, n)
+    found
+end
+
+"Mask of the (test, trial) blocks of `terms`: per additive part of each integrand, its test fields × its trial fields."
+function form_blocks(terms::Vector{Term}, nf::Int; skeleton::Bool=false)
+    n = skeleton ? 2nf : nf
+    m = falses(n, n)
+    # on a skeleton, index (side, field): plus side 1:nf, minus side nf+1:2nf (a leaf without a side counts on both)
+    idx(l) = !skeleton ? (l.field:l.field) : l.side === :plus ? (l.field:l.field) :
+             l.side === :minus ? (nf+l.field:nf+l.field) : (l.field:nf:nf+l.field)
+    for t in terms, (part, _) in split_sum(t.expr)
+        ts, us = _block_leaves(part, :test), _block_leaves(part, :trial)
+        for a in ts, b in us, i in idx(a), j in idx(b)
+            m[i, j] = true
+        end
+    end
+    m
+end
+
+"The `BlockSpec` of the Jacobian forms `jforms` compiled into `jgroups` (forms assembled by Gridap have no group: their pattern is Gridap's)."
+function block_spec(jforms::Vector{Form}, jgroups::Vector{Any}, nf::Int)
+    cells = Tuple{Triangulation,Vector{Int32},BitMatrix}[]
+    sk = Tuple{Triangulation,BitMatrix}[]
+    for form in jforms
+        k = findfirst(g -> g.trian === form.trian, jgroups)
+        k === nothing && continue
+        g = jgroups[k]
+        if g isa SkeletonGroup
+            m = form_blocks(form.terms, nf; skeleton=true)
+            e = findfirst(x -> x[1] === form.trian, sk)
+            e === nothing ? push!(sk, (form.trian, m)) : (sk[e][2] .|= m)
+        else
+            m = form_blocks(form.terms, nf)
+            e = findfirst(x -> x[1] === form.trian, cells)
+            e === nothing ? push!(cells, (form.trian, g.cellmap, m)) : (cells[e][3] .|= m)
+        end
+    end
+    BlockSpec(cells, sk)
+end
+
+"Whether the pattern built from `old` holds every entry the pattern of `new` would hold (same triangulations, masks ⊆)."
+covers(::Nothing, new) = true
+covers(old::BlockSpec, ::Nothing) = false
+function covers(old::BlockSpec, new::BlockSpec)
+    all(((tr, _, m),) -> any(((tr0, _, m0),) -> tr0 === tr && all(m .<= m0), old.cells), new.cells) &&
+        all(((tr, m),) -> any(((tr0, m0),) -> tr0 === tr && all(m .<= m0), old.skel), new.skel)
+end
 
 """
     KernelOperator(res, jac, U, V; nthreads = Threads.nthreads(), cache_aux = false, linear_maps = true,
@@ -533,7 +637,8 @@ function KernelOperator(res, jac, U::FESpace, V::FESpace; nthreads::Int=Threads.
     jgroups = compile_groups(jforms, U, locs, D, colors, rgroups; linear_maps, fallback=jfb, skel, fields, nrows=toff, ndl=loc)   # tables shared with the residual
     warn_fallback("residual", rfb); warn_fallback("Jacobian", jfb)
     fb = Fallback(Any[t for (t, _) in rfb], Any[t for (t, _) in jfb], SparseMatrixAssembler(U, V))
-    op = KernelOperator(res, jac, U, V, fields, loc, rgroups, jgroups, Sparsity(), colors, nthreads, cache_aux, linear_maps, fb, skel,
+    pattern = Sparsity(isempty(fb.jtrians) ? block_spec(jforms, jgroups, length(fields)) : nothing)
+    op = KernelOperator(res, jac, U, V, fields, loc, rgroups, jgroups, pattern, colors, nthreads, cache_aux, linear_maps, fb, skel,
                         any(has_signs, fields), jacobian, rsig, jsig, initial_dirichlet_values(U))
     jacobian === :assembled && build_pattern!(op)
     op
@@ -550,8 +655,10 @@ the ones `op` was built from (same measures, same operations and constants up to
 FE functions: see `signature`) — a load step, a new time step, another material parameter — every
 group is rebound (`rebind`): compiled code, tables, colouring, sparsity pattern, positions and the
 dense auxiliary buffers are reused and only the values change. Otherwise the groups are compiled
-again, reusing tables, geometry, colouring and, when the fallback and skeleton sets do not change, the
-sparsity pattern and positions. `HFK_CHECK_REBIND=1` compiles the fast path again from scratch and
+again, reusing tables, geometry, colouring and the sparsity pattern and positions when the new forms fit in
+the pattern (the same fallback and skeleton triangulations, no (test, trial) block added on a triangulation:
+a form that loses a block keeps the pattern and the matrices already allocated). A form that adds a block
+gets a new pattern: allocate the matrix again (`jacobian!` refuses one with another pattern). `HFK_CHECK_REBIND=1` compiles the fast path again from scratch and
 compares (debugging).
 
 Structure and values: the types of the operations of the form and of the functions of the coordinates
@@ -599,7 +706,10 @@ function update(op::KernelOperator, res, jac)
     jskel, jskel0 = jacobian_skeletons(skel, jgroups), jacobian_skeletons(op.skel, op.jgroups)
     same = length(fb.jtrians) == length(op.fallback.jtrians) && all(t -> any(s -> s === t, op.fallback.jtrians), fb.jtrians) &&
            length(jskel) == length(jskel0) && all(s -> any(t -> t.trian === s.trian, jskel0), jskel)
-    pattern = same ? op.pattern : Sparsity()
+    # the pattern is kept when the new forms fit in it (a form that loses a block keeps the matrices the driver
+    # allocated); a form that adds a block or cells gets a new pattern
+    spec = isempty(fb.jtrians) ? block_spec(jforms, jgroups, length(op.fields)) : nothing
+    pattern = same && covers(op.pattern.spec, spec) ? op.pattern : Sparsity(spec)
     newop = KernelOperator(res, jac, op.U, op.V, op.fields, op.ndl, rgroups, jgroups, pattern, op.colors, op.nthreads, op.cache_aux,
                            op.linear_maps, fb, skel, op.signed, op.jacobian, rsig, jsig, op.dvals)
     op.jacobian === :assembled && build_pattern!(newop)
@@ -620,7 +730,7 @@ function build_pattern!(op::KernelOperator)
     ncells = num_cells(get_triangulation(field_spaces(op.U)[1]))
     nrows, ncols = sum(num_free_dofs, field_spaces(op.V)), sum(num_free_dofs, field_spaces(op.U))
     A0, nzpos = sparsity(op.fields, op.ndl, ncells, nrows, ncols, fallback_pattern(op.fallback, op.U, op.V, op.jac);
-                         skel=jacobian_skeletons(op.skel, op.jgroups))
+                         skel=jacobian_skeletons(op.skel, op.jgroups), spec=p.spec)
     p.A0, p.nzpos = A0, nzpos
     p
 end
@@ -637,7 +747,7 @@ sparsity_pattern(op::KernelOperator) = build_pattern!(op).A0::SparseMatrixCSC{Fl
 nonzero_positions(op::KernelOperator) = build_pattern!(op).nzpos
 
 function sparsity(fields::Vector{FieldLayout}, ndl::Int, ncells::Int, nrows::Int, ncols::Int, extra=nothing;
-                  skel::Vector{SkeletonData}=SkeletonData[])
+                  skel::Vector{SkeletonData}=SkeletonData[], spec=nothing)
     grow = zeros(Int32, ndl, ncells)
     gcol = zeros(Int32, ndl, ncells)
     for fl in fields, cell in 1:ncells, j in 1:fl.nd
@@ -647,15 +757,9 @@ function sparsity(fields::Vector{FieldLayout}, ndl::Int, ncells::Int, nrows::Int
         gcol[fl.loc+j, cell] = c > 0 ? fl.trial_off + c : 0
     end
     keys = UInt64[]
-    sizehint!(keys, ncells * ndl * ndl)
-    for cell in 1:ncells, jj in 1:ndl
-        c = gcol[jj, cell]
-        c > 0 || continue
-        for ii in 1:ndl
-            r = grow[ii, cell]
-            r > 0 && push!(keys, (UInt64(c) << 32) | UInt64(r))
-        end
-    end
+    cmask = cell_block_mask(spec, length(fields), ncells)
+    full = cmask === nothing    # every (test, trial) pair of every cell: the plain pattern
+    full ? full_keys!(keys, grow, gcol, ndl, ncells) : block_keys!(keys, cmask, fields, grow, gcol, ncells)
     if extra !== nothing   # union with the pattern of the Gridap-assembled part
         rv, cp = rowvals(extra), SparseArrays.getcolptr(extra)
         for c in 1:ncols, p in cp[c]:cp[c+1]-1
@@ -663,7 +767,9 @@ function sparsity(fields::Vector{FieldLayout}, ndl::Int, ncells::Int, nrows::Int
         end
     end
     for sd in skel          # coupling between the two cells of every facet
-        skeleton_keys!(keys, sd, grow, gcol, ndl)
+        k = spec === nothing ? nothing : findfirst(x -> x[1] === sd.trian, spec.skel)
+        mask = k === nothing ? nothing : spec.skel[k][2]
+        skeleton_keys!(keys, sd, grow, gcol, ndl; fields, mask)
     end
     sort!(keys)
     unique!(keys)
@@ -683,6 +789,56 @@ function sparsity(fields::Vector{FieldLayout}, ndl::Int, ncells::Int, nrows::Int
         skeleton_positions!(sd, grow, gcol, ndl, colptr, rowval)
     end
     nzpos = zeros(Int32, ndl * ndl, ncells)
+    cell_positions!(nzpos, grow, gcol, ndl, ncells, colptr, rowval, Val(full))
+    A0, nzpos
+end
+
+"""
+Blocks of each cell (`nf² × ncells`): the union of the masks of the triangulations the cell belongs to, so that
+overlapping triangulations (volume and boundary, subdomains) add each key once; `nothing` when every block of
+every cell is set (or `spec === nothing`).
+"""
+function cell_block_mask(spec, nf::Int, ncells::Int)
+    spec === nothing && return nothing
+    cmask = falses(nf * nf, ncells)
+    for (_, cmap, m) in spec.cells, cell in cmap, k in eachindex(m)
+        m[k] && (cmask[k, cell] = true)
+    end
+    all(cmask) ? nothing : cmask
+end
+
+"Keys of every free (test, trial) pair of every cell."
+function full_keys!(keys::Vector{UInt64}, grow::Matrix{Int32}, gcol::Matrix{Int32}, ndl::Int, ncells::Int)
+    sizehint!(keys, ncells * ndl * ndl)
+    for cell in 1:ncells
+        cell_keys!(keys, grow, gcol, cell, 1:ndl, 1:ndl)
+    end
+    keys
+end
+
+"Keys of the blocks set in `cmask` on each cell."
+function block_keys!(keys::Vector{UInt64}, cmask::BitMatrix, fields::Vector{FieldLayout}, grow::Matrix{Int32},
+                     gcol::Matrix{Int32}, ncells::Int)
+    nf = length(fields)
+    n = 0
+    for k in 1:nf*nf
+        n += count(view(cmask, k, :)) * fields[mod1(k, nf)].nd * fields[fld1(k, nf)].nd
+    end
+    sizehint!(keys, n)
+    for cell in 1:ncells, fj in 1:nf, fi in 1:nf
+        cmask[fi+(fj-1)*nf, cell] || continue
+        cell_keys!(keys, grow, gcol, cell, fields[fi].loc+1:fields[fi].loc+fields[fi].nd,
+                   fields[fj].loc+1:fields[fj].loc+fields[fj].nd)
+    end
+    keys
+end
+
+"""
+Positions of the entries of every cell in the nonzeros. `FULL`: every free pair is stored (no membership test);
+otherwise a pair of a block without a term gets 0.
+"""
+function cell_positions!(nzpos::Matrix{Int32}, grow::Matrix{Int32}, gcol::Matrix{Int32}, ndl::Int, ncells::Int,
+                         colptr::Vector{Int}, rowval::Vector{Int}, ::Val{FULL}) where {FULL}
     Threads.@threads for cell in 1:ncells
         for jj in 1:ndl
             c = gcol[jj, cell]
@@ -691,12 +847,31 @@ function sparsity(fields::Vector{FieldLayout}, ndl::Int, ncells::Int, nrows::Int
             for ii in 1:ndl
                 r = grow[ii, cell]
                 r > 0 || continue
-                p = searchsortedfirst(view(rowval, lo:hi), r) + lo - 1
-                nzpos[ii+(jj-1)*ndl, cell] = p
+                nzpos[ii+(jj-1)*ndl, cell] = FULL ? searchsortedfirst(view(rowval, lo:hi), r) + lo - 1 :
+                                             stored_position(rowval, lo, hi, r)
             end
         end
     end
-    A0, nzpos
+    nzpos
+end
+
+"Add the keys `(col << 32) | row` of the free (rows × cols) pairs of the local dofs of `cell`."
+@inline function cell_keys!(keys::Vector{UInt64}, grow::Matrix{Int32}, gcol::Matrix{Int32}, cell, rows, cols)
+    for jj in cols
+        c = gcol[jj, cell]
+        c > 0 || continue
+        for ii in rows
+            r = grow[ii, cell]
+            r > 0 && push!(keys, (UInt64(c) << 32) | UInt64(r))
+        end
+    end
+    keys
+end
+
+"Position of row `r` in the stored rows `rowval[lo:hi]` of a column, or 0 if it is not stored."
+@inline function stored_position(rowval, lo::Int, hi::Int, r)
+    p = searchsortedfirst(view(rowval, lo:hi), r) + lo - 1
+    p <= hi && rowval[p] == r ? Int32(p) : Int32(0)
 end
 
 # ---------------------------------------------------------------------------------------------
@@ -704,7 +879,7 @@ end
 
 Algebra.allocate_residual(op::KernelOperator, x::AbstractVector) = zeros(sum(num_free_dofs, field_spaces(op.V)))
 Algebra.allocate_jacobian(op::KernelOperator, x::AbstractVector) =
-    op.jacobian === :matrixfree ? MatrixFreeJacobian(op) : copy(sparsity_pattern(op))
+    op.jacobian === :matrixfree ? MatrixFreeJacobian(op) : register_matrix!(copy(sparsity_pattern(op)), op.pattern)
 Algebra.zero_initial_guess(op::KernelOperator) = zeros(sum(num_free_dofs, field_spaces(op.U)))
 
 function Algebra.residual!(b::AbstractVector, op::KernelOperator, x::AbstractVector)
@@ -717,9 +892,8 @@ function Algebra.residual!(b::AbstractVector, op::KernelOperator, x::AbstractVec
 end
 
 function Algebra.jacobian!(A::SparseMatrixCSC, op::KernelOperator, x::AbstractVector)
-    A0 = sparsity_pattern(op)      # positions (cells and facets) exist even if `A` was not allocated by `op`
-    size(A) == size(A0) && nnz(A) == nnz(A0) ||
-        error("HyperFEMKernels: the matrix ($(size(A)), $(nnz(A)) nonzeros) does not have the sparsity pattern of the operator ($(size(A0)), $(nnz(A0)))")
+    build_pattern!(op)             # positions (cells and facets) exist even if `A` was not allocated by `op`
+    check_matrix(A, op.pattern)
     fill!(nonzeros(A), 0.0)
     dvals = refresh_dirichlet_values!(op)
     for g in op.jgroups

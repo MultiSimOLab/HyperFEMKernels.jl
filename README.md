@@ -216,6 +216,16 @@ jac((u, φ), (du, dφ), (v, vφ)) =
 op = KernelOperator(res, jac, U, V)       # U, V: MultiFieldFESpace
 ```
 
+The Jacobian's sparsity pattern is Gridap's: a (test field, trial field) block is stored only on the cells (and
+facets) of the integrals with a term that couples the two fields. In unstabilised Stokes the pressure–pressure
+block is not stored, and a coupling integrated on part of the domain or on a boundary only reserves those cells.
+The blocks follow from the structure of the form, not from values: a term multiplied by a number that is zero
+keeps its block. `update` keeps the pattern (and the matrices already allocated) when the new form fits in it,
+and builds a new one when it adds a block: allocate the matrix again (`jacobian!` checks the structure of a matrix
+it has not seen and refuses one with another pattern). With a Jacobian part assembled by Gridap (hybrid fallback)
+every block of every cell is stored, as before. As in Gridap, a block without a term has no stored diagonal
+(the pressure block of unstabilised Stokes): ILU or SOR preconditioners that need the diagonal fail there.
+
 ### With HyperFEM's drivers
 
 HyperFEM selects the assembly backend with a keyword; everything else in the simulation (models,
