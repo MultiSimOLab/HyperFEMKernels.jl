@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **Cheaper `update` on small problems.** The values of the linear maps are re-evaluated at every `update` (exactly,
+  as before) without dynamic dispatch: the slot counts and the kind reach the dual-number evaluation as type
+  parameters. On HyperFEM's simulation tests (a few cells, two `update`s per load or time step) the compiled backend
+  is up to 25 % faster than with 0.2.5 (none slower) and no longer slower than Gridap on `ViscoElastic` (Mac M5 Max, Julia 1.13.0,
+  1 and 4 threads); large problems are unchanged.
+- **Fewer tasks for small meshes.** FE functions and functions of the coordinates in the form are filled with at
+  least `HFK_AUX_WORK_PER_TASK` quadrature points per task (default 512): no task below that, one per thread from
+  `512 × nthreads` points on, as before. Auxiliary data evaluated by Gridap and `update_states!` are unchanged.
+
 ## 0.2.5
 
 - **Symmetric tensors in the linear maps.** The number of components of a state input or parameter was taken as

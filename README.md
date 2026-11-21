@@ -63,7 +63,9 @@ backend for its drivers (`backend = :compiled`).
   again, for operators built afterwards): `HFK_MATRIX_PRODUCTS` (`1`/`0`, element residual and Jacobian as
   matrix products on node-contiguous fields), `HFK_WORK_PER_TASK` (minimum work per task, default 20000),
   `HFK_POINT_BLOCK` (points per block of the matrix-product Jacobian, default 12, 0 = all),
-  `HFK_AFFINE_GEOMETRY` (`1`/`0`, geometry once per affine cell).
+  `HFK_AFFINE_GEOMETRY` (`1`/`0`, geometry once per affine cell), `HFK_AUX_WORK_PER_TASK` (minimum quadrature
+  points per task when the engine fills FE functions and functions of x, default 512: small meshes are filled
+  without tasks; data evaluated by Gridap keeps one task per thread).
 - **Cheap updates.** Numbers in the weak form (load factors, time steps, material parameters) are
   run-time parameters: `update(op, res, jac)` with forms of the same structure (same measures,
   operations and constants up to their values, same FE functions, functions of the coordinates of
