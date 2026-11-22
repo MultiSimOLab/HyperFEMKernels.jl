@@ -168,28 +168,30 @@ function factor_code(terms::Vector{Term}, pf::PointForm)
             (p, S)
         end
     end
-    acc = Expr[]
+    # Every entry of the tangent is written out: T[SA[a], SB[b]] gets C·W(N(PA[a], PB[b])) from each part (literal
+    # a, b). Immutable values only and no closures in the generated body (a mutable accumulator or an inner closure
+    # relies on the compiler to stay off the heap, which it does not on every platform).
+    entries = [Any[] for _ in 1:nsv*nsu]
     for (ip, p) in enumerate(parts)
         PA, SA = emit_factor!(p.test, :test)
         PB, SB = emit_factor!(p.trial, :trial)
         kN = op_index!(st, p.prod.f)
-        x = p.test_first ? :(ops[$kN]($PA[a], $PB[b])) : :(ops[$kN]($PB[b], $PA[a]))
-        for (w, i) in reverse(p.wraps)
-            wargs = Any[j == i ? x : emit_node!(st, w.args[j]) for j in eachindex(w.args)]
-            x = :(ops[$(op_index!(st, w.f))]($(wargs...)))
+        wsyms = map(reverse(p.wraps)) do (w, i)
+            (op_index!(st, w.f), i, Any[j == i ? nothing : emit_node!(st, w.args[j]) for j in eachindex(w.args)])
         end
-        push!(acc, quote
-            for b in 1:$(length(SB)), a in 1:$(length(SA))
-                @inbounds T[$(Tuple(SA))[a], $(Tuple(SB))[b]] += C[$ip] * $x
+        for (jb, j) in enumerate(SB), (ia, i) in enumerate(SA)
+            x = p.test_first ? :(ops[$kN]($PA[$ia], $PB[$jb])) : :(ops[$kN]($PB[$jb], $PA[$ia]))
+            for (kw, iw, wargs) in wsyms
+                x = :(ops[$kw]($((k == iw ? x : a for (k, a) in enumerate(wargs))...)))
             end
-        end)
+            push!(entries[i+(j-1)*nsv], :(C[$ip] * $x))
+        end
     end
+    tex = Any[isempty(e) ? 0.0 : length(e) == 1 ? e[1] : Expr(:call, :+, e...) for e in entries]
     ex = :((ops, C, FV, A) -> begin
         $(pre...)
         $(st.body...)
-        T = zero(MMatrix{$nsv,$nsu,Float64,$(nsv * nsu)})
-        $(acc...)
-        return SMatrix{$nsv,$nsu,Float64,$(nsv * nsu)}(T)
+        return SMatrix{$nsv,$nsu,Float64,$(nsv * nsu)}(($(tex...),))
     end)
     (ex, Tuple(st.ops), Tuple(pcoefs), st.consts, st)
 end
