@@ -1,4 +1,5 @@
 [![CI](https://github.com/MultiSimOLab/HyperFEMKernels.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/MultiSimOLab/HyperFEMKernels.jl/actions/workflows/CI.yml?branch=main)
+[![Coverage](https://codecov.io/gh/MultiSimOLab/HyperFEMKernels.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/MultiSimOLab/HyperFEMKernels.jl)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 # HyperFEMKernels.jl
