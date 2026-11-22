@@ -2,8 +2,7 @@
 # assemblies, type stability of the element kernels and the work done by `update`. A change of path or a new
 # allocation shows up here as a test failure (and in the diff of the expected tables), before any timing.
 # Introspection: `HyperFEMKernels.work_summary(op)`, `HyperFEMKernels.counters()` (src/introspection.jl).
-# Uses problems of other test files that run before this one: `oseen_channel` (test_cfd.jl), `product_gradient_problem`
-# and `fallback_op` (test_fallback.jl).
+# Uses the shared problems of common.jl: `oseen_channel`, `product_gradient_problem` and `fallback_op`.
 
 paths(op) = [(g.kind, g.domain, g.path) for g in HK.work_summary(op).groups]
 
