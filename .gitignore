@@ -5,6 +5,7 @@ Manifest-v*.toml
 *.jl.mem
 /docs/build/
 /benchmark/results/
+/benchmark/gate/env/
 *.vtu
 *.pvd
 .DS_Store

@@ -191,7 +191,7 @@ end
 
 function PointForm(terms::Vector{Term}; nf::Int=0)
     ex, ops, coefs, test, trial, aux, consts = pointform_parts(terms, nf)
-    core = RuntimeGeneratedFunction(@__MODULE__, @__MODULE__, ex)
+    core = generated(ex)
     PointForm(core, ops, coefs, test, trial, aux, consts, ex, nf)
 end
 

@@ -166,7 +166,7 @@ end
 function rebind(g::Group, terms::Vector{Term})
     pf = PointForm(terms, g.pf)
     aux = Tuple(engine_aux(a.array, g.geo, () -> group_columns(g.colors), eachindex(g.cellmap)) for a in pf.aux)
-    lin = g.lin === nothing ? nothing : LinearForm(terms, pf, g.tables, aux, g.lin)
+    lin = g.lin === nothing ? nothing : (bump!(:linear_maps_evaluated); LinearForm(terms, pf, g.tables, aux, g.lin))
     typeof(g)(pf, lin, g.locs, g.tables, g.use, g.rb, g.geo, aux, g.smv, g.smu, g.trian, g.xq, g.auxcache, g.cellmap, g.colors, g.wkey, g.work)
 end
 
@@ -581,11 +581,13 @@ fallback_jacobian_dc(op, x) = restrict(op.jac(FEFunction(op.U, x), get_trial_fe_
 
 function fallback_residual!(b, op, x)
     isempty(op.fallback.rtrians) && return b
+    bump!(:fallback_assemblies)
     assemble_vector_add!(b, op.fallback.assem, collect_cell_vector(op.V, fallback_residual_dc(op, x)))
     b
 end
 function fallback_jacobian!(A, op, x)
     isempty(op.fallback.jtrians) && return A
+    bump!(:fallback_assemblies)
     assemble_matrix_add!(A, op.fallback.assem, collect_cell_matrix(op.U, op.V, fallback_jacobian_dc(op, x)))
     A
 end
@@ -692,9 +694,11 @@ function update(op::KernelOperator, res, jac)
             verify_rebind(jgroups, compile_groups(jforms, op.U, locs, D, op.colors, prev; linear_maps=lm, fallback=copy(jfb), skel,
                                                   previous_skel=op.skel, fields=op.fields, nrows, ndl=op.ndl), "Jacobian")
         end
+        bump!(:update_fast)
         return KernelOperator(res, jac, op.U, op.V, op.fields, op.ndl, rgroups, jgroups, op.pattern, op.colors, op.nthreads, op.cache_aux,
                               op.linear_maps, op.fallback, op.skel, op.signed, op.jacobian, rsig, jsig, op.dvals)
     end
+    bump!(:update_full)
     nrows = sum(num_free_dofs, field_spaces(op.V))
     skel = SkeletonData[]
     rgroups = compile_groups(rforms, op.U, locs, D, op.colors, prev; linear_maps=lm, fallback=rfb, skel, previous_skel=op.skel,
@@ -727,6 +731,7 @@ end
 function build_pattern!(op::KernelOperator)
     p = op.pattern
     p.A0 === nothing || return p
+    bump!(:patterns_built)
     ncells = num_cells(get_triangulation(field_spaces(op.U)[1]))
     nrows, ncols = sum(num_free_dofs, field_spaces(op.V)), sum(num_free_dofs, field_spaces(op.U))
     A0, nzpos = sparsity(op.fields, op.ndl, ncells, nrows, ncols, fallback_pattern(op.fallback, op.U, op.V, op.jac);

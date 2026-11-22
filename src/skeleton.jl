@@ -201,7 +201,7 @@ end
 function rebind(g::SkeletonGroup, terms::Vector{Term})
     pf = PointForm(terms, g.pf)
     aux = Tuple(engine_aux(a.array, g.geo, () -> eachindex(g.facets), g.facets) for a in pf.aux)
-    lin = g.lin === nothing ? nothing : LinearForm(terms, pf, g.tables, aux, g.lin)
+    lin = g.lin === nothing ? nothing : (bump!(:linear_maps_evaluated); LinearForm(terms, pf, g.tables, aux, g.lin))
     typeof(g)(pf, lin, g.locs, g.tables, g.use, g.geo, g.geom, aux, g.smv, g.smu, g.trian, g.key, g.auxcache, g.facets, g.skel, g.colors, g.wkey, g.work)
 end
 
