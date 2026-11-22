@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.6
 
 - **Factorised Jacobians.** A Jacobian term of the form c·W(N(A, B)), with A depending only on the test function,
   B only on the trial function, N one of ⋅, ⊙, * and c, W multipliers and divisors that depend on the state (sums
