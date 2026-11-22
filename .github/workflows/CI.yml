@@ -38,6 +38,10 @@ jobs:
     name: Julia ${{ matrix.version }} - ${{ matrix.os }}
     needs: changes
     if: needs.changes.outputs.code == 'true'
+    permissions:
+      actions: write
+      contents: read
+      id-token: write
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
@@ -63,12 +67,16 @@ jobs:
         if: matrix.version == '1' && matrix.os == 'ubuntu-latest'
         with:
           files: lcov.info
-          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true  # GitHub OIDC identity: no upload token needed
           fail_ci_if_error: false
   test-extended:
     name: Extended tests - Julia ${{ matrix.version }} - ${{ matrix.os }}
     needs: changes
     if: needs.changes.outputs.code == 'true'
+    permissions:
+      actions: write
+      contents: read
+      id-token: write
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
@@ -94,12 +102,16 @@ jobs:
         if: matrix.version == '1' && matrix.os == 'ubuntu-latest'
         with:
           files: lcov.info
-          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true  # GitHub OIDC identity: no upload token needed
           fail_ci_if_error: false
   test-hdiv:
     name: H(div) tests - Julia ${{ matrix.version }} - ${{ matrix.os }}
     needs: changes
     if: needs.changes.outputs.code == 'true'
+    permissions:
+      actions: write
+      contents: read
+      id-token: write
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
@@ -125,12 +137,16 @@ jobs:
         if: matrix.version == '1' && matrix.os == 'ubuntu-latest'
         with:
           files: lcov.info
-          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true  # GitHub OIDC identity: no upload token needed
           fail_ci_if_error: false
   test-hessian:
     name: Hessian tests - Julia ${{ matrix.version }} - ${{ matrix.os }}
     needs: changes
     if: needs.changes.outputs.code == 'true'
+    permissions:
+      actions: write
+      contents: read
+      id-token: write
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
@@ -156,7 +172,7 @@ jobs:
         if: matrix.version == '1' && matrix.os == 'ubuntu-latest'
         with:
           files: lcov.info
-          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true  # GitHub OIDC identity: no upload token needed
           fail_ci_if_error: false
   hyperfem:
     name: HyperFEM weak forms - Julia ${{ matrix.version }}
