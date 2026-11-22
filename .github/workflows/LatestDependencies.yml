@@ -19,7 +19,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}   # never cancel a scheduled run
 jobs:
-  # Same three groups as the CI workflow (HFK_TEST_GROUP, see test/runtests.jl), on one platform.
+  # Same four groups as the CI workflow (HFK_TEST_GROUP, see test/runtests.jl), on one platform.
   test:
     name: ${{ matrix.group }} tests - Julia 1
     runs-on: ubuntu-latest
@@ -27,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [core, hdiv, hessian]
+        group: [core, extended, hdiv, hessian]
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2

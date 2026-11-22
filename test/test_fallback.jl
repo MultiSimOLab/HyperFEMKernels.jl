@@ -7,18 +7,6 @@
 # them, so the integrals on that triangulation (not the whole weak form) go to Gridap: correct, with
 # no speed-up on that triangulation. Skeleton integrals (jump/mean) are not a fallback case: see
 # test_skeleton.jl.
-"Builds an operator whose form is deliberately sent to Gridap, capturing the fallback warnings (they are expected here, not noise for the test log)."
-fallback_op(f, args...) = @test_logs (:warn, r"assembled by Gridap") match_mode = :any f(args...)
-
-function product_gradient_problem(; order=1, simplex=false, n=(5, 4))
-    p = poisson_2d(; n, order, simplex)
-    Λ = SkeletonTriangulation(p.model); dΛ = Measure(Λ, 2order)
-    γ = 10.0
-    # the skeleton term makes the Gridap-assembled pattern larger than the kernel's cell pattern
-    res(u, v) = ∫(∇(v) ⋅ ∇(u) - 2.0 * v + ∇(v) ⋅ ∇(u * u))p.dΩ + ∫(γ * jump(v) * jump(u))dΛ
-    jac(u, du, v) = ∫(∇(v) ⋅ ∇(du) + 2.0 * (∇(v) ⋅ ∇(du * u)))p.dΩ + ∫(γ * jump(v) * jump(du))dΛ
-    (; p, Λ, dΛ, res, jac)
-end
 
 @testset "differential operator on a product with the unknown: its triangulation to Gridap, the skeleton compiled" begin
     for order in (1, 2), simplex in (false, true)

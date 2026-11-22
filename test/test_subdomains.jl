@@ -5,17 +5,6 @@
 
 nofallback_sub(op) = isempty(op.fallback.rtrians) && isempty(op.fallback.jtrians)
 
-"Model (0,2)×(0,1); active region Ωd without the top row of cells, split at x = 1 into Ωa (left) and Ωb (right)."
-function two_subdomains(; n=(8, 4))
-    model = CartesianDiscreteModel((0, 2, 0, 1), n)
-    cc = [sum(c) / length(c) for c in get_cell_coordinates(model)]
-    dom = [x[2] < 0.75 for x in cc]
-    Ωd = Triangulation(model, dom)
-    Ωa = Triangulation(model, [d && x[1] < 1 for (d, x) in zip(dom, cc)])
-    Ωb = Triangulation(model, [d && x[1] >= 1 for (d, x) in zip(dom, cc)])
-    (; model, Ωd, Ωa, Ωb)
-end
-
 κa(g) = (1 + g ⋅ g) * g                    # nonlinear "solid" law on Ωa
 dκa(g, dg) = (1 + g ⋅ g) * dg + 2 * (g ⋅ dg) * g
 

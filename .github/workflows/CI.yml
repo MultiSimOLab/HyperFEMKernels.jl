@@ -30,9 +30,10 @@ jobs:
               - '!**/*.md'
               - '!docs/**'
               - '!LICENSE'
-  # The engine tests run in three groups (HFK_TEST_GROUP, see test/runtests.jl) so that each job stays
-  # well below the time limit: `test` runs everything but the H(div) and Hessian tests, `test-hdiv` the
-  # H(div) tests, `test-hessian` the second-derivative (∇∇) tests.
+  # The engine tests run in four groups (HFK_TEST_GROUP, see test/runtests.jl) so that each job stays
+  # well below the time limit: `test` the core files (up to test_update.jl), `test-extended` the files
+  # after them (solvers, spaces, states, Gridap equality…), `test-hdiv` the H(div) tests, `test-hessian`
+  # the second-derivative (∇∇) tests.
   test:
     name: Julia ${{ matrix.version }} - ${{ matrix.os }}
     needs: changes
@@ -55,6 +56,28 @@ jobs:
         env:
           JULIA_NUM_THREADS: 2
           HFK_TEST_GROUP: core
+  test-extended:
+    name: Extended tests - Julia ${{ matrix.version }} - ${{ matrix.os }}
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ['1.12', '1']
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.version }}
+      - uses: julia-actions/cache@v2
+      - uses: julia-actions/julia-buildpkg@v1
+      - uses: julia-actions/julia-runtest@v1
+        env:
+          JULIA_NUM_THREADS: 2
+          HFK_TEST_GROUP: extended
   test-hdiv:
     name: H(div) tests - Julia ${{ matrix.version }} - ${{ matrix.os }}
     needs: changes
@@ -131,16 +154,16 @@ jobs:
   ci:
     name: CI
     if: always()
-    needs: [changes, test, test-hdiv, test-hessian, hyperfem]
+    needs: [changes, test, test-extended, test-hdiv, test-hessian, hyperfem]
     runs-on: ubuntu-latest
     steps:
       - name: Check results
         run: |
           echo "code changed: ${{ needs.changes.outputs.code }}"
-          echo "test: ${{ needs.test.result }}, test-hdiv: ${{ needs.test-hdiv.result }}, test-hessian: ${{ needs.test-hessian.result }}, hyperfem: ${{ needs.hyperfem.result }}"
+          echo "test: ${{ needs.test.result }}, test-extended: ${{ needs.test-extended.result }}, test-hdiv: ${{ needs.test-hdiv.result }}, test-hessian: ${{ needs.test-hessian.result }}, hyperfem: ${{ needs.hyperfem.result }}"
           [ "${{ needs.changes.result }}" = success ] || exit 1
           if [ "${{ needs.changes.outputs.code }}" = true ]; then
-            [ "${{ needs.test.result }}" = success ] && [ "${{ needs.test-hdiv.result }}" = success ] && [ "${{ needs.test-hessian.result }}" = success ] && [ "${{ needs.hyperfem.result }}" = success ] || exit 1
+            [ "${{ needs.test.result }}" = success ] && [ "${{ needs.test-extended.result }}" = success ] && [ "${{ needs.test-hdiv.result }}" = success ] && [ "${{ needs.test-hessian.result }}" = success ] && [ "${{ needs.hyperfem.result }}" = success ] || exit 1
           else
-            [ "${{ needs.test.result }}" = skipped ] && [ "${{ needs.test-hdiv.result }}" = skipped ] && [ "${{ needs.test-hessian.result }}" = skipped ] && [ "${{ needs.hyperfem.result }}" = skipped ] || exit 1
+            [ "${{ needs.test.result }}" = skipped ] && [ "${{ needs.test-extended.result }}" = skipped ] && [ "${{ needs.test-hdiv.result }}" = skipped ] && [ "${{ needs.test-hessian.result }}" = skipped ] && [ "${{ needs.hyperfem.result }}" = skipped ] || exit 1
           fi
