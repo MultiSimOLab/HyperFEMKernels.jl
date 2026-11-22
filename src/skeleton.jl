@@ -153,6 +153,9 @@ function SkeletonGroup(terms::Vector{Term}, trian::Triangulation, Uspaces, locs,
     any(a -> a isa StateColumns, aux) && error("HyperFEMKernels: internal variables (KernelState) on a skeleton are not supported yet")
     AUX = Tuple{(Matrix{eltype(eltype(a))} for a in aux)...}
     lin = linear_maps ? LinearForm(terms, pf, tables, aux, pf.trial.nslots == 0 ? :res : :jac) : nothing
+    if lin === nothing && linear_maps && pf.trial.nslots > 0 && FACTORISE[]     # Jacobian not linear in its inputs
+        lin = FactorForm(terms, pf, tables, aux)
+    end
     # colours of the skeleton restricted to the class, in local indices
     pos = zeros(Int32, num_cells(trian))
     for (i, f) in enumerate(cls.facets)
@@ -201,7 +204,7 @@ end
 function rebind(g::SkeletonGroup, terms::Vector{Term})
     pf = PointForm(terms, g.pf)
     aux = Tuple(engine_aux(a.array, g.geo, () -> eachindex(g.facets), g.facets) for a in pf.aux)
-    lin = g.lin === nothing ? nothing : (bump!(:linear_maps_evaluated); LinearForm(terms, pf, g.tables, aux, g.lin))
+    lin = rebind_lin(g.lin, terms, pf, g.tables, aux)
     typeof(g)(pf, lin, g.locs, g.tables, g.use, g.geo, g.geom, aux, g.smv, g.smu, g.trian, g.key, g.auxcache, g.facets, g.skel, g.colors, g.wkey, g.work)
 end
 
@@ -293,8 +296,6 @@ function element_jacobian!(KeT, g::SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D,NF2,L
                            Wb) where {NSV,NSU,PF,TT,AUX,SV,SU,D,NF2,LF}
     fill!(KeT, 0.0)
     tables, locs, pf = g.tables, g.locs, g.pf
-    zsv = zero(SVector{NSV,Float64})
-    zsu = zero(SVector{NSU,Float64})
     hu = hess_use(g)
     cgs = cell_geometries(g, lf)
     for q in 1:g.geo.np
@@ -302,11 +303,7 @@ function element_jacobian!(KeT, g::SkeletonGroup{NSV,NSU,PF,TT,AUX,SV,SU,D,NF2,L
         map((t, W, iJ, Φ, sv, su) -> point_weights!(W, t, q, iJ, nothing, Φ, hess_weights(sv, su)), tables, Wb, iJs, Φs, g.smv, g.smu)
         FV = field_values_sides(tables, locs, g.use, xl, q, iJs, Φs)
         Aq = map(a -> @inbounds(a[q, lf]), auxd)
-        T = if LF === Nothing
-            ForwardDiff.jacobian(r -> ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsv), zsu)   # T[test slot, trial slot]
-        else
-            SMatrix{NSV,NSU,Float64,NSV * NSU}(apply_maps(g.lin, g.lin.state(g.lin.ops, FV, Aq), Val(NSV * NSU)))
-        end
+        T = point_tangent(g.lin, pf, FV, Aq, Val(NSV), Val(NSU))   # T[test slot, trial slot]
         map((tf, lf_, smf, bf) -> map((tg, lg, smg, bg) ->
                 contract_jacobian!(KeT, tf, lf_, smf, bf, tg, lg, smg, bg, T, dS),
                 tables, locs, g.smu, Wb),

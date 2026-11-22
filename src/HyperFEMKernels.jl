@@ -20,6 +20,7 @@ module HyperFEMKernels
 using LinearAlgebra
 using LinearAlgebra: BLAS
 using SparseArrays
+using Random: Random
 using StaticArrays
 using ForwardDiff
 using RuntimeGeneratedFunctions
@@ -58,6 +59,7 @@ include("tables.jl")
 include("fefunctions.jl")
 include("coordfunctions.jl")
 include("linearmaps.jl")
+include("factorforms.jl")
 include("kernels.jl")
 include("assembly.jl")
 include("coloring.jl")

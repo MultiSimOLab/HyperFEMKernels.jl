@@ -164,7 +164,6 @@ function prepare_cells!(gds::Tuple{GroupData{D},GroupData{D}}, g::SkeletonGroup{
     tables, locs, pf = g.tables, g.locs, g.pf
     ndl = op.ndl
     xl = zeros(2ndl)
-    zsv = zero(SVector{NSV,Float64}); zsu = zero(SVector{NSU,Float64})
     hu = hess_use(g)
     curved = size(gp.Phi, 1) > 0
     for lf in lfacets
@@ -177,11 +176,7 @@ function prepare_cells!(gds::Tuple{GroupData{D},GroupData{D}}, g::SkeletonGroup{
             iJp, iJm = iJs[1], iJs[end]
             FV = field_values_sides(tables, locs, g.use, xl, q, iJs, Φs)
             Aq = map(a -> @inbounds(a[q, lf]), auxd)
-            T = if LF === Nothing
-                ForwardDiff.jacobian(r -> ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsv), zsu)
-            else
-                SMatrix{NSV,NSU,Float64,NSV * NSU}(apply_maps(g.lin, g.lin.state(g.lin.ops, FV, Aq), Val(NSV * NSU)))
-            end
+            T = point_tangent(g.lin, pf, FV, Aq, Val(NSV), Val(NSU))
             @inbounds for i in 1:NSV*NSU
                 gp.T[i, q, lf] = T[i]
             end
@@ -205,7 +200,6 @@ function prepare_cells!(gd::GroupData{D}, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,
     tables, locs, pf = g.tables, g.locs, g.pf
     xl = zeros(op.ndl)
     sg = zeros(op.ndl)
-    zsv = zero(SVector{NSV,Float64}); zsu = zero(SVector{NSU,Float64})
     hu = hess_use(g)
     curved = size(gd.Phi, 1) > 0
     for cell in cells
@@ -218,11 +212,7 @@ function prepare_cells!(gd::GroupData{D}, g::Group{NSV,NSU,PF,TT,AUX,SV,SU,D,NF,
             Φ = point_curvature(g.geo, cg, q, cell, hu)
             FV = field_values(tables, locs, g.use, xl, q, iJt, Jt, Φ)
             Aq = map(a -> @inbounds(a[q, cell]), auxd)
-            T = if LF === Nothing
-                ForwardDiff.jacobian(r -> ForwardDiff.gradient(s -> pf.core(pf.ops, pf.coefs, FV, Aq, s, r), zsv), zsu)
-            else
-                SMatrix{NSV,NSU,Float64,NSV * NSU}(apply_maps(g.lin, g.lin.state(g.lin.ops, FV, Aq), Val(NSV * NSU)))
-            end
+            T = point_tangent(g.lin, pf, FV, Aq, Val(NSV), Val(NSU))
             @inbounds for i in 1:NSV*NSU
                 gd.T[i, q, cell] = T[i]
             end

@@ -43,7 +43,7 @@ end
     e = elasticity_3d()
     op = KernelOperator(e.res, e.jac, e.U, e.V)
     @test all(g -> g.lin !== nothing, op.rgroups)      # linear in P(F)
-    @test all(g -> g.lin === nothing, op.jgroups)      # dP(F, dF): no single state input
+    @test all(g -> !(g.lin isa HK.LinearForm), op.jgroups)   # dP(F, dF): no single state input (factorised instead)
     # analytic tangent as a 4th-order tensor: Jacobian qualifies
     Cof(F) = C_svk()                                     # state-dependent in general; constant here
     jacC(u, du, v) = ∫(∇(v)' ⊙ (dbl_contract ∘ (Cof ∘ (Fk ∘ (∇(u)')), ∇(du)')))e.dΩ

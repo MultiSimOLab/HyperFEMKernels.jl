@@ -109,8 +109,9 @@ struct CodegenState
     subst::IdDict{Any,Any}   # nodes replaced by a given expression (e.g. a symbol)
     consts::Vector{Int}      # positions in `ops` that hold numbers of the integrand (parameters)
     nf::Int                  # number of fields: on a skeleton FV holds the plus cells first, then the minus cells
+    constnodes::Vector{Any}  # the `Const` node of each parameter (same order as `consts`)
 end
-CodegenState(test, trial, aux, nf::Int=0) = CodegenState(Any[], Expr[], Dict{Any,Symbol}(), test, trial, aux, IdDict{Any,Any}(), Int[], nf)
+CodegenState(test, trial, aux, nf::Int=0) = CodegenState(Any[], Expr[], Dict{Any,Symbol}(), test, trial, aux, IdDict{Any,Any}(), Int[], nf, Any[])
 
 "Emit a node, honouring substitutions."
 emit_node!(st::CodegenState, n::Node) = haskey(st.subst, n) ? st.subst[n] : emit!(st, n)
@@ -137,6 +138,7 @@ function emit!(st::CodegenState, n::Const)
     push!(st.ops, n.value)
     k = length(st.ops)
     push!(st.consts, k)
+    push!(st.constnodes, n)
     :(ops[$k])
 end
 
